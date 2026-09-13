@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "bun src/agent.ts"
+    "start": "bun src/agent.ts",
+    "test:agency": "node --experimental-strip-types --test tests/agency/*.test.ts"
   }
 }
