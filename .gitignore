@@ -1,0 +1,12 @@
+data/
+logs/
+.tmp-*/
+*.log
+*.jsonl
+*.sqlite
+.env
+node_modules/
+dist/
+build/
+agents/advanced/data/
+agents/advanced/logs/

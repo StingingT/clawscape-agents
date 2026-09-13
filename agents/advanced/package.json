@@ -1,0 +1,16 @@
+{
+  "name": "clawscape-autonomous-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "bun test",
+    "check": "tsc --noEmit",
+    "demo": "bun src/cli.ts demo",
+    "status": "bun src/cli.ts status",
+    "audit": "bun scripts/audit.ts",
+    "evaluate": "bun scripts/evaluate.ts"
+  },
+  "dependencies": { "zod": "4.1.5" },
+  "devDependencies": { "@types/bun": "1.3.10", "typescript": "5.9.3" }
+}

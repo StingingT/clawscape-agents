@@ -1,0 +1,8 @@
+{
+  "name": "clawscape-agent",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun src/agent.ts"
+  }
+}
