@@ -11,6 +11,8 @@ import { researchTraining, type ResearchSummary } from './guide-research.ts';
 import { liveHazardAt } from './live-hazards.ts';
 import {prepareRecovery,runRecovery} from './recovery-runner.ts';
 import {recoveryPreflight,RECOVERY_ID} from './live-recovery.ts';
+import { Director, createMemory } from './agency/director.ts';
+import type { Facts, Method, Observation as AgencyObservation, Opportunity } from './agency/types.ts';
 
 const root=resolve(import.meta.dir,'..'),data=resolve(root,'data/astra-live');
 const argv=process.argv.slice(2),mode=argv[0]??'status';
@@ -20,6 +22,22 @@ const atomic=(file:string,value:unknown)=>{const tmp=file+'.tmp';writeFileSync(t
 const brief=(o:Observation)=>({tick:o.tick,connected:o.connected,position:o.position,hp:o.hp,maxHp:o.max_hp,
   lifeId:o.life_id,respawns:o.respawns,skills:o.skills,inventory:o.inventory.map(i=>({name:i.name,count:i.count})),
   equipment:o.equipment.map(i=>({name:i.name,count:i.count}))});
+const agencyFacts=(o:Observation):Facts=>Object.fromEntries([
+  ['hp',o.hp??0],
+  ...o.skills.map(s=>[`skill:${s.name.toLowerCase()}`,s.current]),
+  ...o.inventory.map(i=>[`item:${i.name.toLowerCase()}`,i.count]),
+]);
+const agencyMethod=(d:LiveDecision):Method=>({
+  id:d.goal, capability:`astra:${d.intent?.operation??(d.destination?'move':'observe')}`,
+  domain:/combat|training/i.test(d.goal)?'combat':/explor|route|map/i.test(d.goal)?'exploration':'gathering',
+  prerequisites:[], effects:{[`goal:${d.goal}`]:1}, costGp:0, lossBoundGp:0, durationMs:1000,
+  risk:'safe',
+});
+const agencyView=(memory:any,o:Observation,method:Method):AgencyObservation=>({
+  agent:memory.agent,world:memory.world,revision:memory.revision,at:Date.now(),context:`astra:${dContext(o)}`,
+  facts:agencyFacts(o),budget:{spendableGp:1_000_000,maxLossGp:0,maxDeaths:0,maxDurationMs:300_000},capabilities:[method.capability],
+});
+const dContext=(o:Observation)=>o.position?`${o.position.x}:${o.position.z}:${o.position.plane}`:'unknown';
 async function main(){
   mkdirSync(data,{recursive:true});
   if(mode==='status'){
@@ -91,6 +109,9 @@ async function main(){
   let navigation:unknown=null;
   const saved=store.records<any>('live_policy_checkpoints').at(-1);
   const policy=new LivePolicy(saved);
+  const agencyFile=join(data,'agency-memory.json');
+  const agencyMemory=existsSync(agencyFile)?JSON.parse(readFileSync(agencyFile,'utf8')):createMemory({agent:'astra',world:profile.profile_id,revision:'live'});
+  const agency=new Director(agencyMemory);
   let research:ResearchSummary|undefined,researchJob:Promise<void>|undefined;
   let researchQueued=0;
   const queueResearch=()=>{
@@ -196,6 +217,16 @@ async function main(){
         await sleep(700);continue;
       }
       const before=latest,intent=decision.intent;
+      const agencyMethodForAction=agencyMethod(decision);
+      const agencyObservation=agencyView(agency.memory,before,agencyMethodForAction);
+      const agencyOpportunity:Opportunity={id:`astra:${decision.goal}`,domain:agencyMethodForAction.domain,target:{fact:`goal:${decision.goal}`,minimum:1},reason:decision.reason,evidence:['fresh Astra policy decision'],source:'need'};
+      const agencyDecision=agency.next(agencyObservation,[agencyOpportunity],[agencyMethodForAction]);
+      if(agencyDecision.type==='blocked'){
+        store.append('events',crypto.randomUUID(),{kind:'AGENCY_PLANNER_BLOCKED',at:Date.now(),goal:decision.goal,reason:agencyDecision.reason});
+      }else if(agencyDecision.type==='execute'){
+        agency.begin(agencyObservation,agencyDecision,agencyMethodForAction,`astra-${crypto.randomUUID()}`);
+        atomic(agencyFile,agency.memory);
+      }
       safety.safeEntities.clear();
       if('entity_ref' in intent)safety.safeEntities.add(intent.entity_ref);
       safety.allowedTiles.clear();if(intent.operation==='move')safety.allowedTiles.add(JSON.stringify(intent.destination));
@@ -215,6 +246,11 @@ async function main(){
         }
       }
       latest=await adapter.snapshot();
+      if(result.status==='SUCCEEDED'){
+        const pending=agency.memory.pending;
+        if(pending) agency.record({commandId:pending.commandId,sequence:agency.memory.sequence+1,status:'verified',at:Date.now(),facts:{...agencyFacts(latest),[`goal:${decision.goal}`]:1},spentGp:0,lostGp:0,deaths:0,elapsedMs:Math.max(1,Date.now()-before.observed_at),evidence:[`arbiter verified ${decision.goal}`]});
+        atomic(agencyFile,agency.memory);
+      }
       policy.recordOutcome(before,latest,decision,result.status);
       store.append('live_policy_checkpoints',crypto.randomUUID(),policy.summary());
       store.append('observations_or_checkpoints',crypto.randomUUID(),latest);

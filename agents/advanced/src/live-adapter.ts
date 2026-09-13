@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { ActionCommand, Config, Observation, Intent } from './contracts.ts';
 import type { Adapter } from './arbiter.ts';
 import { projectSnapshot } from './observer.ts';
-import { callSkill } from '../../clawscape-agent/src/skill-cli';
+import { callSkill } from '../../../src/skill-cli';
 
 export type LiveConfig = z.infer<typeof Config>;
 type Reply = Record<string, any>;
