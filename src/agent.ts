@@ -42,6 +42,7 @@ import { emptyLifecycle, loadLifecycle, saveLifecycle, setGoal, ensureTask, star
 import { actionGoalKind, actionMatchesGoal, goalTitle, isPreparationAction, meaningfulGoalResult, type ActionGoalKind } from './goals/action-goal';
 import { proposalsFromGoals } from './learning-pipeline';
 import { observeWorld, recordRouteResult } from './shared-world';
+import { LiveAgency } from './agency/live-adapter';
 
 type Json = Record<string, unknown>;
 type GameState = {
@@ -171,6 +172,7 @@ let navigator: Navigator | undefined;
 let training: TrainingDiscovery | undefined;
 let travelAction: Candidate | null = null;
 let peerMarket: PeerMarket | undefined;
+let agency: LiveAgency | undefined;
 let marketRetryAt=0;
 const workPath = resolve(dataDir, 'work-state.json');
 const actionIntentPath = resolve(dataDir, 'action-intent.json');
@@ -179,6 +181,12 @@ const goalLifecycle: GoalLifecycle = loadLifecycle(goalLifecyclePath);
 const work: { foodBatch?: FoodBatch; fishing?: FishingPreparation; economy?: EconomyMemory; resource?: { goal?: ResourceGoal; site?: string; lastBankAt?: number }; autonomy?: AutonomyMemory; learning?: Json & { food?: FoodExperience }; appearance?: AppearanceMemory; foodWithdrawalPending?: boolean | 'raw'; fishingToolFundingUntil?: number; fishingToolTradeAttempted?: boolean; pickpocketStreak?: number; bankReturn?: { x: number; z: number; level: number }; bankReturnReady?: boolean; bankItems?: Json[]; failures: Record<string, { until: number; count: number }> } = (() => {
   try { return { failures: {}, ...JSON.parse(readFileSync(workPath, 'utf8')) }; } catch { return { failures: {} }; }
 })();
+
+function agencyFacts(state: GameState): Record<string, number> {
+  const facts: Record<string, number> = { hp: Number(state.player?.hp ?? 0), coins: coinsIn((state.inventory ?? []) as Json[]) };
+  for (const skill of state.skills ?? []) facts[`skill:${String(skill.name).toLowerCase()}`] = Number(skill.level ?? skill.baseLevel ?? 0);
+  return facts;
+}
 
 const lifecycleDefinition = () => ({
   id: `${character}:continuous-progression`,
@@ -2206,6 +2214,18 @@ async function runEpisode(): Promise<void> {
       continue;
     }
     let action = choose(key, options);
+    // The agency planner selects only from already executable candidates; it
+    // cannot invent a CLI command. Existing safety, navigation and fresh
+    // observation gates remain authoritative in the executor below.
+    if (agency && options.length > 0) {
+      const planned = agency.choose(options, agencyFacts(state), `${character}:${progression(state).stage ?? 'live'}`, {
+        spendableGp: Math.max(0, coinsIn((state.inventory ?? []) as Json[]) + 1_000_000),
+        maxLossGp: 1,
+        maxDeaths: 1,
+        maxDurationMs: 300_000,
+      });
+      if (planned) action = planned as Candidate;
+    }
     // A planner can alternate between two individually plausible routes while
     // making no meaningful progress. Treat that as a cycle and force a fresh
     // recovery route; this is especially important when a shop/bank target is
@@ -2277,6 +2297,14 @@ async function runEpisode(): Promise<void> {
     advanceGoal(goalLifecycle, 'execute');
     saveLifecycle(goalLifecyclePath, goalLifecycle);
     const started = Date.now();
+    let agencyCommandId: string | undefined;
+    if (agency) {
+      try {
+        agencyCommandId = agency.begin(action, agencyFacts(state), `${character}:${progression(state).stage ?? 'live'}`, undefined, `${character}-${Date.now()}-${action.id}`);
+      } catch (error) {
+        console.log(JSON.stringify({ agency: 'planner-deferred', action: action.id, error: String(error).slice(0, 160) }));
+      }
+    }
     const intent = beginActionIntent(actionIntentPath, {
       commandId: `${character}-${Date.now()}-${action.id}`,
       actionId: action.id,
@@ -2326,6 +2354,9 @@ async function runEpisode(): Promise<void> {
       }
       const next = stateFrom(waited);
       const outcome = verifyActionOutcome(state, next, action, result);
+      if (agency && agencyCommandId) {
+        agency.record(agencyCommandId, action, agencyFacts(state), outcome.verified, outcome.evidence, Date.now() - started, 0, 0, next.player?.lifeId !== state.player?.lifeId ? 1 : 0);
+      }
       const intentEvidence: string[] = [...outcome.evidence];
       if (next.tick !== state.tick) intentEvidence.push(`tick:${state.tick}->${next.tick}`);
       finishActionIntent(actionIntentPath, intent, outcome.verified ? 'verified' : (outcome.uncertain ? 'outcome-unknown' : 'rejected'), intentEvidence, outcome.verified ? undefined : outcome.reason ?? 'action-specific outcome not verified');
@@ -2456,6 +2487,7 @@ async function main(): Promise<void> {
   if (['clawscout', 'stinger', 'coincrafter', 'astra', 'featherer'].includes(character)) {
     training = new TrainingDiscovery(resolve(dataDir, 'training-knowledge.json'), character, loadCatalog(), build === 'ranged-magic', role === 'economy');
   }
+  agency = new LiveAgency(resolve(dataDir, 'agency-memory.json'), character, process.env.CLAWSCAPE_SERVER ?? 'clawscape', 'live');
   navigator = new Navigator({
     state: async () => stateFrom(await cliCall(['state'])),
     act: async (type, fields) => cliCall(['act', type, '--json', JSON.stringify({ ...fields, reason: 'collision-route navigation' })]),
