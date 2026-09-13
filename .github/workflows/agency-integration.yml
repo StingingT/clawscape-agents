@@ -3,31 +3,20 @@ on:
   push:
     branches: [codex/authoritative-goal-integration]
 permissions:
-  contents: write
+  contents: read
 jobs:
-  integrate:
-    if: github.repository == 'StingingT/clawscape-agents' && contains(github.event.head_commit.message, '[apply-agency]')
+  snapshot:
+    if: github.repository == 'StingingT/clawscape-agents'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
-          node-version: '22.16.0'
-      - name: Apply version-checked integration edits
-        run: python3 scripts/apply-agency-integration.py
-      - name: Run offline integration and planner tests
-        run: node --experimental-strip-types --test tests/agency/*.test.ts
-      - name: Parse both real controller entry points
-        run: |
-          npm install --prefix "$RUNNER_TEMP/clawscape-tools" --ignore-scripts typescript@5.9.3
-          NODE_PATH="$RUNNER_TEMP/clawscape-tools/node_modules" node scripts/check-agency-integration.cjs
-      - name: Commit tested static integration edits to this branch only
-        run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/agent.ts src/agency/director.ts src/agency/types.ts agents/advanced/src/live-cli.ts agents/advanced/src/live-policy.ts scripts/supervise.ts
-          if ! git diff --cached --quiet; then
-            git commit -m 'Apply and validate authoritative goal-first controller integration'
-            git push origin HEAD:refs/heads/codex/authoritative-goal-integration
-          fi
+          persist-credentials: false
+      - name: Snapshot tracked source only
+        run: git archive --format=zip HEAD > source.zip
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: agency-source
+          path: source.zip
+          retention-days: 1
