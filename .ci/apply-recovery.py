@@ -23,6 +23,11 @@ else:
  pending=[]
  for r in records:
   p=target(r['path']);old=p.read_bytes() if p.exists() else None
+  # The repository connection already applied the exact reviewed test workflow.
+  # The contents-only CI token must not create or update workflows itself.
+  if r['path']=='.github/workflows/agency-tests.yml':
+   assert old is not None and sha(old)==r['after'], 'Pre-applied test workflow differs'
+   pending.append((p,old));continue
   assert (sha(old) if old is not None else None)==r['before'], 'Base changed: '+r['path']
   if r['after'] is None:new=None
   elif 'content' in r:new=r['content'].encode()
