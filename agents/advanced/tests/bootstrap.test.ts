@@ -29,6 +29,7 @@ test('a missing executor database is never recreated over a saved v2 receipt',()
 test('bootstrap catches an actual runtime import failure using only built-in dependencies',()=>temporary(root=>{
   const code=join(root,'code');mkdirSync(join(code,'src'),{recursive:true});
   copyFileSync(entry,join(code,'src/live-entry.ts'));copyFileSync(resolve(import.meta.dir,'../src/startup.ts'),join(code,'src/startup.ts'));
+  copyFileSync(resolve(import.meta.dir,'../src/upstream-path.ts'),join(code,'src/upstream-path.ts'));
   mkdirSync(join(code,'node_modules/zod'),{recursive:true});writeFileSync(join(code,'node_modules/zod/index.js'),'');
   writeFileSync(join(code,'src/live-cli.ts'),"import './deliberately-missing-local-module.ts'; export async function main() {}\n");
   const child=run(root,join(code,'src/live-entry.ts'));expect(child.status).toBe(2);expect(child.error).toBeUndefined();
