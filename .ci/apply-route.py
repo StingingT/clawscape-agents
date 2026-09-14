@@ -83,8 +83,11 @@ if '--commit' not in sys.argv:
 else:
     run('git', 'config', 'user.name', 'github-actions[bot]')
     run('git', 'config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com')
-    run('git', 'add', '--', *ALLOWED)
-    run('git', 'rm', '--', *map(str, PARTS), '.ci/apply-route.py', '.github/workflows/apply-route.yml')
+    # CI has contents permission, not workflows permission. Publish code only;
+    # the authorized repository connection handles workflow changes separately.
+    sources = [p for p in ALLOWED if not p.startswith('.github/workflows/')]
+    run('git', 'add', '--', *sources)
+    run('git', 'rm', '--', *map(str, PARTS), '.ci/apply-route.py')
     run('git', 'commit', '-m', 'Fix route-leg reconciliation and preserve outcome goals across travel')
     run('git', 'push', 'origin', 'HEAD:refs/heads/' + BRANCH)
-    print('Committed tested readable source to repair branch only.')
+    print('Committed tested readable source to repair branch only; workflow updates remain separate.')
