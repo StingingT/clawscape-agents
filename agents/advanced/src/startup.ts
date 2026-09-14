@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { resolveUpstream } from './upstream-path.ts';
 
 export type StartupContext = {
   root: string; data: string; codeRoot: string; startedAt: number;
@@ -74,9 +75,8 @@ export function readRequiredJson(file: string, missing: string, invalid: string)
   try { return json(file); } catch { throw new Error(invalid); }
 }
 export function checkedUpstream(root: string, gameRoot: string, explicit = process.env.CLAWSCAPE_UPSTREAM): string {
-  const required = ['sdk/pathfinding.ts','sdk/collision-data.json','server/vendor/rsmod-pathfinder/rsmod-pathfinder.js'];
-  const choices = explicit ? [resolve(explicit)] : [resolve(root,gameRoot),resolve(root,'../tmp/clawscape/upstream')];
-  const found = choices.find(p => required.every(f => existsSync(join(p,f))));
-  if (!found) throw new Error('UPSTREAM_COLLISION_FILES_MISSING');
-  return found;
+  // Startup and standalone workers validate the same selected checkout. Never
+  // silently substitute a different map if an explicit or configured path is bad.
+  return resolveUpstream({ runtimeRoot: root, gameRoot,
+    env: explicit === undefined ? {} : { CLAWSCAPE_UPSTREAM: explicit } }).upstream;
 }
