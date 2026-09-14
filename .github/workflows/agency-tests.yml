@@ -27,4 +27,4 @@ jobs:
       - run: npm run test:integration
       - run: npm run check:agency
       - name: Native outcome, training and Astra policy regressions
-        run: bun test src/action-outcome.test.ts src/training/discovery.test.ts agents/advanced/tests/agency-policy.test.ts
+        run: bun test src/action-outcome.test.ts src/training/discovery.test.ts src/progression-policy.test.ts src/economy/resource-agent.test.ts agents/advanced/tests
