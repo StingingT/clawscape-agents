@@ -4,7 +4,11 @@ import { createHash, randomUUID } from 'node:crypto';
 import { verifyActionOutcome } from '../action-outcome.ts';
 
 export type RecoveryIdentity = { agent: string; world: string };
-export type LegacyEntry = { file: string; sha256: string; commandId?: string; disposition: 'accounted' | 'unresolved'; reason: string; evidence: string[] };
+type NavigationWindow = { observer: string; fingerprint: string; since: number; at: number; tick: number };
+export const LEGACY_NAVIGATION_SETTLE_MS = 30_000;
+// Never count offline time or observations from another controller toward settlement.
+const recoveryObserver = randomUUID();
+export type LegacyEntry = { outcome?: 'interrupted'; navigation?: NavigationWindow; file: string; sha256: string; commandId?: string; disposition: 'accounted' | 'unresolved'; reason: string; evidence: string[] };
 export type RecoveryReport = { version: 1; at: string; agent: string; world: string; ready: boolean; entries: LegacyEntry[] };
 export type State = Record<string, any>;
 const hash = (v: string) => createHash('sha256').update(v).digest('hex');
@@ -89,6 +93,61 @@ export function durableRecoveryEvidence(before: State, after: State, action: { t
   return ['two-stable-own-observations; durable effect only; not a server command acknowledgement', ...verified.evidence];
 }
 
+/** Retire a pure navigation attempt, not its goal and not a transaction.
+ * Exact operation type is mandatory: a name containing "bank" or "route" proves nothing.
+ * The current sole controller must observe a quiet stationary window. No original action
+ * is dispatched, and arrival, rewards, losses, or failed execution are never inferred. */
+function settleLegacyNavigation(doc: State, identity: RecoveryIdentity, first: State, second: State,
+  previous: NavigationWindow | undefined, now: number): { reason: string; navigation?: NavigationWindow; evidence?: string[] } {
+  const blocked = (reason: string) => ({ reason: 'Legacy navigation not settled: ' + reason });
+  if (!['walkTo','retreat'].includes(doc.type)) return blocked('operation is not pure navigation.');
+  const a=first?.player,b=second?.player,old=doc.beforeState?.player;
+  if (!a || !b || first.inGame!==true || second.inGame!==true) return blocked('two connected observations required.');
+  for (const v of [first,second]) {
+    if (v.character && String(v.character).toLowerCase()!==identity.agent.toLowerCase()) return blocked('observation actor mismatch.');
+    if (v.world && v.world!==identity.world) return blocked('observation world mismatch.');
+  }
+  for (const field of ['character','world','profileId','worldEpoch','sessionId']) {
+    if (first[field]!==second[field]) return blocked('observation continuity changed.');
+    // A new LOCAL session is allowed, but starts a new quiet window below.
+    if (field!=='sessionId' && doc.beforeState?.[field]!==undefined && doc.beforeState[field]!==first[field])
+      return blocked('historical identity or server epoch changed.');
+  }
+  if (a.lifeId===undefined || a.lifeId===null || a.lifeId!==b.lifeId
+    || (old?.lifeId!==undefined && old.lifeId!==a.lifeId)) return blocked('life continuity is not established.');
+  if (a.respawnCount!==b.respawnCount || (old?.respawnCount!==undefined && old.respawnCount!==a.respawnCount))
+    return blocked('respawn accounting changed.');
+  if (![first.tick,second.tick,a.worldX,a.worldZ,a.level,b.worldX,b.worldZ,b.level,now].every(Number.isFinite)
+    || second.tick<=first.tick || (Number.isFinite(doc.beforeState?.tick) && first.tick<doc.beforeState.tick))
+    return blocked('fresh increasing observation ticks and coordinates required.');
+  if (a.worldX!==b.worldX || a.worldZ!==b.worldZ || a.level!==b.level || (old?.level!==undefined && old.level!==a.level))
+    return blocked('position or plane changed.');
+  if ([a,b].some(p=>p.animId!==-1 || p.combat?.inCombat!==false || p.isDead===true || !(p.hp>0)
+    || (p.combat?.targetType && p.combat.targetType!=='none')))
+    return blocked('explicit idle, alive, out-of-combat observations required.');
+  if (!Array.isArray(first.inventory) || !Array.isArray(second.inventory)
+    || !Array.isArray(first.equipment) || !Array.isArray(second.equipment)) return blocked('complete inventory/equipment observations required.');
+  const inventory=count(first.inventory),equipment=count(first.equipment);
+  if (!inventory || !equipment || !same(inventory,count(second.inventory)) || !same(equipment,count(second.equipment))
+    || a.hp!==b.hp || !same(first.skills,second.skills) || !same(first.bank,second.bank)
+    || !same(first.dialog,second.dialog) || !same(first.shop,second.shop)) return blocked('activity changed during observation.');
+  const fingerprint=hash(JSON.stringify([identity,first.worldEpoch,first.profileId,first.sessionId,a.lifeId,a.respawnCount,
+    a.worldX,a.worldZ,a.level,a.hp,inventory,equipment,first.skills,first.bank,first.dialog,first.shop]));
+  const continuous=previous?.observer===recoveryObserver && previous.fingerprint===fingerprint
+    && now>=previous.at && now-previous.at<=60_000 && first.tick>previous.tick;
+  const navigation:NavigationWindow={observer:recoveryObserver,fingerprint,since:continuous?previous.since:now,at:now,tick:second.tick};
+  const started=typeof doc.startedAt==='string'?Date.parse(doc.startedAt):Number(doc.startedAt);
+  const since=Number.isFinite(started)?Math.max(navigation.since,started):navigation.since;
+  if (now-since<LEGACY_NAVIGATION_SETTLE_MS) return {
+    reason:'Legacy navigation settling: observe idle position for 30 seconds; no replay.',navigation,
+  };
+  return {reason:'Legacy navigation retired as interrupted; no arrival, failure, or success inferred.',evidence:[
+    'exact navigation operation:'+doc.type,
+    'same-controller stationary idle observations over at least 30 seconds; life and world continuity checked',
+    'original intent retained; no replay, learning reward, or strategic goal completion',
+  ]};
+}
+
 const synthetic = (doc: any) => {
   const pending = doc?.pending;
   if (!pending) return true;
@@ -104,7 +163,7 @@ const synthetic = (doc: any) => {
  * Original files remain untouched. A hash-scoped receipt prevents reprocessing after restart. */
 export function recoverLegacyJournals(directory: string, identity: RecoveryIdentity, options: {
   state?: State; stable?: State; executorSettled?: boolean; executorHasHistory?: boolean;
-  legacyWorld?: string; apply?: boolean;
+  legacyWorld?: string; apply?: boolean; now?: number;
 } = {}): RecoveryReport {
   if(options.apply)mkdirSync(directory, { recursive: true });
   const receiptFile = join(directory,'legacy-recovery.json');
@@ -120,7 +179,8 @@ export function recoverLegacyJournals(directory: string, identity: RecoveryIdent
     if (!doc || typeof doc !== 'object' || Array.isArray(doc)) throw new Error('INVALID_LEGACY_JOURNAL:' + name);
     if (doc.agent && String(doc.agent).toLowerCase() !== identity.agent.toLowerCase()) throw new Error('LEGACY_JOURNAL_AGENT_MISMATCH');
     if (doc.world && doc.world !== identity.world && doc.world !== options.legacyWorld) throw new Error('LEGACY_JOURNAL_WORLD_MISMATCH');
-    const old = previous?.entries.find(e => e.file === name && e.sha256 === saved.sha256 && e.disposition === 'accounted');
+    const prior = previous?.entries.find(e => e.file === name && e.sha256 === saved.sha256);
+    const old = prior?.disposition === 'accounted' ? prior : undefined;
     let entry: LegacyEntry = { file:name, sha256:saved.sha256, commandId:doc.commandId ?? doc.pending?.commandId,
       disposition:'unresolved', reason:'Authoritative execution outcome is not established.', evidence:[] };
     if (old) entry = old;
@@ -137,6 +197,11 @@ export function recoverLegacyJournals(directory: string, identity: RecoveryIdent
       } else if (options.state && options.stable && doc.beforeState) {
         const evidence = durableRecoveryEvidence(doc.beforeState, options.state, doc, options.stable);
         if (evidence.length) entry = { ...entry, disposition:'accounted', reason:'Requested durable effect reconciled without replay.', evidence };
+      }
+      if (entry.disposition==='unresolved' && ['walkTo','retreat'].includes(doc.type) && options.state && options.stable) {
+        const settled=settleLegacyNavigation(doc,identity,options.state,options.stable,prior?.navigation,options.now??Date.now());
+        entry={...entry,reason:settled.reason,...(settled.navigation?{navigation:settled.navigation}:{})};
+        if(settled.evidence) entry={...entry,disposition:'accounted',outcome:'interrupted',evidence:settled.evidence};
       }
     } else {
       if (!synthetic(doc)) throw new Error('UNRECOGNIZED_LEGACY_PLANNER_JOURNAL');

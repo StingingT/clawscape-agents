@@ -1,8 +1,11 @@
+import { COLLISION_STARTUP_TIMEOUT_MS, COLLISION_STARTUP_STAGES, COLLISION_FAILURE_CODES, type CollisionStage, type CollisionFailure, type CollisionDiagnostic } from './collision-startup.ts';
 import type { Intent, Observation, Tile } from './contracts.ts';
 export type Leg={to:Tile;doors:Tile[]};
 export type Route={legs:Leg[];endpoint:Tile;hint:Tile;hash:string;approachOnly:boolean};
 const same=(a:unknown,b:unknown)=>JSON.stringify(a)===JSON.stringify(b);
 const distance=(a:Tile,b:Tile)=>a.plane===b.plane?Math.max(Math.abs(a.x-b.x),Math.abs(a.z-b.z)):Infinity;
+export type StartupClock={now:()=>number;schedule:(callback:()=>void,delayMs:number)=>()=>void};
+const startupClock:StartupClock={now:()=>Date.now(),schedule:(callback,delayMs)=>{const timer=setTimeout(callback,delayMs);return ()=>clearTimeout(timer);}};
 export class LiveNavigator {
   private worker:Worker;
   private callbacks=new Map<string,{resolve:(r:Route)=>void;reject:(e:Error)=>void}>();
@@ -14,29 +17,73 @@ export class LiveNavigator {
   private ready=false;
   private startupError:string|undefined;
   private readiness=new Set<{resolve:()=>void;reject:(e:Error)=>void}>();
-  constructor(factory=()=>new Worker(new URL('./live-map-worker.ts',import.meta.url).href)){
+  private readonly startupBegan:number;
+  private readonly clock:StartupClock;
+  private readonly onStartup:(event:CollisionDiagnostic)=>void;
+  private stage:CollisionStage='starting';
+  private closed=false;
+  // Bun workers otherwise inherit the process's original environment, not runtime updates.
+  constructor(factory=()=>new Worker(new URL('./live-map-worker.ts',import.meta.url).href,
+    {env:{...process.env}} as WorkerOptions & {env:NodeJS.ProcessEnv}),
+    onStartup:(event:CollisionDiagnostic)=>void=event=>console.error(JSON.stringify(event)),clock:StartupClock=startupClock){
+    this.clock=clock;this.startupBegan=clock.now();this.onStartup=onStartup;
     this.worker=factory();
+    this.emitStartup('starting');
     this.worker.onmessage=({data})=>{
-      if(data.ready){this.ready=true;for(const r of this.readiness)r.resolve();this.readiness.clear();return;}
-      const callback=this.callbacks.get(data.id);if(!callback)return;
+      if(this.closed||this.startupError)return;
+      if(data?.kind==='collision-startup') {
+        if(!COLLISION_STARTUP_STAGES.includes(data.stage))return;
+        if(data.status==='failed') {
+          this.stage=data.stage;
+          this.failStartup(COLLISION_FAILURE_CODES.includes(data.errorCode)?data.errorCode:'COLLISION_WORKER_FAILED');
+        } else if(data.status==='starting' && data.stage!==this.stage) {
+          this.stage=data.stage;this.emitStartup('starting');
+        }
+        return;
+      }
+      if(data?.ready===true){this.ready=true;this.stage='ready';this.emitStartup('ready');for(const r of this.readiness)r.resolve();this.readiness.clear();return;}
+      const callback=this.callbacks.get(data?.id);if(!callback)return;
       this.callbacks.delete(data.id);data.error?callback.reject(new Error(data.error)):callback.resolve(data);
     };
-    this.worker.onerror=()=>{
-      this.ready=false;this.startupError='COLLISION_WORKER_FAILED';
-      for(const r of this.readiness)r.reject(new Error(this.startupError));this.readiness.clear();
-      for(const r of this.callbacks.values())r.reject(new Error(this.startupError));this.callbacks.clear();
+    this.worker.onerror=(event)=>{
+      event.preventDefault?.(); // Do not echo arbitrary worker errors containing private paths/values.
+      this.failStartup('COLLISION_WORKER_FAILED');
     };
+    this.worker.onmessageerror=()=>this.failStartup('COLLISION_WORKER_FAILED');
+    this.worker.addEventListener?.('close',()=>{if(!this.closed)this.failStartup('COLLISION_WORKER_FAILED');});
   }
-  async waitUntilReady(timeoutMs=15_000):Promise<void> {
+  startupStatus():CollisionDiagnostic {
+    return {component:'astra-collision-worker',status:this.startupError?'failed':this.ready?'ready':'starting',
+      stage:this.stage,elapsedMs:Math.max(0,this.clock.now()-this.startupBegan),
+      ...(this.startupError?{errorCode:this.startupError as CollisionFailure}:{})};
+  }
+  private emitStartup(status:CollisionDiagnostic['status']) {
+    try {this.onStartup({...this.startupStatus(),status});} catch { /* Diagnostics cannot grant or break control. */ }
+  }
+  private failStartup(reason:CollisionFailure) {
+    if(this.closed||this.startupError)return;
+    this.ready=false;this.startupError=reason;this.emitStartup('failed');
+    for(const r of this.readiness)r.reject(new Error(reason));this.readiness.clear();
+    for(const r of this.callbacks.values())r.reject(new Error(reason));this.callbacks.clear();
+    this.worker.terminate();
+  }
+  async waitUntilReady(timeoutMs=COLLISION_STARTUP_TIMEOUT_MS):Promise<void> {
+    if(this.closed)throw new Error('NAVIGATOR_CLOSED');
     if(this.startupError)throw new Error(this.startupError);
+    if(!Number.isFinite(timeoutMs)||timeoutMs<=0||timeoutMs>COLLISION_STARTUP_TIMEOUT_MS)throw new Error('COLLISION_STARTUP_TIMEOUT_INVALID');
     if(this.ready)return;
     await new Promise<void>((resolve,reject)=>{
-      const waiter={resolve:()=>{clearTimeout(timer);resolve();},reject:(e:Error)=>{clearTimeout(timer);reject(e);}};
-      const timer=setTimeout(()=>{this.readiness.delete(waiter);reject(new Error('COLLISION_WORKER_TIMEOUT'));},timeoutMs);
+      let cancel=()=>{};
+      const waiter={resolve:()=>{cancel();resolve();},reject:(e:Error)=>{cancel();reject(e);}};
+      // Measured from worker creation. Stage messages and repeated wait calls do NOT renew the deadline.
+      const remaining=Math.max(0,timeoutMs-(this.clock.now()-this.startupBegan));
       this.readiness.add(waiter);
+      cancel=this.clock.schedule(()=>this.failStartup('COLLISION_WORKER_TIMEOUT'),remaining);
     });
   }
   close(){
+    if(this.closed)return;
+    this.closed=true;this.ready=false;
     for(const r of this.readiness)r.reject(new Error('NAVIGATOR_CLOSED'));this.readiness.clear();
     for(const r of this.callbacks.values())r.reject(new Error('NAVIGATOR_CLOSED'));this.callbacks.clear();
     this.worker.terminate();

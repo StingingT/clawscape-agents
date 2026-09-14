@@ -3,13 +3,25 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { Tile } from './contracts.ts';
-import { LIVE_HAZARDS,liveHazardAt } from './live-hazards.ts';
+import type { Tile } from './contracts.ts';
+import { collisionFailure, type CollisionStage } from './collision-startup.ts';
+let stage:CollisionStage='starting';
+const starting=(next:CollisionStage)=>{stage=next;self.postMessage({kind:'collision-startup',status:'starting',stage});};
+try {
+starting('resolving-upstream');
 const { upstream } = resolveUpstream();
+starting('loading-contracts');
+const { Tile }=await import('./contracts.ts');
+const { LIVE_HAZARDS,liveHazardAt }=await import('./live-hazards.ts');
+starting('importing-pathfinding');
 const map=await import(pathToFileURL(resolve(upstream,'sdk/pathfinding.ts')).href);
+starting('importing-pathfinder');
 const rs=await import(pathToFileURL(resolve(upstream,'server/vendor/rsmod-pathfinder/rsmod-pathfinder.js')).href);
-map.initPathfinding();
+starting('initializing-pathfinding');
+await map.initPathfinding();
+starting('hashing-collision-data');
 const hash=createHash('sha256').update(readFileSync(resolve(upstream,'sdk/collision-data.json'))).digest('hex');
+starting('applying-hazards');
 // Publicly known wizard circles: the pilot will not route through either area.
 for(const {x0,x1,z0,z1} of LIVE_HAZARDS)
   for(let x=x0;x<=x1;x++)for(let z=z0;z<=z1;z++)rs.changeLoc(x,z,0,1,1,false,false,true);
@@ -58,3 +70,7 @@ self.onmessage=({data})=>{
   }catch(error){self.postMessage({id:data.id,error:error instanceof Error?error.message:'ROUTE_ERROR'});}
 };
 self.postMessage({ready:true,hash});
+
+} catch(error) {
+  self.postMessage({kind:'collision-startup',status:'failed',stage,errorCode:collisionFailure(error)});
+}
