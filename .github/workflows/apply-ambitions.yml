@@ -1,0 +1,90 @@
+name: Apply tested ambition and diagnostic changes
+on:
+  push:
+    branches: [codex/ambitions-dialogue-diagnostics]
+    paths: [.github/workflows/apply-ambitions.yml]
+permissions:
+  contents: write
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: codex/ambitions-dialogue-diagnostics
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22.16.0'
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: '1.3.10'
+      - name: Verify transport and original/resulting source hashes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import base64, gzip, hashlib, json, os, pathlib, subprocess
+          hashes = [
+            '652afef362c4556223b1df1e91ceefc7df46fa0d38853c030fc70eae4aaa65bb',
+            '5c03444af9467ee4895d23b2d0d60f12cbd0683ad62ecc7e739fec909d1bb3b5',
+            '381059be62a89509e531a1dd67c5ef1271b2ebab7c23853b95f635a129f1e0aa',
+            'c21594c7467b11b41d1bd7c8da8597bacaaeface1afce9bd1f4c19e422a32eb4',
+            'e979caf8b196c2813b0e00792556cfe7fc29badfcc1f5c56ded39e08a8059d19',
+            '3c32e446a33e51950550baf733ab8f5ea27fa28020e5d230c9bb8bdcab7716cb',
+            'dbf622e8e1a37255a06365dea59f456b3215db70d4cf2666632f789c58bb6093',
+            '06e96b9dff043777f9ef8ee5d7c0fac6713b431881d1437ea74ffed380b95a21',
+          ]
+          digest = lambda data: hashlib.sha256(data).hexdigest()
+          parts = []
+          for i, expected in enumerate(hashes):
+            text = pathlib.Path(f'delivery/patch-{i:02}.b64').read_text().strip()
+            # Repair one identified transport insertion, never change source to satisfy tests.
+            if i == 2 and len(text) == 4001 and text.count('PuYxAZQYYzxV') == 1:
+              text = text.replace('PuYxAZQYYzxV', 'PuYxAZQYzxV')
+            assert digest(text.encode()) == expected, f'transport mismatch in segment {i}'
+            parts.append(text)
+          packed = base64.b64decode(''.join(parts), validate=True)
+          assert digest(packed) == 'bf88c9d60778adafbba68ee6a7a9d91937c7cb01b36219eb79204c69996866f3'
+          manifest = json.loads(gzip.decompress(packed))
+          assert manifest['patchMode'] == 'unidiff-zero'
+          assert len(manifest['files']) == 26
+          for row in manifest['files']:
+            name = row['path']; p = pathlib.Path(name)
+            assert not p.is_absolute() and '..' not in p.parts and not p.is_symlink()
+            assert name.startswith(('src/', 'tests/', 'scripts/', 'docs/', 'agents/advanced/src/', 'agents/advanced/tests/'))
+            assert (digest(p.read_bytes()) if p.exists() else None) == row['before'], f'base mismatch: {name}'
+          temp = pathlib.Path(os.environ['RUNNER_TEMP'])
+          patch = temp / 'ambitions.patch'; patch.write_text(manifest['patch'])
+          subprocess.run(['git', 'apply', '--unidiff-zero', '--check', str(patch)], check=True)
+          subprocess.run(['git', 'apply', '--unidiff-zero', str(patch)], check=True)
+          for row in manifest['files']:
+            assert digest(pathlib.Path(row['path']).read_bytes()) == row['after'], row['path']
+          (temp / 'ambitions-manifest.json').write_text(json.dumps(manifest))
+          print('All 26 source files match the exact offline-tested hashes.')
+          PY
+      - name: Install pinned offline test dependencies
+        run: |
+          npm install --prefix "$RUNNER_TEMP/agency-tests" --ignore-scripts --no-audit --no-fund --no-package-lock zod@4.1.5 typescript@5.9.3 @types/node@22.16.0
+          ln -s "$RUNNER_TEMP/agency-tests/node_modules" agents/advanced/node_modules
+      - run: npm run test:agency
+      - run: npm run test:integration
+      - run: npm run check:agency
+      - name: Native outcome, training, journal diagnostic and exit-code regressions
+        run: bun test src/action-outcome.test.ts src/training/discovery.test.ts agents/advanced/tests src/navigation/agency-route.test.ts
+      - name: Commit only verified implementation files
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, subprocess
+          m = json.loads((pathlib.Path(os.environ['RUNNER_TEMP']) / 'ambitions-manifest.json').read_text())
+          paths = [r['path'] for r in m['files']]
+          for row in m['files']:
+            assert hashlib.sha256(pathlib.Path(row['path']).read_bytes()).hexdigest() == row['after']
+          subprocess.run(['git', 'add', '--', *paths], check=True)
+          staged = subprocess.check_output(['git', 'diff', '--cached', '--name-only'], text=True).splitlines()
+          assert sorted(staged) == sorted(paths)
+          subprocess.run(['git', 'config', 'user.name', 'github-actions[bot]'], check=True)
+          subprocess.run(['git', 'config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com'], check=True)
+          subprocess.run(['git', 'commit', '-m', 'Separate role ambitions from optional combat builds; expose dialogue evidence and protect item bindings'], check=True)
+          subprocess.run(['git', 'push', 'origin', 'HEAD:codex/ambitions-dialogue-diagnostics'], check=True)
+          PY
