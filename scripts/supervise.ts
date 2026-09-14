@@ -27,7 +27,7 @@ async function run(job:typeof jobs[number]){
   const started=Date.now(), prefix=resolve(logs,job.name+'-'+started);
   try{
    const child=Bun.spawn([process.execPath,...job.args],{cwd:job.cwd,stdin:'ignore',stdout:Bun.file(prefix+'.log'),stderr:Bun.file(prefix+'.err'),windowsHide:true});
-   children.set(job.name,child);states[job.name]={status:'running',pid:child.pid,started:new Date(started).toISOString(),log:prefix+'.log'};publish('started',job.name);
+   children.set(job.name,child);states[job.name]={status:'running',pid:child.pid,started:new Date(started).toISOString(),log:prefix+'.log',errorLog:prefix+'.err'};publish('started',job.name);
    const code=await child.exited;children.delete(job.name);
    if(stopping)break;
    let reason='process-exit';let needsAttention=false;
@@ -42,7 +42,7 @@ async function run(job:typeof jobs[number]){
    if(manual){writeFileSync(resolve(logs,job.name+'.paused'),reason);states[job.name]={status:'paused',reason};publish('manual-stop',job.name);continue;}
    failures=Date.now()-started>300000?0:Math.min(failures+1,4);
    const retryMs=Math.min(900000,60000*2**failures);
-   states[job.name]={status:needsAttention?'needs-attention':'retry-backoff',exitCode:code,reason,retryAt:new Date(Date.now()+retryMs).toISOString(),log:prefix+'.log'};
+   states[job.name]={status:needsAttention?'needs-attention':'retry-backoff',exitCode:code,reason,retryAt:new Date(Date.now()+retryMs).toISOString(),log:prefix+'.log',errorLog:prefix+'.err'};
    publish('exited',job.name,{code,reason,retryMs});await Bun.sleep(retryMs);
   }catch(error){states[job.name]={status:'launch-failed',reason:String(error)};publish('launch-failed',job.name);await Bun.sleep(60000);}
  }

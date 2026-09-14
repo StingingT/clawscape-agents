@@ -20,9 +20,9 @@ Urgent food/retreat has a separate receipt. It cannot replace an unresolved ordi
 
 The shared controller exposes cooked-food and ammunition reserves, equipping usable owned gear, inventory space, observed combat-skill XP milestones, supported production/gathering batches, and personal route surveys. Astra exposes its currently implemented food, equipment, banking, melee and navigation methods, not unsupported purchasing or quest APIs.
 
-A bank opening is preparation, not a completed strategic goal. One catch does not complete an eight-food target. An arbitrary click flag is never used as the goal predicate. Route completion requires the character's observed arrival. Recipes and encounters still execute through the existing bounded domain routines; this is not a universal recipe or quest synthesizer.
+A bank opening is preparation, not a completed strategic goal. One catch does not complete an eight-food target. An arbitrary click flag is never used as the goal predicate. Route completion requires the character's observed arrival. Verified movement legs complete only their action receipt; the goal and committed destination remain active for the next leg. Recipes and encounters still execute through the existing bounded domain routines; this is not a universal recipe or quest synthesizer.
 
-Role preferences are small priorities. Strategic skill selection uses the actual exposed combat styles rather than a fixed 1-Defence/Attack-40 mandate. Astra's task-specific training can operate beyond its former 40/60/40 ceiling, within the same conservative supported enemy set. The old policy's default behavior is retained for its standalone callers and pilot mode.
+Role preferences are small priorities. Strategic skill selection uses the actual exposed combat styles rather than a fixed 1-Defence/Attack-40 mandate. Astra's task-specific training can operate beyond its former 40/60/40 ceiling, within the same conservative supported enemy set. The standalone fallback no longer targets the old 20/20/20 or 40/60/40 quotas; pilot mode remains bounded.
 
 The shared training selector no longer forces ClawScout to Black Knights or gives the highest tier 10,000 points. A small uncertainty bonus decays with samples; measured performance, danger and route costs can overturn the prior. Existing minimum residence, supply, source-matching and collision checks remain.
 
@@ -80,3 +80,7 @@ Astra's supervisor path now uses the packaged `agents/advanced` directory. Both 
 Before unattended deployment, use a test character and the complete local runtime to demonstrate resupply → activity → return/review, stale targets, transient errors, process restart and a real evidence-driven change of method. Confirm the local loss policy and legacy-journal reconciliation first. Maintain a rollback to the prior commit; do not infer live reliability from offline tests.
 
 Astra is launched through `src/live-entry.ts` so dependency and pre-status startup failures are reported. Runtime configuration and journals may stay in the existing installation via `CLAWSCAPE_ASTRA_HOME`; they are not silently recreated in the new code directory.
+
+## Route progress follow-up
+
+See `ROUTE_PROGRESS_FIX.md` for partial-leg verification, restart-safe route commitment, no-dispatch map waits, unchanged production-dialogue verification, obsolete objective cleanup, and the latest focused regression results. These changes retain the startup and conservative journal-recovery safeguards described in `JOURNAL_RECOVERY.md`.

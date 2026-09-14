@@ -92,10 +92,10 @@ export class Navigator {
     writeFileSync(this.file, JSON.stringify(record, null, 2));
     return { state, navigation: record };
   }
-  private block(state: any, to: Tile, reason: string) {
+  private block(state: any, to: Tile, reason: string, movementDispatched=false) {
     this.blocked[JSON.stringify(to)] = { until: Date.now() + 60_000, reason };
     this.legs = [];
-    return this.record('blocked', state, { reason, retryAfter: this.blockedUntil(to) });
+    return this.record('blocked', state, { reason, retryAfter: this.blockedUntil(to), movementDispatched });
   }
   async escape(state: any) {
     const at = position(state);
@@ -146,8 +146,8 @@ export class Navigator {
     this.lastTick = initial.tick; this.life = initial.player.lifeId;
     if (position(state).level !== to.level) return this.block(state, to, 'transition-required');
     if (distance(position(state), to) === 0) { this.legs = []; this.destination = JSON.stringify(to); return this.record('arrived', state); }
-    if (this.blockedUntil(to) > Date.now()) return this.record('blocked', state, { reason: this.blocked[JSON.stringify(to)]?.reason });
-    if (!this.ready) { state = await this.port.wait(2); return this.record('loading-map', state); }
+    if (this.blockedUntil(to) > Date.now()) return this.record('blocked', state, { reason: this.blocked[JSON.stringify(to)]?.reason, movementDispatched:false });
+    if (!this.ready) { state = await this.port.wait(2); return this.record('loading-map', state, {movementDispatched:false}); }
     const key = JSON.stringify(to);
     if (key !== this.destination || !this.legs.length || (this.expected && distance(position(state), this.expected))) {
       if (key !== this.destination) this.recoveries = 0;
@@ -184,7 +184,7 @@ export class Navigator {
         if (!opened) {
           this.doors.push({ door, until: Date.now() + 60_000 }); this.legs = []; this.expected = position(state);
           if (++this.recoveries > 2) return this.block(state, to, 'door-retry-budget');
-          return this.record('replanning', state, { reason: 'door-did-not-open' });
+          return this.record('replanning', state, { reason: 'door-did-not-open', movementDispatched:false });
         }
       }
       await this.dispatch('walkTo', { x: leg.target.x, z: leg.target.z, running: true });
@@ -196,13 +196,13 @@ export class Navigator {
         if (distance(current, leg.target) === 0) {
           this.legs.shift(); this.expected = current;
           if (!escaping) { this.safeTrail.push(current); this.safeTrail = this.safeTrail.slice(-12); }
-          return this.record(distance(current, to) === 0 ? 'arrived' : 'progress', state);
+          return this.record(distance(current, to) === 0 ? 'arrived' : 'progress', state, {movementDispatched:true, completedWaypoint:leg.target});
         }
         stationary = distance(previous, current) === 0 ? stationary + 2 : 0;
-        if (stationary >= 6) return this.block(state, to, 'no-progress');
+        if (stationary >= 6) return this.block(state, to, 'no-progress',true);
         previous = current;
       }
-      return this.block(state, to, 'leg-timeout');
-    } catch (error) { return this.block(state, to, `dispatch: ${String(error)}`); }
+      return this.block(state, to, 'leg-timeout',true);
+    } catch (error) { return this.block(state, to, `dispatch: ${String(error)}`,true); }
   }
 }

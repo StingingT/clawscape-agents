@@ -103,7 +103,7 @@ export type Outcome = {
   commandId: string;
   /** Monotonic per-agent event sequence supplied by its action journal. */
   sequence: number;
-  status: 'verified' | 'progress' | 'rejected' | 'unknown';
+  status: 'verified' | 'progress' | 'rejected' | 'unknown' | 'interrupted';
   at: number;
   facts: Facts;
   spentGp: number;

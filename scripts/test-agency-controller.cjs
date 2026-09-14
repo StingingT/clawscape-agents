@@ -12,28 +12,42 @@ const wanted=['runEpisode','actionsForTask','executeAgencyAction','verification'
 const extracted=parsed.statements.filter(s=>ts.isFunctionDeclaration(s)&&wanted.includes(s.name?.text)).map(s=>s.getText(parsed)).join('\n');
 assert.equal(parsed.statements.filter(s=>ts.isFunctionDeclaration(s)&&wanted.includes(s.name?.text)).length,wanted.length);
 const js=ts.transpileModule(extracted,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText;
-async function runScenario({blocked=false,unknown=false,deny=false}={}){
+async function runScenario({blocked=false,unknown=false,deny=false,movement=false,mapWait=false}={}){
   const {LiveAgency,isSelection}=await import('../src/agency/live-adapter.ts');
   const {verifyActionOutcome}=await import('../src/action-outcome.ts');
   const {recoverLegacyJournals}=await import('../src/agency/journal-recovery.ts');
   const dir=mkdtempSync(join(tmpdir(),'agency-controller-'));
   try{
-    let now=1000,ids=0,mutationCalls=0,planned=false;
+    let now=1000,ids=0,mutationCalls=0,planned=false,legs=0,assessments=0,mapWaited=false;
+    class TestDate extends Date { static now(){return now;} }
     const identity={agent:'test',world:'test',revision:'test'};
-    const agency=new LiveAgency(join(dir,'journal.json'),identity,{supported:['food'],policy:{foodTarget:3},now:()=>now});
+    const agency=new LiveAgency(join(dir,'journal.json'),identity,{supported:movement?['exploration']:['food'],routes:movement?[{id:'bank-route',x:50,z:1,level:0,evidence:'observed lead'}]:[],policy:{foodTarget:3},now:()=>now});
     const state={inGame:true,tick:1,player:{hp:30,maxHp:30,lifeId:1,level:0,worldX:1,worldZ:1,combat:{inCombat:false,targetType:'none',targetIndex:-1}},
-      inventory:[],equipment:[],skills:[],bank:{isOpen:true,items:[{id:315,name:'Shrimps',count:10,slot:7}]}};
+      inventory:[],equipment:[],skills:[],bank:{isOpen:!movement,items:[{id:315,name:'Shrimps',count:10,slot:7}]}};
     const originalPlan=agency.plan.bind(agency);agency.plan=(s)=>{planned=true;return blocked?{type:'blocked',reason:'test refusal',missingCapabilities:[]}:originalPlan(s);};
     if(unknown){const p=originalPlan(state);agency.begin(p,{id:'buy-arrows',type:'wait'},state,'old-command');agency.record('old-command',state,{status:'unknown',evidence:[]});
       // Use a still-unresolved shop intent for the actual episode reconciliation branch.
       agency.document.receipt.action={id:'buy-arrows',type:'shopBuy',fields:{slot:0,amount:1}};}
     if(deny)agency.begin=()=>{throw new Error('TEST_PRE_DISPATCH_REFUSAL');};
     const environment={
-      agency,steps:5,character:'test',role:'brawler',build:'melee',forumEnabled:false,training:undefined,
-      console:{log(){},error(){}},Date:{now:()=>now},JSON,Number,Math,Set,Array,String,
+      agency,steps:8,character:'test',role:'brawler',build:'melee',forumEnabled:false,training:undefined,
+      console:{log(){},error(){}},Date:TestDate,JSON,Number,Math,Set,Array,String,
       loadActionIntent:()=>undefined,actionIntentPath:'unused',finishActionIntent:()=>{},
       dataDir:dir,existsSync:require('node:fs').existsSync,resolve:require('node:path').resolve,recoverLegacyJournals,process:{env:{}},
       stateFrom:v=>v.state,isSelection,verifyActionOutcome,available:v=>v,choose:(_,v)=>v[0],stateKey:()=>'',
+      position:s=>({x:s.player.worldX,z:s.player.worldZ,level:s.player.level}),
+      navigator:{
+        assess:async()=>{assessments++;return {status:'ready'};},
+        step:async destination=>{
+          assert.ok(agency.pending(),'movement needs durable receipt');
+          assert.equal(agency.director.memory.reviews.length,0,'partial movement cannot finish route goal');
+          if(mapWait&&!mapWaited){mapWaited=true;return {state:structuredClone(state),navigation:{status:'loading-map',movementDispatched:false}};}
+          const point=[{x:0,z:8},{x:25,z:8},{x:50,z:1}][legs++];
+          assert.deepEqual({...destination},{x:50,z:1,level:0},'the committed destination changed between legs');
+          state.player.worldX=point.x;state.player.worldZ=point.z;state.tick++;now+=100;mutationCalls++;
+          return {state:structuredClone(state),navigation:{status:legs===3?'arrived':'progress',movementDispatched:true}};
+        },
+      },
       urgentAgencyAction:()=>undefined,validateMetal:()=>true,validateBow:()=>true,validateFishing:()=>true,
       equipmentGoals:{validate:()=>true},observeAgencyResult:()=>{},appendFileSync:()=>{},experiencePath:'unused',
       randomUUID:()=>`command-${++ids}`,dialogCandidates:()=>[],bankingCandidates:()=>{
@@ -55,12 +69,12 @@ async function runScenario({blocked=false,unknown=false,deny=false}={}){
     const context=vm.createContext(environment);vm.runInContext(js,context);
     await context.runEpisode();
     if(blocked||unknown||deny)assert.equal(mutationCalls,0,'A planner refusal/unknown intent fell through to real execution');
-    else{assert.equal(mutationCalls,3);assert.equal(agency.director.memory.reviews.length,1);assert.equal(agency.director.memory.reviews[0].result,'success');}
+    else{assert.equal(mutationCalls,3);if(movement){assert.equal(legs,3);assert.equal(assessments,1);assert.equal(agency.pending(),undefined);}assert.equal(agency.director.memory.reviews.length,1);assert.equal(agency.director.memory.reviews[0].result,'success');}
     return {mutationCalls,reviews:agency.director.memory.reviews.length};
   }finally{rmSync(dir,{recursive:true,force:true});}
 }
 (async()=>{
   const results=[];
-  for(const scenario of [{},{blocked:true},{unknown:true},{deny:true}])results.push({scenario,...await runScenario(scenario)});
-  console.log(JSON.stringify({controllerChecks:4,passed:4,results},null,2));
+  for(const scenario of [{},{blocked:true},{unknown:true},{deny:true},{movement:true},{movement:true,mapWait:true}])results.push({scenario,...await runScenario(scenario)});
+  console.log(JSON.stringify({controllerChecks:6,passed:6,results},null,2));
 })().catch(e=>{console.error(e);process.exitCode=1;});

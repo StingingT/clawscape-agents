@@ -40,7 +40,7 @@ export function agencyCandidate(o: Observation, decision: LiveDecision): LiveCan
     case 'deposit':return a('bankDeposit',{slot:i.slot,amount:i.amount});
     case 'withdraw':return a('bankWithdraw',{slot:i.slot,amount:i.amount});
     case 'style':return a('setCombatStyle',{style:i.style_index});
-    case 'dialogue':return a('clickDialogOption',{option:i.option_index});
+    case 'dialogue':return a('clickDialogOption',{optionIndex:i.option_index});
     case 'accept_design':return a('acceptCharacterDesign');
     case 'use_on_item':return a('useItemOnItem',{sourceSlot:i.slot,targetSlot:i.target_slot});
     case 'interact': case 'use_on_object': case 'pickup': {
@@ -78,5 +78,5 @@ export function urgentDecision(o:Observation):LiveDecision|undefined {
 
 export function observedVerification(before:Record<string,any>,after:Record<string,any>,action:LiveCandidate):Verification {
   const v=verifyActionOutcome(before,after,action);
-  return {status:v.verified?'verified':v.uncertain?'unknown':'rejected',evidence:v.evidence,reason:v.reason};
+  return {status:v.interrupted?'interrupted':v.verified?'verified':v.uncertain?'unknown':'rejected',evidence:v.evidence,reason:v.reason};
 }
