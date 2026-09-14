@@ -1,3 +1,4 @@
+import type { Ambition } from './ambitions.ts';
 /** Planner contracts. A fact is an agent's own observation, never a peer's assertion. */
 export type Domain = 'combat' | 'crafting' | 'gathering' | 'exploration' | 'social';
 export type Facts = Record<string, number>;
@@ -77,6 +78,7 @@ export type Goal = Opportunity & {
   attempts: number;
   noProgress: number;
   strategyId?: string;
+  ambitionId?: Ambition['id'];
   workingReserveGp?: number;
   plan?: Plan;
   planContext?: string;
@@ -121,6 +123,8 @@ export type Pending = {
 };
 export type Memory = Identity & {
   schema: 1;
+  /** Durable motivation; combat build restrictions live separately. */
+  ambition?: Ambition;
   /** Initial roles are small scoring preferences, never capability restrictions. */
   preferences: Partial<Record<Domain, number>>;
   active?: Goal;

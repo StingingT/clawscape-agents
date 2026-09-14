@@ -17,6 +17,8 @@ async function runScenario({blocked=false,unknown=false,deny=false,movement=fals
   const {verifyActionOutcome}=await import('../src/action-outcome.ts');
   const {recoverLegacyJournals}=await import('../src/agency/journal-recovery.ts');
   const {seedProvisionHistory}=await import('../tests/agency/provision-fixture.ts');
+  const {seedBuildExperiment}=await import('../tests/agency/build-fixture.ts');
+  const {bindItemAction,validateItemBinding}=await import('../src/agency/item-binding.ts');
   const dir=mkdtempSync(join(tmpdir(),'agency-controller-'));
   try{
     let now=1000,ids=0,mutationCalls=0,planned=false,legs=0,assessments=0,mapWaited=false;
@@ -39,6 +41,7 @@ async function runScenario({blocked=false,unknown=false,deny=false,movement=fals
     // This scenario explicitly learned a three-meal requirement; there is no global minimum.
     if(!movement)seedProvisionHistory(join(dir,'journal.json'),identity,state,3,combatGoal?{combat:2}:{});
     const agency=new LiveAgency(join(dir,'journal.json'),identity,{supported:combatGoal?['food','combat']:movement?['exploration']:['food'],developmentHint:combatGoal?(meleeGoal?'melee':'ranged-magic'):undefined,preferences:combatGoal?{combat:2}:{},routes:movement?[{id:'bank-route',x:50,z:1,level:0,evidence:'observed lead'}]:[],policy:{foodTarget:3,combatLossBoundGp:5},now:()=>now});
+    if(combatGoal)seedBuildExperiment(agency.director.memory);
     const legacyPath=join(dir,'action-intent.json');
     if(legacyNavigation)writeFileSync(legacyPath,JSON.stringify({commandId:'test-old-bank-for-fishing-tool-funds',
       actionId:'bank-for-fishing-tool-funds',type:'walkTo',fields:{x:50,z:1,level:0},status:'failed',beforeState:structuredClone(state)}));
@@ -48,7 +51,7 @@ async function runScenario({blocked=false,unknown=false,deny=false,movement=fals
       agency.document.receipt.action={id:'buy-arrows',type:'shopBuy',fields:{slot:0,amount:1}};}
     if(deny)agency.begin=()=>{throw new Error('TEST_PRE_DISPATCH_REFUSAL');};
     const environment={
-      agency,steps:8,character:'test',role:'brawler',build:'melee',forumEnabled:false,training:combatGoal?{
+      bindItemAction,validateItemBinding,agency,steps:8,character:'test',role:'brawler',build:'melee',forumEnabled:false,training:combatGoal?{
         observe(){},beforeAction(){},next(s,probe,leadIds,skill){
           assert.ok(leadIds.includes('lumbridge-chickens'),'guide leads were not forwarded to training');
           assert.equal(skill,goalSkill,'task skill was not forwarded to training');
@@ -127,6 +130,7 @@ async function runGatherScenario(){
   const {LiveAgency,isSelection}=await import('../src/agency/live-adapter.ts');
   const {verifyActionOutcome}=await import('../src/action-outcome.ts');
   const {recoverLegacyJournals}=await import('../src/agency/journal-recovery.ts');
+  const {bindItemAction,validateItemBinding}=await import('../src/agency/item-binding.ts');
   const dir=mkdtempSync(join(tmpdir(),'gather-controller-'));
   try {
     let now=1000,ids=0,harvests=0,deposits=0,bankOpens=0;
@@ -138,7 +142,7 @@ async function runGatherScenario(){
       nearbyNpcs:[{id:1,index:5,name:'Banker',reachable:true,optionsWithIndex:[{opIndex:1,text:'Bank'}]}]};
     const agency=new LiveAgency(join(dir,'agency-v2.json'),{agent:'test',world:'test',revision:'test'},
       {supported:['gathering','food','bank'],now:()=>now});
-    const env={agency,steps:11,character:'test',role:'resource',build:'melee',forumEnabled:false,console:{log(){},error(){}},Date:TestDate,
+    const env={bindItemAction,validateItemBinding,agency,steps:11,character:'test',role:'resource',build:'melee',forumEnabled:false,console:{log(){},error(){}},Date:TestDate,
       loadActionIntent:()=>undefined,actionIntentPath:join(dir,'action-intent.json'),finishActionIntent(){},
       dataDir:dir,existsSync:require('node:fs').existsSync,resolve:require('node:path').resolve,
       recoverLegacyJournals,process:{env:{CLAWSCAPE_SERVER:'test'}},stateFrom:v=>v.state,isSelection,verifyActionOutcome,

@@ -1,3 +1,4 @@
+import { describeJournalAction, needsReconciliation } from './journal-diagnostics.ts';
 import { join } from 'node:path';
 import { settleAstraTransient } from './transient-recovery.ts';
 import type { Observation, ActionResult } from './contracts.ts';
@@ -7,10 +8,9 @@ import type { LiveAgency } from '../../../src/agency/live-adapter.ts';
 import { agencyState, agencyCandidate, arbiterVerification } from './agency-bridge.ts';
 import { atomicRecoveryJson, durableRecoveryEvidence, recoverLegacyJournals } from '../../../src/agency/journal-recovery.ts';
 
-export type RestartReport = { version:1; at:number; ready:boolean; resolved:string[]; unresolved:Array<{commandId:string;operation:string;reason:string;settling?:boolean}> };
+export type RestartReport = { version:1; at:number; ready:boolean; resolved:string[]; unresolved:Array<{commandId:string;operation:string;reason:string;settling?:boolean;details?:ReturnType<typeof describeJournalAction>}> };
 export function unsettledResult(r:ActionResult):boolean {
-  return !((r.status==='SUCCEEDED'&&r.evidence.length>0)||r.status==='REJECTED'||r.status==='EXPIRED'
-    ||r.status==='CANCELLED'&&!/MAY_STILL|OUTCOME_UNKNOWN|PREEMPTED/.test(r.reason));
+  return needsReconciliation(r);
 }
 
 /** No dispatch function is accepted. This reads snapshots and updates only local, matched journals.
@@ -31,7 +31,8 @@ export function reconcileAstraJournals(store:Store,directory:string,first:Observ
     let resolved:ActionResult|undefined;let settling=false;let why='No attributable terminal outcome; no replay is permitted.';
     if(result.status==='QUEUED')resolved={...result,status:'CANCELLED',reason:'RESTART_BEFORE_DISPATCH',at:Date.now(),evidence:['journal reservation never entered dispatch']};
     else {
-      const before=checkpoints.find(c=>c.action_id===command.action_id)?.before;
+      const originals=checkpoints.filter(c=>c.action_id===command.action_id);
+      const before=originals.length===1?originals[0]!.before:undefined;
       let proof:string[]=[];
       if(before && before.session_id===second.session_id)proof=evidence(command.intent,before,second);
       // session_id in this adapter is a local client UUID, NOT a server session generation.
@@ -51,7 +52,7 @@ export function reconcileAstraJournals(store:Store,directory:string,first:Observ
       }
     }
     if(resolved){store.result(resolved);report.resolved.push(command.action_id);}
-    else report.unresolved.push({commandId:command.action_id,operation:command.intent.operation,reason:why,settling});
+    else report.unresolved.push({commandId:command.action_id,operation:command.intent.operation,reason:why,settling,details:describeJournalAction(command,result,checkpoints)});
   }
   if(agency) for(const scope of ['safety','task'] as const) {
     const receipt=agency.pending(scope);if(!receipt)continue;

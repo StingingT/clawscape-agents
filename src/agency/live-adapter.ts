@@ -1,3 +1,5 @@
+import { bindItemAction } from './item-binding.ts';
+import { reviewAmbition } from './ambitions.ts';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { validateBuildRules, type BuildRules } from './build-rules.ts';
@@ -96,6 +98,7 @@ export class LiveAgency {
     if(state.world && state.world!==this.identity.world)throw new Error('OBSERVATION_WORLD_MISMATCH');
     if(this.document.safetyReceipt)return {type:'blocked',reason:'Reconcile the safety action before any further dispatch.',missingCapabilities:[]};
     if (!this.document.receipt && !this.document.safetyReceipt) {
+      this.director.memory.ambition = reviewAmbition(this.director.memory,state,this.clock());
       this.document.development ??= chooseDevelopment(state,this.director.memory,this.clock(),this.developmentHint,this.buildRules);
       this.document.development = reviewDevelopment(this.document.development,state,this.director.memory,this.clock(),this.buildRules);
     }
@@ -253,7 +256,7 @@ export class LiveAgency {
   }
   summary() {
     const brief=(r:Receipt|undefined)=>r?{commandId:r.commandId,action:r.action,startedAt:r.startedAt}:undefined;
-    return {source:'agency-v2.json',preparation:this.document.preparation,updatedAt:this.document.updatedAt,buildReadiness:this.document.buildReadiness,development:this.document.development,
+    return {source:'agency-v2.json',ambition:this.director.memory.ambition,preparation:this.document.preparation,updatedAt:this.document.updatedAt,buildReadiness:this.document.buildReadiness,development:this.document.development,
       lastObservation:this.document.lastObservation,lastOutcome:this.document.lastOutcome,losses:(this.document.losses??[]).slice(-8),
       goal:this.director.memory.active,pending:brief(this.pending()),safetyPending:brief(this.pending('safety')),blocked:this.document.blocked};
   }
@@ -281,6 +284,7 @@ export function authorizeAction(state:LiveState,action:LiveCandidate,method:Meth
   const allowed=['walkTo','scanNearbyLocs','closeModal','closeShop','wait','retreat','useInventoryItem','equip','setCombatStyle',
     'interactNpc','interactLoc','talkToNpc','pickupItem','useItemOnItem','useItemOnLoc','shopBuy','shopSell','bankDeposit','bankWithdraw','clickDialogOption','acceptCharacterDesign'];
   if(!allowed.includes(action.type))throw new Error('UNREGISTERED_OPERATION');
+  bindItemAction(action,state);
   if(action.type==='interactNpc') {
     const npc=(state.nearbyNpcs??[]).find((n:any)=>n.index===action.fields?.npcIndex);
     const option=(npc?.optionsWithIndex??[]).find((o:any)=>o.opIndex===action.fields?.optionIndex);

@@ -141,6 +141,7 @@ export async function main(context:StartupContext){
     const result={character:'astra',time:new Date().toISOString(),mode,status,live:latest?.connected===true,goal:activeGoal,reason:why,
       actions,verified,failed,elapsedSeconds:start?Math.round((Date.now()-start.observed_at)/1000):0,
       observation:latest?brief(latest):null,policy:policy.summary(),pending:store.pending().map(p=>({operation:p.command.intent.operation,status:p.result.status,reason:p.result.reason})),
+      unresolvedJournalCount:store.unsettled().length, recoveryReport:'startup-recovery.json',
       authority:'single cooperating local controller; server fencing unavailable',npcSpendingGp:0,
       navigation,agency:agency?.summary(),
       research:research?{status:research.status,suggestedMonsters:research.suggestedMonsters,rejected:research.rejected,fetchedAt:research.fetchedAt}:null};

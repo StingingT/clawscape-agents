@@ -42,6 +42,7 @@ import { recoverLegacyJournals } from './agency/journal-recovery.ts';
 import { LiveAgency, isSelection, type Selection, type Verification } from './agency/live-adapter.ts';
 import type { Task, TaskKind, Route } from './agency/world-model.ts';
 import { randomUUID } from 'node:crypto';
+import { bindItemAction, validateItemBinding } from './agency/item-binding.ts';
 
 type Json = Record<string, unknown>;
 type GameState = {
@@ -1343,7 +1344,12 @@ async function runEpisode(): Promise<void> {
     const action=choose(stateKey(state),options);
     // One-item purchases use the current quoted price; no unbounded bulk purchase estimate.
     if(action.type==='shopBuy')action.fields={...action.fields,amount:1};
+    let itemBinding;
+    try { itemBinding=bindItemAction(action,state); }
+    catch(error) { agency.blocked('Candidate item validation refused: '+String(error));continue; }
     const fresh=stateFrom(await cliCall(['state']));
+    try { validateItemBinding(action,fresh,itemBinding); }
+    catch(error) { agency.blocked('Fresh item validation refused: '+String(error));state=fresh;continue; }
     if(urgentAgencyAction(fresh)){state=fresh;continue;}
     if(action.fields?.trainingSite&&!training?.validateAction(fresh,action)){state=fresh;continue;}
     if(action.id.startsWith('goal-')&&!equipmentGoals.validate(fresh,action)){state=fresh;continue;}
@@ -1388,7 +1394,7 @@ async function main(): Promise<void> {
     supported:['food','ammunition','equipment','bank','combat','production','gathering','exploration','funds','prayer'],
     developmentHint:build,
     buildRules:loadBuildRules(resolve(dataDir,'build-rules.json'),{world:process.env.CLAWSCAPE_SERVER??'clawscape',revision:gearCatalog.namespace}),
-    preferences:role==='economy'?{crafting:2,gathering:1}:role==='resource'?{gathering:2}:{combat:2},
+    preferences:role==='economy'?{crafting:2,gathering:1}:role==='resource'?{gathering:2}:role==='explorer'?{exploration:2}:['generalist','completionist'].includes(role)?{combat:1,crafting:1,gathering:1,exploration:1}:{combat:2},
     routes:Object.entries(WORLD_ROUTES).map(([id,p])=>({id,...p,level:0,evidence:'bundled route lead; arrival not yet personally verified'})),
   });
   navigator = new Navigator({

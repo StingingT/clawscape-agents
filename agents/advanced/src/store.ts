@@ -1,3 +1,4 @@
+import { needsReconciliation } from './journal-diagnostics.ts';
 import { Database } from "bun:sqlite";
 import type { ActionCommand, ActionResult } from "./contracts.ts";
 
@@ -35,8 +36,7 @@ export class Store {
       ;
   }
   unsettled(): { command: ActionCommand; result: ActionResult }[] {
-    return this.allActions().filter(({result:r})=>!((r.status==='SUCCEEDED'&&r.evidence.length>0)||r.status==='REJECTED'||r.status==='EXPIRED'
-      ||r.status==='CANCELLED'&&!/MAY_STILL|OUTCOME_UNKNOWN|PREEMPTED/.test(r.reason)));
+    return this.allActions().filter(({result:r})=>needsReconciliation(r));
   }
   pending(): { command: ActionCommand; result: ActionResult }[] {
     return this.allActions().filter(r => ["QUEUED", "RUNNING"].includes(r.result.status));

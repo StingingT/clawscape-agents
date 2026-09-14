@@ -23,6 +23,7 @@ export function inspectAgency(root: string, now = Date.now()): unknown[] {
       currentState: !current ? 'not-written' : known ? 'version-2' : 'unexpected-version',
       observationAgeSeconds: known && current.lastObservation?.at ? Math.max(0,Math.floor((now-current.lastObservation.at)/1000)) : null,
       lastObservation: known ? current.lastObservation : undefined,
+      ambition: known ? current.memory?.ambition : undefined,
       strategy: known && current.development ? {id:current.development.id,name:current.development.name,reason:safe(current.development.reason),sourceUrls:current.development.sourceUrls,levelCaps:current.development.levelCaps,protectedXp:current.development.protectedXp,trainingLeadIds:current.development.trainingLeadIds,alternatives:current.development.alternatives,review:current.development.review} : undefined,
       preparation: known ? current.preparation : undefined,
       buildReadiness: known ? current.buildReadiness : undefined,

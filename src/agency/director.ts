@@ -1,3 +1,4 @@
+import { ambitionPriority } from './ambitions.ts';
 import type { Budget, Decision, Facts, Goal, Identity, Memory, Method, MethodStats, Observation, Opportunity, Outcome, Plan, Requirement, SupportGoal } from './types.ts';
 
 import { createHash } from 'node:crypto';
@@ -216,7 +217,7 @@ export class Director {
         const role = Math.max(-2, Math.min(2, this.memory.preferences[goal.domain] ?? 0));
         const need = goal.source === 'need' ? 30 : goal.source === 'unlock' ? 6 : 0;
         const curiosity = goal.source === 'frontier' || goal.source === 'investigation' ? 2 : 0;
-        const score = (goal.priority === 'maintenance' ? -100 : 0) + need + role + curiosity - (plan ? plan.costGp + 3 * plan.lossBoundGp + plan.durationMs / 1000 : Infinity) / 100;
+        const score = (goal.priority === 'maintenance' ? -100 : 0) + need + role + curiosity + ambitionPriority(this.memory, goal, view.facts) - (plan ? plan.costGp + 3 * plan.lossBoundGp + plan.durationMs / 1000 : Infinity) / 100;
         return { goal, plan, score };
       }).filter(entry => entry.plan?.steps[0]).sort((a, b) => b.score - a.score || a.goal.id.localeCompare(b.goal.id));
     const selected = ranked[0];
@@ -224,7 +225,7 @@ export class Director {
       missingCapabilities: [...new Set(methods.filter(m => !view.capabilities.includes(m.capability)).map(m => m.capability))] };
     const goal: Goal = { ...structuredClone(selected.goal), key: goalKey(view, selected.goal), context: view.context,
       budget: { ...view.budget }, startedAt: view.at, baseline: amount(view.facts, selected.goal.target.fact),
-      spentGp: 0, lostGp: 0, deaths: 0, elapsedMs: 0, attempts: 0, noProgress: 0, strategyId: view.strategy?.id };
+      spentGp: 0, lostGp: 0, deaths: 0, elapsedMs: 0, attempts: 0, noProgress: 0, strategyId: view.strategy?.id, ambitionId: this.memory.ambition?.id };
     if (this.memory.currentDomain !== goal.domain) {
       this.memory.domainChanges.push({ at: view.at, from: this.memory.currentDomain, to: goal.domain, reason: goal.reason, evidence: [...goal.evidence] });
       this.memory.domainChanges = this.memory.domainChanges.slice(-128);

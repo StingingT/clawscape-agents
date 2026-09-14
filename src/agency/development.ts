@@ -1,3 +1,5 @@
+import { TRAINING_LEADS } from '../training/guide-leads.ts';
+import { motivatedPureTrial } from './ambitions.ts';
 import type { Memory, Observation } from './types.ts';
 import type { LiveState } from './world-model.ts';
 import { BUILD_GUIDES, BUILD_SOURCES, GUIDE_DATE, PRAYER_CHOICES, buildGuide, type GuideBuildId } from './build-guides.ts';
@@ -34,11 +36,10 @@ function prayerChoice(s:LiveState,rules?:BuildRules):number|undefined {
 /** Compare guide hypotheses against own irreversible state, not a prescribed character name. */
 export function chooseDevelopment(state:LiveState,memory:Memory,now:number,hint?:string,rules?:BuildRules):Development {
   const known=skills(state),can=availableSkills(state),prayer=prayerChoice(state,rules);
-  const interest=(memory.preferences.combat??0)>Math.max(memory.preferences.crafting??0,memory.preferences.gathering??0)
-    || memory.active?.domain==='combat';
+  const interest=motivatedPureTrial(memory); // A temporary combat dependency is not a build motive.
   const names=[...(state.inventory??[]),...(state.equipment??[])].map((i:any)=>String(i.name));
   const bow=names.some(n=>/bow/i.test(n)),melee=names.some(n=>/sword|scimitar|dagger|mace/i.test(n));
-  const alternatives=BUILD_GUIDES.map(g=>{
+  const alternatives:NonNullable<Development['alternatives']>=BUILD_GUIDES.map(g=>{
     const frozen=g.frozen;
     let reason='Compatible observed starting state; remaining unlocks are hypotheses.';
     let eligible=interest && state.inGame!==false && state.player?.combat?.inCombat!==true && knownStat(known.defence) && known.defence.level===1 && prayer!==undefined
@@ -55,13 +56,14 @@ export function chooseDevelopment(state:LiveState,memory:Memory,now:number,hint?
     if(hint==='ranged-magic' && g.id==='ranged-magic-pure')score+=.25;
     if(hint==='melee' && g.id==='rune-melee-pure')score+=.25;
     if(g.id==='dragon-weapon-pure')score+=.5;
-    if(!eligible)reason='Incompatible XP/Prayer state, unavailable observed style/equipment, or unverified required content/access.';
+    if(!eligible)reason=!interest ? 'No deliberate, evidence-backed restricted-build experiment; ordinary training and support combat do not imply a pure.' : 'Incompatible XP/Prayer state, unavailable observed style/equipment, or unverified required content/access.';
     return {id:g.id,score,eligible,reason};
   });
+  alternatives.push({id:'open-development',score:interest ? .5 : 4,eligible:true,reason:'Unrestricted combat development preserves every skill option and supports the personal ambition without pure caps.'});
   const best=alternatives.filter(a=>a.eligible).sort((a,b)=>b.score-a.score||a.id.localeCompare(b.id))[0];
-  if(!best)return {version:2,id:'open-development',name:'Open development',chosenAt:now,focus:can,protectedXp:{},history:[],
-    reason:'Follow feasible personal goals without calling incompatible or insufficiently observed stats a one-Defence pure.',
-    evidence:[own(state)],alternatives,sourceUrls:[],trainingLeadIds:[]};
+  if(!best || best.id==='open-development')return {version:2,id:'open-development',name:'Unrestricted combat development',chosenAt:now,focus:can,protectedXp:{},history:[],
+    reason:memory.ambition ? `Support ${memory.ambition.name.toLowerCase()} without imposing combat skill caps; a pure needs its own evidence-backed purpose.` : 'Develop useful skills without restrictions; pure templates do not outrank unrestricted progression just because they are compatible.',
+    evidence:[own(state)],alternatives,sourceUrls:[...new Set(TRAINING_LEADS.map(l=>l.source))],trainingLeadIds:TRAINING_LEADS.map(l=>l.id)};
   const g=buildGuide(best.id)!;
   const caps:Record<string,number>={defence:1,prayer:prayer!};
   if(g.attackCap)caps.attack=g.attackCap;
@@ -71,7 +73,7 @@ export function chooseDevelopment(state:LiveState,memory:Memory,now:number,hint?
     milestones:{...(g.attackCap?{attack:[5,10,20,30,40,60].filter(n=>n<=g.attackCap!)}:{}),prayer:[prayer!]},
     researchedAt:GUIDE_DATE,sourceUrls:g.sourceIds.map(id=>BUILD_SOURCES[id]),trainingLeadIds:[...g.trainingLeadIds],
     reason:`Test ${g.name}: ${g.rationale} Selected from observed skills/equipment; guide advice is not verified server behavior. Prayer ceiling: ${prayer}.`,
-    evidence:[own(state),`observed-training-options:${can.join(',')}`],history:[],alternatives,rulesSource:rules?.source};
+    evidence:[own(state),`observed-training-options:${can.join(',')}`,...(memory.ambition?.evidence??[])],history:[],alternatives,rulesSource:rules?.source};
 }
 
 /** Existing saves retain their restrictions and history; a rename cannot authorize extra XP. */
@@ -93,9 +95,9 @@ export function reviewDevelopment(current:Development,state:LiveState,memory:Mem
   let d=migrateDevelopment(current,state,now),known=skills(state);
   if(d.id==='open-development') {
     const candidate=chooseDevelopment(state,memory,now,undefined,rules);
-    if(candidate.id==='open-development')return d;
+    if(candidate.id==='open-development')return {...candidate,chosenAt:d.chosenAt,history:d.history,protectedXp:d.protectedXp,levelCaps:d.levelCaps};
     return {...candidate,history:[...d.history,{at:now,from:d.id,to:candidate.id,
-      reason:'New own capabilities make a guide-informed trial feasible; adopt before starting another goal.',evidence:candidate.evidence}].slice(-32)};
+      reason:'A recorded comparative-build ambition and compatible own evidence justify this trial before starting another goal.',evidence:candidate.evidence}].slice(-32)};
   }
   for(const [k,cap] of Object.entries(d.levelCaps??{}))if(knownStat(known[k])&&known[k].level>=cap&&!Object.hasOwn(d.protectedXp,k))
     d={...d,protectedXp:{...d.protectedXp,[k]:known[k].xp},evidence:[...d.evidence,`milestone-review:${k}:${cap}:${own(state)}`]};

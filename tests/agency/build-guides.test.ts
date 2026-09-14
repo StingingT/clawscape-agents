@@ -1,3 +1,4 @@
+import { seedBuildExperiment } from './build-fixture.ts';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtempSync,rmSync,readFileSync} from 'node:fs';
@@ -10,7 +11,7 @@ import {LiveAgency,isSelection} from '../../src/agency/live-adapter.ts';
 import {createMemory} from '../../src/agency/director.ts';
 import {TRAINING_LEADS,inspectTrainingLeads,guidePrior} from '../../src/training/guide-leads.ts';
 const identity={agent:'scout',world:'test',revision:'fixture'};
-const memory=()=>createMemory(identity,{combat:2});
+const memory=()=>seedBuildExperiment(createMemory(identity,{combat:2}));
 const state=():any=>({character:'scout',world:'test',tick:1,inGame:true,player:{lifeId:1,worldX:1,worldZ:1,level:0,hp:30,maxHp:30,combat:{inCombat:false}},
   skills:['attack','strength','defence','ranged','magic','prayer'].map(name=>({name,baseLevel:1,level:1,experience:0})),
   inventory:[{id:315,name:'Shrimps',slot:0,count:8,optionsWithIndex:[{opIndex:1,text:'Eat'}]}],
@@ -29,7 +30,7 @@ test('all four researched profiles have dated source-backed descriptions and no 
   for(const g of BUILD_GUIDES){assert.equal(g.defenceCap,1);assert.ok(g.sourceIds.every(k=>BUILD_SOURCES[k]));assert.ok(g.trainingLeadIds.length);assert.equal('coordinates' in g,false);}
   assert.ok(EXCLUDED_DEFAULTS.some(s=>s.includes('2021')));
 });
-test('the same role chooses melee versus ranged from different observations, not the character name',()=>{
+test('a deliberately motivated experiment chooses melee versus ranged from observations, not the character name',()=>{
   const a=state();assert.equal(chooseDevelopment(a,memory(),1,'ranged-magic').id,'rune-melee-pure');
   a.combatStyle={weaponName:'Shortbow',currentStyle:0,styles:[{index:0,trainsSkills:['ranged']}]};a.equipment=[{name:'Shortbow'}];
   assert.equal(chooseDevelopment(a,memory(),1,'melee').id,'ranged-magic-pure');
@@ -115,7 +116,7 @@ test('startup, sources, caps and one pending intent survive a restart',t=>{
   const dir=mkdtempSync(join(tmpdir(),'build-guide-test-'));t.after(()=>rmSync(dir,{recursive:true,force:true}));const file=join(dir,'agency.json'),s=state();
   s.combatStyle.currentStyle=1;
   const options={supported:['combat'] as any,preferences:{combat:2},policy:{combatLossBoundGp:5},developmentHint:'melee',now:()=>1000};
-  let a=new LiveAgency(file,identity,options),p=a.plan(s);assert.ok(isSelection(p));assert.equal(p.task.skill,'strength');
+  let a=new LiveAgency(file,identity,options);seedBuildExperiment(a.director.memory);const p=a.plan(s);assert.ok(isSelection(p));assert.equal(p.task.skill,'strength');
   a.begin(p,{...attack,id:'trial'},s,'12345678-1234-1234-1234-123456789abc');a=new LiveAgency(file,identity,options);
   assert.equal(a.pending()?.commandId,'12345678-1234-1234-1234-123456789abc');const resumed=a.plan(s);assert.ok(!isSelection(resumed));assert.equal(resumed.type,'reconcile');
   const doc=JSON.parse(readFileSync(file,'utf8'));assert.equal(doc.development.version,2);assert.equal(doc.development.levelCaps.attack,40);assert.ok(doc.development.sourceUrls.length);
@@ -124,7 +125,7 @@ test('no Prayer objective is offered when the selected build protects Prayer',t=
   const dir=mkdtempSync(join(tmpdir(),'build-prayer-'));t.after(()=>rmSync(dir,{recursive:true,force:true}));const s=state();
   s.inventory.push({id:526,slot:10,name:'Bones',optionsWithIndex:[{opIndex:1,text:'Bury'}]});
   const a=new LiveAgency(join(dir,'agency.json'),identity,{supported:['prayer','combat'],preferences:{combat:2},policy:{combatLossBoundGp:5}});
-  a.plan(s);assert.equal(a.catalogue(s).opportunities.some(g=>g.id==='train-prayer'),false);
+  seedBuildExperiment(a.director.memory);a.plan(s);assert.equal(a.catalogue(s).opportunities.some(g=>g.id==='train-prayer'),false);
 });
 test('rock crabs and safespot recommendations remain unbound investigations, never invented routes',()=>{
   for(const id of ['rock-crabs','hill-giants','moss-giants']) {
@@ -142,7 +143,7 @@ test('an existing Prayer milestone can be retained without assuming further XP s
   const s=state();set(s,'prayer',13);const d=chooseDevelopment(s,memory(),1,'melee');
   assert.equal(d.id,'rune-melee-pure');assert.equal(d.levelCaps?.prayer,13);assert.equal(d.protectedXp.prayer,1200);
 });
-test('an open strategy can adopt a compatible specialization after new equipment observations',()=>{
+test('an already motivated build experiment can adopt its specialization after missing equipment becomes available',()=>{
   const s=state();s.combatStyle.styles=[];const m=memory(),d=chooseDevelopment(s,m,1);
   assert.equal(d.id,'open-development');s.combatStyle={weaponName:'Shortbow',currentStyle:0,styles:[{index:0,trainsSkills:['ranged']}]};
   s.equipment=[{name:'Shortbow'}];const n=reviewDevelopment(d,s,m,2);
