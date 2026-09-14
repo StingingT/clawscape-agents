@@ -306,8 +306,7 @@ export class LivePolicy {
   }
 
   summary(): unknown {
-    return { state: structuredClone(this.state), proposalTargets: [{ attack: 20, strength: 20, defence: 20 },
-      { attack: 40, strength: 60, defence: 40 }], evidence: "PURE_POLICY_OBSERVATION_TESTS_NOT_LIVE_GAMEPLAY" };
+    return { state: structuredClone(this.state), objectiveSource:'Director-selected outcome tasks; no fixed level quotas', evidence: "PURE_POLICY_OBSERVATION_TESTS_NOT_LIVE_GAMEPLAY" };
   }
 
   /** Research can suggest names, never grant capabilities, prices, IDs or routes. */
@@ -664,17 +663,18 @@ export class LivePolicy {
     const names: Skill[] = ["attack", "strength", "defence"];
     const levels = names.map(n => skillLevel(o, n, true));
     if (levels.some(n => n === null)) return block("training", "MELEE_SKILLS_UNAVAILABLE", "All three base melee skills are required.");
-    const goals = levels.every(n => n! >= 20) ? [40, 60, 40] : [20, 20, 20];
     if (requestedSkill && !names.includes(requestedSkill as Skill)) return block('training', 'UNSUPPORTED_TRAINING_SKILL', 'The executor supports only its observed melee styles.');
-    const lagging = requestedSkill ? {name:requestedSkill as Skill,ratio:0,remaining:1} : names.map((name, i) => ({ name, ratio: levels[i]! / goals[i]!, remaining: goals[i]! - levels[i]! }))
-      .filter(s => s.remaining > 0).sort((a, b) => a.ratio - b.ratio || names.indexOf(a.name) - names.indexOf(b.name))[0];
-    if (!lagging) return block("training", "PROPOSED_TARGETS_REACHED", "Observed 40 Attack/60 Strength/40 Defence reached; broader progression requires a new supported scope, not endless completion waits.");
+    // Run mode supplies a Director-selected skill. The standalone policy's
+    // fallback balances current capabilities, not historical 20/20/20 or 40/60/40 quotas.
+    const chosenSkill=requestedSkill??names.filter((_,i)=>levels[i]!<99).sort((a,b)=>levels[names.indexOf(a)]!-levels[names.indexOf(b)]!)[0];
+    if(!chosenSkill)return block('training','NO_TRAINING_OPPORTUNITY','No supported base skill can improve; select another task.');
+    const lagging={name:chosenSkill as Skill};
     const styleSkills = (s: string) => s.split(",").map(n => normalize(n).replace("defense", "defence"));
     const styles = o.activity!.styles.filter(s => styleSkills(s.skill).includes(lagging.name) && (!requestedSkill || styleSkills(s.skill).length === 1))
       .sort((a, b) => styleSkills(a.skill).length - styleSkills(b.skill).length || a.index - b.index);
     const style = styles.find(s => s.index === o.activity!.style) ?? styles[0];
     if (!style) return block(`training:${lagging.name}`, "UNSUPPORTED_COMBAT_STYLE", "No actual observed style trains the selected lagging skill; never assume numeric style mappings.");
-    if (o.activity!.style !== style.index) return { goal: `training:${lagging.name}`, reason: `Balance the proposed ${goals.join("/")} melee targets using observed ${style.name}.`,
+    if (o.activity!.style !== style.index) return { goal: `training:${lagging.name}`, reason: `Train the selected ${lagging.name} objective using observed ${style.name}.`,
       intent: { operation: "style", style_index: style.index } };
     const candidates = o.entities.filter(e => encounter(e) && e.in_combat === false && e.reachable !== false
       && e.position.plane === o.position!.plane && distance(o.position!, e.position) <= 12);
@@ -791,7 +791,8 @@ export class LivePolicy {
     const i = d.intent;
     if (!i) return (d.wait || d.destination) ? this.marker(before, d) !== this.marker(after, d) : false;
     switch (i.operation) {
-      case "move": return !!after.position && distance(after.position, i.destination) === 0;
+      case "move": return !!before.position && !!after.position && before.position.plane===after.position.plane
+        && (distance(after.position,i.destination)===0 || distance(before.position,after.position)>0);
       case "deposit": case "withdraw": {
         if (!before.bank.open || !after.bank.open || !before.bank.items || !after.bank.items) return false;
         const invDelta = count(after.inventory, i.item_id) - count(before.inventory, i.item_id);

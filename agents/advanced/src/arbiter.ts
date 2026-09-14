@@ -24,8 +24,13 @@ export function evidence(intent: Intent, before: Observation, after: Observation
   switch (intent.operation) {
     case "close_interface": return before.bank.open && after.bank.open === false ? ["bank-closed"]
       : before.shop_open && after.shop_open === false ? ["shop-closed"]
+      : before.dialog.open && after.dialog.open === false ? ["dialogue-closed"]
       : before.activity?.modal_open && after.activity?.modal_open === false ? ["modal-closed"] : [];
-    case "move": return same(after.position, intent.destination) ? ["destination-observed"] : [];
+    case "move": {
+      if(!before.position||!after.position||before.position.plane!==after.position.plane||after.seq<=before.seq)return [];
+      if(same(after.position,intent.destination))return ['destination-observed'];
+      return !same(before.position,after.position)?['navigation-leg-progress-observed; destination not yet reached']:[];
+    }
     case "eat": return (total(before.inventory,intent.item_id) ?? 0) > (total(after.inventory,intent.item_id) ?? 0)
       && before.hp !== null && after.hp !== null && after.hp > before.hp ? ["food-decreased", "hp-increased"] : [];
     case "deposit":

@@ -163,26 +163,26 @@ export class Director {
 
   /** Only attributable, terminal outcomes update learning. Unknown is NOT failed. */
   record(outcome: Outcome): void {
-    if (!['verified', 'progress', 'rejected', 'unknown'].includes(outcome.status) || !Number.isSafeInteger(outcome.sequence) || outcome.sequence <= 0
+    if (!['verified', 'progress', 'rejected', 'unknown', 'interrupted'].includes(outcome.status) || !Number.isSafeInteger(outcome.sequence) || outcome.sequence <= 0
       || ![outcome.at, outcome.spentGp, outcome.lostGp, outcome.deaths, outcome.elapsedMs].every(finiteNonnegative)
       || !Number.isInteger(outcome.deaths) || !Object.values(outcome.facts).every(Number.isFinite)) throw new Error('INVALID_OUTCOME');
     if (outcome.sequence <= this.memory.sequence) return;
     const pending = this.memory.pending, goal = this.memory.active;
     if (!pending || pending.commandId !== outcome.commandId || !goal || goal.key !== pending.goalKey) throw new Error('OUTCOME_WITHOUT_MATCHING_INTENT');
-    if (outcome.status === 'unknown' || (['verified', 'progress'].includes(outcome.status) && !outcome.evidence.length)) {
+    if (outcome.status === 'unknown' || (['verified', 'progress', 'interrupted'].includes(outcome.status) && !outcome.evidence.length)) {
       pending.status = 'unknown'; return;
     }
     const stats = this.memory.methods[methodKey(pending.context, pending.method.id)] ??= emptyStats();
     const productive = outcome.status === 'verified' && Object.keys(pending.method.effects)
       .some(fact => amount(outcome.facts, fact) > amount(pending.before, fact));
-    const preparation = outcome.status === 'progress';
+    const preparation = outcome.status === 'progress' || outcome.status === 'interrupted';
     // A verified route leg/interface transition advances a method; it is not
     // a failed training trial and does not satisfy a quantitative goal.
     if (preparation) stats.preparationMs = (stats.preparationMs ?? 0) + outcome.elapsedMs;
     else { stats.attempts++; stats.productive += Number(productive); stats.rejected += Number(outcome.status === 'rejected'); }
     stats.spentGp += outcome.spentGp; stats.lostGp += outcome.lostGp; stats.elapsedMs += outcome.elapsedMs;
     if (!preparation) stats.cooldownUntil = productive ? 0 : outcome.at + COOLDOWN_MS;
-    goal.attempts++; goal.noProgress = productive || preparation ? 0 : goal.noProgress + 1;
+    goal.attempts++; goal.noProgress = productive || outcome.status === 'progress' ? 0 : goal.noProgress + 1;
     goal.spentGp += outcome.spentGp; goal.lostGp += outcome.lostGp; goal.deaths += outcome.deaths; goal.elapsedMs += outcome.elapsedMs;
     this.memory.sequence = outcome.sequence;
     delete this.memory.pending;

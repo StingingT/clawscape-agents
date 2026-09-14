@@ -1,11 +1,12 @@
 type ActionLike = { id?:string; actionId?:string; type:string; fields?:Record<string,any> };
-export type ActionVerification = { verified:boolean; evidence:string[]; uncertain:boolean; reason?:string };
+export type ActionVerification = { verified:boolean; evidence:string[]; uncertain:boolean; reason?:string; interrupted?:boolean };
 const quantity=(items:any[]|undefined,id:any)=>(items??[]).filter(i=>String(i.id)===String(id)).reduce((n,i)=>n+Number(i.count??1),0);
 const coins=(s:any)=>(s.inventory??[]).filter((i:any)=>Number(i.id)===995||/^coins$/i.test(String(i.name))).reduce((n:number,i:any)=>n+Number(i.count??1),0);
 const xp=(s:any,name:string)=>Number(s.skills?.find((k:any)=>String(k.name).toLowerCase()===name)?.experience??s.skills?.find((k:any)=>String(k.name).toLowerCase()===name)?.xp??0);
 const same=(a:any,b:any)=>JSON.stringify(a)===JSON.stringify(b);
 const yes=(...evidence:string[]):ActionVerification=>({verified:true,evidence,uncertain:false});
 const no=(reason:string,uncertain=true):ActionVerification=>({verified:false,evidence:[],uncertain,reason});
+const interrupted=(reason:string):ActionVerification=>({verified:false,uncertain:false,interrupted:true,evidence:[reason],reason});
 const menu=(e:any,index:any)=>(e?.optionsWithIndex??[]).find((o:any)=>o.opIndex===index)?.text??'';
 const opened=(s:any)=>s.bank?.isOpen===true||s.shop?.isOpen===true||s.dialog?.isOpen===true||s.modalOpen===true;
 
@@ -18,13 +19,29 @@ export function verifyActionOutcome(before:any,after:any,action:ActionLike,resul
   if(type==='wait')return Number(after.tick)>Number(before.tick)?yes('read-only wait completed'):no('observation has not advanced',false);
   if(type==='scanNearbyLocs')return Number(after.tick)>=Number(before.tick)&&Array.isArray(after.nearbyLocs)?yes('read-only scan completed'):no('scan unavailable',false);
   if(type==='walkTo'||type==='retreat') {
-    const moved=before.player.worldX!==after.player.worldX||before.player.worldZ!==after.player.worldZ;
-    if(type==='retreat')return moved?yes('retreat movement observed'):no('retreat not yet observed');
-    const distance=(s:any)=>Math.max(Math.abs(Number(s.player.worldX)-Number(f.x)),Math.abs(Number(s.player.worldZ)-Number(f.z)));
-    if(!Number.isFinite(distance(after))||Number(after.player.level)!==Number(f.level??0))return no('destination/plane invalid');
-    if(distance(after)<=1)return yes('requested destination observed');
-    if(moved && (distance(after)<distance(before)||result?.navigation?.status==='progress'))return yes('navigation leg made verified movement');
-    return no('movement not yet verified',!['blocked','arrived'].includes(result?.navigation?.status));
+    // A receipt covers ONE navigator invocation, not the complete journey.
+    // Collision-safe detours may increase distance to the final destination.
+    const a=after.player,b=before.player;
+    if(![a.worldX,a.worldZ,a.level,b.worldX,b.worldZ,b.level].every(Number.isFinite))return no('complete navigation coordinates required');
+    if(a.level!==b.level)return no('plane changed; re-observe before reconciling movement');
+    if(before.sessionId && after.sessionId && before.sessionId!==after.sessionId)return no('session changed; old movement cannot be attributed');
+    if(!Number.isFinite(before.tick)||!Number.isFinite(after.tick)||after.tick<before.tick)return no('navigation observation clock reset or missing');
+    const moved=b.worldX!==a.worldX||b.worldZ!==a.worldZ;
+    const fresh=after.tick>before.tick || Number(after.seq)>Number(before.seq);
+    if(type==='walkTo') {
+      if(![f.x,f.z,f.level??0].every(Number.isFinite)||a.level!==(f.level??0))return no('destination/plane invalid');
+      if(Math.max(Math.abs(a.worldX-f.x),Math.abs(a.worldZ-f.z))<=1 && fresh)
+        return yes('requested destination observed');
+    }
+    if(moved && fresh)return yes(`${type==='retreat'?'retreat':'navigation leg'} displacement observed: ${b.worldX},${b.worldZ}->${a.worldX},${a.worldZ}; final route is not complete`);
+    const nav=result?.navigation;
+    // These statuses are set by our navigator before issuing a movement.
+    // Ending this preparation attempt must not pin a pending move forever.
+    if(nav?.movementDispatched===false && nav.status==='loading-map' && fresh)
+      return yes('navigator read-only map wait completed; destination remains pending');
+    if(nav?.movementDispatched===false && ['blocked','replanning','interrupted'].includes(nav.status))
+      return interrupted('navigator preparation ended without a movement dispatch: '+String(nav.reason??nav.status));
+    return no('movement not yet verified');
   }
   if(type==='bankDeposit'||type==='bankWithdraw') {
     const source=type==='bankWithdraw'?before.bank?.items:before.inventory;
@@ -56,7 +73,20 @@ export function verifyActionOutcome(before:any,after:any,action:ActionLike,resul
     return no('requested inventory effect not verified');
   }
   if(type==='pickupItem')return quantity(after.inventory,f.itemId)>quantity(before.inventory,f.itemId)?yes(`pickup:${f.itemId} observed`):no('requested pickup not observed');
-  if(type==='talkToNpc'||type==='clickDialogOption')return !same(before.dialog,after.dialog)?yes('dialogue advanced'):no('dialogue effect not verified');
+  if(type==='talkToNpc'||type==='clickDialogOption') {
+    if(!same(before.dialog,after.dialog))return yes('dialogue advanced');
+    if(type==='clickDialogOption') {
+      const options=before.dialog?.options??before.dialog?.optionsWithIndex??[];
+      const selected=options.find((o:any)=>(o.index??o.opIndex)===f.optionIndex);
+      const production=/make|cook|smelt|smith|fletch|string|craft|arrow|bow/i.test(String(selected?.text??''));
+      const ids=new Set((before.inventory??[]).concat(after.inventory??[]).map((i:any)=>i.id));
+      const consumed=[...ids].some(id=>quantity(after.inventory,id)<quantity(before.inventory,id));
+      const produced=[...ids].some(id=>quantity(after.inventory,id)>quantity(before.inventory,id));
+      if(production && consumed && produced && ['cooking','firemaking','fletching','smithing','crafting'].some(k=>xp(after,k)>xp(before,k)))
+        return yes('selected production inputs/output and XP observed despite unchanged dialogue');
+    }
+    return no('dialogue effect not verified');
+  }
   let option='';
   if(type==='interactNpc')option=menu((before.nearbyNpcs??[]).find((n:any)=>n.index===f.npcIndex),f.optionIndex);
   if(type==='interactLoc')option=menu((before.nearbyLocs??[]).find((n:any)=>n.id===f.locId&&n.x===f.x&&n.z===f.z),f.optionIndex);

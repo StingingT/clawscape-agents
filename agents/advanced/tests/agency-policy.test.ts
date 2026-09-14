@@ -34,3 +34,14 @@ test('unsupported task does not silently fall back to the old training policy',(
 test('a selected supply task cannot default to a monster when its supply is already satisfied',()=>{
   const d=new LivePolicy().next(observed(),{id:'food',kind:'food'});expect(d.wait).toBe(true);expect(d.intent).toBeUndefined();
 });
+
+test('Astra partial movement completes the action observation without losing its exploration task',()=>{
+  const before=observed(),policy=new LivePolicy(),task={id:'survey:site',kind:'exploration' as const,route:{id:'site',x:3240,z:3240,level:0,evidence:'own observed site'}};
+  const next=structuredClone(before);next.seq++;next.tick!++;next.observed_at+=600;next.fresh_at=next.observed_at;next.position!.x++;
+  const decision=policy.next(before,task);decision.intent={operation:'move',destination:{x:3240,z:3240,plane:0}};
+  policy.recordOutcome(before,next,decision,'SUCCEEDED');
+  expect((policy.summary() as any).state.uncertain).toBeNull();expect(policy.next(next,task).goal).toBe(task.id);
+});
+test('standalone policy has no old 40/60/40 completion gate or reported fixed quotas',()=>{
+ const policy=new LivePolicy();expect(policy.next(observed()).blocked).not.toBe('PROPOSED_TARGETS_REACHED');expect((policy.summary() as any).proposalTargets).toBeUndefined();
+});

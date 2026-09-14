@@ -8,10 +8,10 @@ import { buildCatalogue, capabilityContext, cash, defaultPolicy, emptyKnowledge,
 
 export type LiveCandidate = { id: string; type: string; fields?: Record<string, any>; waitTicks?: number };
 export type Selection = { decision: Extract<Decision,{type:'execute'}>; method: Method; task: Task; view: Observation };
-export type Receipt = { commandId:string; action:LiveCandidate; before:LiveState; startedAt:number; scope:'task'|'safety'; methodId?:string };
+export type Receipt = { commandId:string; action:LiveCandidate; before:LiveState; startedAt:number; scope:'task'|'safety'; methodId?:string; execution?:{navigation?:{status:string;reason?:string;movementDispatched?:boolean}}; stationary?:{tick:number;position:string;since:number} };
 type Document = { version:2; memory:Memory; knowledge:Knowledge; receipt?:Receipt; safetyReceipt?:Receipt;
-  lastCommands:string[]; blocked?:string };
-export type Verification = { status:'verified'|'rejected'|'unknown'; evidence:string[]; reason?:string };
+  lastCommands:string[]; route?:{goalKey:string;methodId:string;action:LiveCandidate}; blocked?:string };
+export type Verification = { status:'verified'|'rejected'|'unknown'|'interrupted'; evidence:string[]; reason?:string };
 
 const atomic = (file:string,value:unknown) => {
   mkdirSync(dirname(file),{recursive:true});
@@ -69,6 +69,41 @@ export class LiveAgency {
     const receipt=scope==='safety'?this.document.safetyReceipt:this.document.receipt;
     return receipt && structuredClone(receipt);
   }
+  /** Persist only command-scoped executor evidence, never an entire global navigation cache. */
+  rememberExecution(commandId:string,result:any):void {
+    const r=this.document.receipt?.commandId===commandId?this.document.receipt:this.document.safetyReceipt;
+    if(!r||r.commandId!==commandId)throw new Error('EXECUTION_WITHOUT_MATCHING_INTENT');
+    if(result?.navigation)r.execution={navigation:{status:String(result.navigation.status),
+      reason:result.navigation.reason,movementDispatched:result.navigation.movementDispatched}};
+    this.save();
+  }
+  /** Continue the committed destination after a partial leg, including after restart. */
+  routeStep(selection:Selection,state:LiveState):LiveCandidate|undefined {
+    const r=this.document.route;
+    if(!r)return;
+    if(r.goalKey!==selection.decision.goal.key||r.methodId!==selection.method.id){delete this.document.route;this.save();return;}
+    const f=r.action.fields??{},p=state.player;
+    if(p?.level!==f.level && !(p?.level===0&&f.level===undefined)){delete this.document.route;this.save();return;}
+    if(Math.max(Math.abs(Number(p?.worldX)-Number(f.x)),Math.abs(Number(p?.worldZ)-Number(f.z)))<=1){delete this.document.route;this.save();return;}
+    return structuredClone(r.action);
+  }
+  /** Only idempotent navigation/read steps can expire without causal success evidence.
+   * Require two fresh stationary observations after the settling window. Never use for
+   * dialogue, production, purchases, transfers, eating, or other inventory mutations. */
+  settleNavigation(commandId:string,state:LiveState):Verification|undefined {
+    const r=this.document.receipt?.commandId===commandId?this.document.receipt:this.document.safetyReceipt;
+    if(!r||r.commandId!==commandId||!['walkTo','retreat'].includes(r.action.type))return;
+    const a=state.player,b=r.before.player;
+    if(!a||!b||a.lifeId!==b.lifeId||a.level!==b.level||state.inGame===false||a.isDead||a.combat?.inCombat)return;
+    if(r.before.sessionId && state.sessionId && r.before.sessionId!==state.sessionId)return;
+    if(![a.worldX,a.worldZ,a.level,state.tick,r.before.tick].every(Number.isFinite)||state.tick<=r.before.tick)return;
+    if(a.animId!==-1)return; // No idle evidence means no safe automatic retirement.
+    const position=JSON.stringify([a.worldX,a.worldZ,a.level]);
+    const previous=r.stationary;
+    if(!previous||previous.position!==position){r.stationary={tick:state.tick,position,since:this.clock()};this.save();return;}
+    if(state.tick<=previous.tick||this.clock()-Math.max(r.startedAt,previous.since)<30_000)return;
+    return {status:'interrupted',evidence:['two fresh stationary idle observations after navigation settling window; no action replay and no success inferred'],reason:'Navigation leg retired as interrupted; retain the goal and reassess the route.'};
+  }
   blocked(reason:string):void {
     this.director.blocked(this.clock(),reason);this.document.blocked=reason;this.save();
   }
@@ -81,6 +116,7 @@ export class LiveAgency {
     const priced={...selection.method,costGp:cost};
     this.director.begin(view,selection.decision,priced,commandId);
     this.document.receipt={commandId,action:structuredClone(action),before:structuredClone(state),startedAt:this.clock(),scope:'task',methodId:selection.method.id};
+    if(action.type==='walkTo')this.document.route={goalKey:selection.decision.goal.key,methodId:selection.method.id,action:structuredClone(action)};
     this.save();return commandId;
   }
   /** Urgent survival is independent of the goal; it cannot overwrite an unresolved ordinary intent. */
@@ -97,6 +133,7 @@ export class LiveAgency {
     if(!receipt && this.document.lastCommands.includes(commandId))return;
     if(!receipt||receipt.commandId!==commandId)throw new Error('OUTCOME_WITHOUT_MATCHING_INTENT');
     const state=this.catalogue(after).view;
+    if(verification.status==='interrupted')delete this.document.route;
     const deaths=Number(after.player?.lifeId!==receipt.before.player?.lifeId);
     // Without server-attributed loss valuation a death cannot be called a free successful attempt.
     if(deaths && !metrics)verification={status:'unknown',evidence:[],reason:'Death requires inventory/loss reconciliation.'};
