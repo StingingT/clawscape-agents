@@ -15,6 +15,7 @@ const js=ts.transpileModule(extracted,{compilerOptions:{target:ts.ScriptTarget.E
 async function runScenario({blocked=false,unknown=false,deny=false}={}){
   const {LiveAgency,isSelection}=await import('../src/agency/live-adapter.ts');
   const {verifyActionOutcome}=await import('../src/action-outcome.ts');
+  const {recoverLegacyJournals}=await import('../src/agency/journal-recovery.ts');
   const dir=mkdtempSync(join(tmpdir(),'agency-controller-'));
   try{
     let now=1000,ids=0,mutationCalls=0,planned=false;
@@ -31,6 +32,7 @@ async function runScenario({blocked=false,unknown=false,deny=false}={}){
       agency,steps:5,character:'test',role:'brawler',build:'melee',forumEnabled:false,training:undefined,
       console:{log(){},error(){}},Date:{now:()=>now},JSON,Number,Math,Set,Array,String,
       loadActionIntent:()=>undefined,actionIntentPath:'unused',finishActionIntent:()=>{},
+      dataDir:dir,existsSync:require('node:fs').existsSync,resolve:require('node:path').resolve,recoverLegacyJournals,process:{env:{}},
       stateFrom:v=>v.state,isSelection,verifyActionOutcome,available:v=>v,choose:(_,v)=>v[0],stateKey:()=>'',
       urgentAgencyAction:()=>undefined,validateMetal:()=>true,validateBow:()=>true,validateFishing:()=>true,
       equipmentGoals:{validate:()=>true},observeAgencyResult:()=>{},appendFileSync:()=>{},experiencePath:'unused',

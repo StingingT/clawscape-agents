@@ -20,7 +20,9 @@ export class CliSession {
     this.root = resolve(root,config.game_root);
     if (!config.cli_home) throw new Error('CLI_HOME_REQUIRED');
     this.home = resolve(root,config.cli_home);
-    const auth = JSON.parse(readFileSync(join(this.home,'config.jsonl'),'utf8'));
+    let auth: any;
+    try { auth = JSON.parse(readFileSync(join(this.home,'config.jsonl'),'utf8')); }
+    catch { throw new Error('CLI_HOME_CONFIGURATION_MISSING_OR_INVALID'); }
     if (new URL(auth.server).origin !== new URL(config.world).origin || !auth.token) throw new Error('OWNER_WORLD_CONFIGURATION_REQUIRED');
   }
   async command(args: string[], timeoutMs = 8000): Promise<Reply> {

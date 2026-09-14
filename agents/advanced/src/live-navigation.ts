@@ -12,15 +12,35 @@ export class LiveNavigator {
   private routeHint?:Tile;
   private failures=new Map<string,{until:number;count:number}>();
   private ready=false;
-  constructor(){
-    this.worker=new Worker(new URL('./live-map-worker.ts',import.meta.url).href);
+  private startupError:string|undefined;
+  private readiness=new Set<{resolve:()=>void;reject:(e:Error)=>void}>();
+  constructor(factory=()=>new Worker(new URL('./live-map-worker.ts',import.meta.url).href)){
+    this.worker=factory();
     this.worker.onmessage=({data})=>{
-      if(data.ready){this.ready=true;return;}
+      if(data.ready){this.ready=true;for(const r of this.readiness)r.resolve();this.readiness.clear();return;}
       const callback=this.callbacks.get(data.id);if(!callback)return;
       this.callbacks.delete(data.id);data.error?callback.reject(new Error(data.error)):callback.resolve(data);
     };
+    this.worker.onerror=()=>{
+      this.ready=false;this.startupError='COLLISION_WORKER_FAILED';
+      for(const r of this.readiness)r.reject(new Error(this.startupError));this.readiness.clear();
+      for(const r of this.callbacks.values())r.reject(new Error(this.startupError));this.callbacks.clear();
+    };
   }
-  close(){this.worker.terminate();}
+  async waitUntilReady(timeoutMs=15_000):Promise<void> {
+    if(this.startupError)throw new Error(this.startupError);
+    if(this.ready)return;
+    await new Promise<void>((resolve,reject)=>{
+      const waiter={resolve:()=>{clearTimeout(timer);resolve();},reject:(e:Error)=>{clearTimeout(timer);reject(e);}};
+      const timer=setTimeout(()=>{this.readiness.delete(waiter);reject(new Error('COLLISION_WORKER_TIMEOUT'));},timeoutMs);
+      this.readiness.add(waiter);
+    });
+  }
+  close(){
+    for(const r of this.readiness)r.reject(new Error('NAVIGATOR_CLOSED'));this.readiness.clear();
+    for(const r of this.callbacks.values())r.reject(new Error('NAVIGATOR_CLOSED'));this.callbacks.clear();
+    this.worker.terminate();
+  }
   isReady(){return this.ready;}
   fail(destination:Tile,reason:string){
     const key=JSON.stringify(destination),old=this.failures.get(key);
@@ -28,6 +48,7 @@ export class LiveNavigator {
     this.route=undefined;return {blocked:reason};
   }
   async next(o:Observation,hint:Tile):Promise<{intent?:Intent;arrived?:boolean;wait?:boolean;blocked?:string;route?:Route}> {
+    if(this.startupError)return {blocked:this.startupError};
     if(!o.position)return {blocked:'POSITION_UNKNOWN'};
     if(!this.ready)return {wait:true};
     if((this.failures.get(JSON.stringify(hint))?.until??0)>Date.now())return {blocked:'ROUTE_COOLDOWN'};

@@ -57,7 +57,7 @@ Learning records preparation separately from productive outcomes, so a verified 
 
 For the shared CLI, command IDs are local correlation IDs; this patch does **not** claim server-side idempotency support. Unknown outcomes are re-observed against the saved before-state, not re-sent. Astra passes the same ID to its arbiter reservation and matches its result by that ID. Transport failures and post-dispatch preemption remain unknown. A journaled action that was cancelled before dispatch can be recorded as rejected.
 
-Old `agency-memory.json` records with pending synthetic intents and unresolved legacy `action-intent.json` entries are deliberately not discarded or guessed away. Reconcile them against the authoritative server/arbiter journal before enabling the new controller. Archive resolved legacy files; do not edit an unknown outcome to “failed” simply to get the character moving.
+Startup now invokes conservative legacy recovery and records immutable backups plus hash-scoped recovery receipts. The actual executor journal is checked before retiring obsolete synthetic planner bookkeeping. Unknown mutations still remain blocked; they are never changed to “failed” merely to make the character move. See `docs/JOURNAL_RECOVERY.md` for runtime-home selection, automatic recovery, read-only inspection and precise startup diagnostics.
 
 ## Validation performed
 
@@ -78,3 +78,5 @@ This change corrects the reviewed integration. It does not implement full-game m
 Astra's supervisor path now uses the packaged `agents/advanced` directory. Both controller families still require their existing local game configuration, CLI skill, compatibility files and upstream collision/content checkout. Those are not supplied by this repository.
 
 Before unattended deployment, use a test character and the complete local runtime to demonstrate resupply → activity → return/review, stale targets, transient errors, process restart and a real evidence-driven change of method. Confirm the local loss policy and legacy-journal reconciliation first. Maintain a rollback to the prior commit; do not infer live reliability from offline tests.
+
+Astra is launched through `src/live-entry.ts` so dependency and pre-status startup failures are reported. Runtime configuration and journals may stay in the existing installation via `CLAWSCAPE_ASTRA_HOME`; they are not silently recreated in the new code directory.

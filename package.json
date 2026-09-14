@@ -6,6 +6,7 @@
     "start": "bun src/agent.ts",
     "test:agency": "node --experimental-strip-types --test tests/agency/*.test.ts",
     "test:integration": "node --experimental-strip-types scripts/test-agency-controller.cjs",
-    "check:agency": "node scripts/check-agency.cjs"
+    "check:agency": "node scripts/check-agency.cjs",
+    "journals:inspect": "node --experimental-strip-types scripts/inspect-journals.ts"
   }
 }
