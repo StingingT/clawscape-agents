@@ -1,5 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { chooseDevelopment, reviewDevelopment, guardDevelopment, protectedXpChanged, type Development } from './development.ts';
+import { observeQuietStep, recordViability, retryAllowed, stepKey, type QuietWindow, type Viability } from './step-retry.ts';
 import { randomUUID } from 'node:crypto';
 import { Director, createMemory } from './director.ts';
 import type { Decision, Identity, Memory, Method, Observation, Outcome } from './types.ts';
@@ -8,9 +10,11 @@ import { buildCatalogue, capabilityContext, cash, defaultPolicy, emptyKnowledge,
 
 export type LiveCandidate = { id: string; type: string; fields?: Record<string, any>; waitTicks?: number };
 export type Selection = { decision: Extract<Decision,{type:'execute'}>; method: Method; task: Task; view: Observation };
-export type Receipt = { commandId:string; action:LiveCandidate; before:LiveState; startedAt:number; scope:'task'|'safety'; methodId?:string; execution?:{navigation?:{status:string;reason?:string;movementDispatched?:boolean}}; stationary?:{tick:number;position:string;since:number} };
+export type Receipt = { commandId:string; action:LiveCandidate; before:LiveState; startedAt:number; scope:'task'|'safety'; methodId?:string; execution?:{accepted?:boolean;phase?:string;navigation?:{status:string;reason?:string;movementDispatched?:boolean}}; stationary?:QuietWindow };
 type Document = { version:2; memory:Memory; knowledge:Knowledge; receipt?:Receipt; safetyReceipt?:Receipt;
-  lastCommands:string[]; route?:{goalKey:string;methodId:string;action:LiveCandidate}; blocked?:string };
+  lastCommands:string[]; route?:{goalKey:string;methodId:string;action:LiveCandidate}; blocked?:string; development?:Development; updatedAt?:number;
+  retries?:Record<string,Viability>; lastOutcome?:{at:number;commandId:string;type:string;status:string;reason?:string;evidence:string[]};
+  lastObservation?:{at:number;tick?:number;connected?:boolean;position?:{x:number;z:number;level:number}} };
 export type Verification = { status:'verified'|'rejected'|'unknown'|'interrupted'; evidence:string[]; reason?:string };
 
 const atomic = (file:string,value:unknown) => {
@@ -29,10 +33,12 @@ export class LiveAgency {
   private readonly routes:Route[];
   private readonly clock:()=>number;
   private document:Document;
+  private readonly developmentHint?:string;
+  private readonly observer = randomUUID();
   constructor(file:string,identity:Identity,options:{policy?:Partial<Policy>;supported:TaskKind[];routes?:Route[];
-    preferences?:Memory['preferences'];now?:()=>number}) {
+    preferences?:Memory['preferences'];now?:()=>number;developmentHint?:string}) {
     this.file=file;this.identity={...identity};this.supported=options.supported;this.routes=options.routes??[];
-    this.policy={...defaultPolicy,...options.policy};this.clock=options.now??Date.now;
+    this.policy={...defaultPolicy,...options.policy};this.clock=options.now??Date.now;this.developmentHint=options.developmentHint;
     if (!Object.entries(this.policy).every(([_,v])=>v===undefined||Number.isFinite(v)&&Number(v)>=0)
       || !Number.isInteger(this.policy.maxDeaths) || this.policy.foodTarget<1 || this.policy.maxDurationMs<=0)
       throw new Error('INVALID_AGENCY_POLICY');
@@ -47,15 +53,26 @@ export class LiveAgency {
       throw new Error('AGENCY_JOURNAL_INCONSISTENT');
     this.director=new Director(memory);
   }
-  private save() { atomic(this.file,this.document); }
+  private save() { this.document.updatedAt=this.clock();atomic(this.file,this.document); }
   catalogue(state:LiveState):Catalogue {
     if(state.character && String(state.character).toLowerCase()!==this.identity.agent.toLowerCase())throw new Error('OBSERVATION_AGENT_MISMATCH');
     if(state.world && state.world!==this.identity.world)throw new Error('OBSERVATION_WORLD_MISMATCH');
+    this.document.lastObservation={at:this.clock(),tick:state.tick,connected:state.inGame,position:state.player && {x:state.player.worldX,z:state.player.worldZ,level:state.player.level}};
     observeKnowledge(state,this.document.knowledge,this.clock(),this.routes);
-    return buildCatalogue(this.identity,state,this.document.knowledge,this.policy,this.supported,this.director.memory,this.clock());
+    return buildCatalogue(this.identity,state,this.document.knowledge,this.policy,this.supported,this.director.memory,this.clock(),this.document.development);
   }
   plan(state:LiveState):Selection|Decision {
+    if(state.character && String(state.character).toLowerCase()!==this.identity.agent.toLowerCase())throw new Error('OBSERVATION_AGENT_MISMATCH');
+    if(state.world && state.world!==this.identity.world)throw new Error('OBSERVATION_WORLD_MISMATCH');
     if(this.document.safetyReceipt)return {type:'blocked',reason:'Reconcile the safety action before any further dispatch.',missingCapabilities:[]};
+    if (!this.document.receipt && !this.document.safetyReceipt) {
+      this.document.development ??= chooseDevelopment(state,this.director.memory,this.clock(),this.developmentHint);
+      this.document.development = reviewDevelopment(this.document.development,state,this.director.memory,this.clock());
+    }
+    if (protectedXpChanged(this.document.development,state)) {
+      this.document.blocked='PURE_BUILD_XP_BOUNDARY_CHANGED: inspect the observed change before continuing combat.';this.save();
+      return {type:'blocked',reason:this.document.blocked,missingCapabilities:[]};
+    }
     const catalogue=this.catalogue(state), decision=this.director.next(catalogue.view,catalogue.opportunities,catalogue.methods);
     if(decision.type==='blocked'&&catalogue.methods.some(m=>m.risk==='unknown'))
       decision.reason+=' Combat loss valuation is unknown: provide an audited carried-kit replacement-loss ceiling in agency-policy.json.';
@@ -63,7 +80,7 @@ export class LiveAgency {
     if(decision.type!=='execute')return decision;
     const method=catalogue.methods.find(m=>m.id===decision.step.methodId),task=catalogue.tasks.get(decision.step.methodId);
     if(!method||!task)throw new Error('UNREGISTERED_PLANNED_METHOD');
-    return {decision,method,task,view:catalogue.view};
+    return {decision,method,task:{...task,target:decision.step.lineage?.at(-1)},view:catalogue.view};
   }
   pending(scope:'task'|'safety'='task'):Receipt|undefined {
     const receipt=scope==='safety'?this.document.safetyReceipt:this.document.receipt;
@@ -73,7 +90,10 @@ export class LiveAgency {
   rememberExecution(commandId:string,result:any):void {
     const r=this.document.receipt?.commandId===commandId?this.document.receipt:this.document.safetyReceipt;
     if(!r||r.commandId!==commandId)throw new Error('EXECUTION_WITHOUT_MATCHING_INTENT');
-    if(result?.navigation)r.execution={navigation:{status:String(result.navigation.status),
+    r.execution ??= {};
+    if(result?.accepted===false)r.execution.accepted=false;
+    if(result?.phase==='rejected')r.execution.phase='rejected';
+    if(result?.navigation)r.execution={...r.execution,navigation:{status:String(result.navigation.status),
       reason:result.navigation.reason,movementDispatched:result.navigation.movementDispatched}};
     this.save();
   }
@@ -90,19 +110,32 @@ export class LiveAgency {
   /** Only idempotent navigation/read steps can expire without causal success evidence.
    * Require two fresh stationary observations after the settling window. Never use for
    * dialogue, production, purchases, transfers, eating, or other inventory mutations. */
-  settleNavigation(commandId:string,state:LiveState):Verification|undefined {
+  settleStep(commandId:string,state:LiveState):Verification|undefined {
     const r=this.document.receipt?.commandId===commandId?this.document.receipt:this.document.safetyReceipt;
-    if(!r||r.commandId!==commandId||!['walkTo','retreat'].includes(r.action.type))return;
-    const a=state.player,b=r.before.player;
-    if(!a||!b||a.lifeId!==b.lifeId||a.level!==b.level||state.inGame===false||a.isDead||a.combat?.inCombat)return;
-    if(r.before.sessionId && state.sessionId && r.before.sessionId!==state.sessionId)return;
-    if(![a.worldX,a.worldZ,a.level,state.tick,r.before.tick].every(Number.isFinite)||state.tick<=r.before.tick)return;
-    if(a.animId!==-1)return; // No idle evidence means no safe automatic retirement.
-    const position=JSON.stringify([a.worldX,a.worldZ,a.level]);
-    const previous=r.stationary;
-    if(!previous||previous.position!==position){r.stationary={tick:state.tick,position,since:this.clock()};this.save();return;}
-    if(state.tick<=previous.tick||this.clock()-Math.max(r.startedAt,previous.since)<30_000)return;
-    return {status:'interrupted',evidence:['two fresh stationary idle observations after navigation settling window; no action replay and no success inferred'],reason:'Navigation leg retired as interrupted; retain the goal and reassess the route.'};
+    if(!r||r.commandId!==commandId)return;
+    const result=observeQuietStep(r.action,r.before,state,this.clock(),this.observer,r.stationary);
+    r.stationary=result.window;
+    this.document.blocked=result.reason;this.save();
+    return result.settled?{status:'interrupted',evidence:[result.reason],reason:result.reason}:undefined;
+  }
+  // Existing controller adapters retain compatibility; semantics remain operation-specific.
+  settleNavigation(commandId:string,state:LiveState):Verification|undefined { return this.settleStep(commandId,state); }
+  eligible(action:LiveCandidate,state:LiveState):boolean {
+    return retryAllowed(this.document.retries?.[stepKey(action,state)],this.clock(),capabilityContext(state),this.director.memory.learningRevision??0);
+  }
+  /** Funding is an observed prerequisite. This never grants purchase authority by itself. */
+  prepareFunding(action:LiveCandidate,state:LiveState):boolean {
+    if(action.type!=='shopBuy'||this.document.receipt)return false;
+    const row=(state.shop?.shopItems??[]).find((i:any)=>i.slot===action.fields?.slot);
+    const n=Number(action.fields?.amount),price=Number(row?.buyPrice);
+    if(!Number.isInteger(n)||n<1||!Number.isFinite(price)||price<0)return false;
+    const needed=price*n+this.policy.reserveCoins;
+    if(cash(state.inventory??[])>=needed)return false;
+    // Remembered own bank stock is a planning lead only. Actual withdrawal uses a fresh bank view.
+    if(cash(this.document.knowledge.bank)<needed-cash(state.inventory??[]))return false;
+    this.director.requestSupport({fact:'coins',minimum:needed},'Access own bank funds before the quoted preparation purchase.',
+      [`own-shop-quote:${state.tick}:${row.id}:${price}`,`own-bank-lead:${this.document.knowledge.bankCheckedAt}`]);
+    this.save();return true;
   }
   blocked(reason:string):void {
     this.director.blocked(this.clock(),reason);this.document.blocked=reason;this.save();
@@ -112,7 +145,10 @@ export class LiveAgency {
     if(this.document.receipt||this.document.safetyReceipt)throw new Error('RECONCILE_PENDING_ACTION_FIRST');
     const view=this.catalogue(state).view;
     if(view.context!==selection.view.context)throw new Error('CAPABILITY_CONTEXT_CHANGED');
-    const cost=authorizeAction(state,action,selection.method,view.budget.spendableGp);
+    if(!this.eligible(action,state))throw new Error('STEP_AWAITING_EVIDENCE_OR_COOLDOWN');
+    guardDevelopment(this.document.development,state,action,selection.task.skill);
+    // A shop cannot spend banked money; preserve the carried working reserve too.
+    const cost=authorizeAction(state,action,selection.method,Math.max(0,cash(state.inventory??[])-this.policy.reserveCoins));
     const priced={...selection.method,costGp:cost};
     this.director.begin(view,selection.decision,priced,commandId);
     this.document.receipt={commandId,action:structuredClone(action),before:structuredClone(state),startedAt:this.clock(),scope:'task',methodId:selection.method.id};
@@ -133,7 +169,7 @@ export class LiveAgency {
     if(!receipt && this.document.lastCommands.includes(commandId))return;
     if(!receipt||receipt.commandId!==commandId)throw new Error('OUTCOME_WITHOUT_MATCHING_INTENT');
     const state=this.catalogue(after).view;
-    if(verification.status==='interrupted')delete this.document.route;
+    if(verification.status==='interrupted' && verification.evidence.length)delete this.document.route;
     const deaths=Number(after.player?.lifeId!==receipt.before.player?.lifeId);
     // Without server-attributed loss valuation a death cannot be called a free successful attempt.
     if(deaths && !metrics)verification={status:'unknown',evidence:[],reason:'Death requires inventory/loss reconciliation.'};
@@ -141,6 +177,9 @@ export class LiveAgency {
       spentGp:receipt.action.type==='shopBuy'&&verification.status==='verified'?Math.max(0,cash(receipt.before.inventory??[])-cash(after.inventory??[])):0,
       lostGp:0,deaths,elapsedMs:Math.max(0,this.clock()-receipt.startedAt),
     };
+    if(verification.status==='verified' && receipt.action.type==='shopBuy' && this.director.memory.active?.workingReserveGp)
+      this.director.memory.active.workingReserveGp=Math.max(this.policy.reserveCoins,this.director.memory.active.workingReserveGp-deltas.spentGp);
+    this.document.lastOutcome={at:this.clock(),commandId,type:receipt.action.type,status:verification.status,reason:verification.reason,evidence:verification.evidence.slice(0,8)};
     if(safety) {
       if(verification.status==='unknown'||!verification.evidence.length){this.save();return;}
       delete this.document.safetyReceipt;
@@ -155,11 +194,20 @@ export class LiveAgency {
     }
     if(!this.document.receipt || this.document.receipt.commandId!==commandId)
       this.document.lastCommands=[...this.document.lastCommands,commandId].slice(-128);
+    if(verification.status!=='unknown' && (verification.evidence.length || verification.status==='rejected')) {
+      const key=stepKey(receipt.action,receipt.before);this.document.retries??={};
+      this.document.retries[key]=recordViability(this.document.retries[key],verification.status,this.clock(),
+        capabilityContext(receipt.before),this.director.memory.learningRevision??0,verification.evidence,verification.reason??verification.status);
+      const entries=Object.entries(this.document.retries).sort((a,b)=>b[1].at-a[1].at).slice(0,512);
+      this.document.retries=Object.fromEntries(entries);
+    }
     this.save();
   }
   summary() {
     const brief=(r:Receipt|undefined)=>r?{commandId:r.commandId,action:r.action,startedAt:r.startedAt}:undefined;
-    return {goal:this.director.memory.active,pending:brief(this.pending()),safetyPending:brief(this.pending('safety')),blocked:this.document.blocked};
+    return {source:'agency-v2.json',updatedAt:this.document.updatedAt,development:this.document.development,
+      lastObservation:this.document.lastObservation,lastOutcome:this.document.lastOutcome,
+      goal:this.director.memory.active,pending:brief(this.pending()),safetyPending:brief(this.pending('safety')),blocked:this.document.blocked};
   }
 }
 export const isSelection=(v:Selection|Decision):v is Selection=>'decision' in v;

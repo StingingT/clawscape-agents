@@ -69,6 +69,7 @@ export function verifyActionOutcome(before:any,after:any,action:ActionLike,resul
     if(!item)return no('original inventory slot unavailable');
     const option=menu(item,f.optionIndex);
     if(/eat/i.test(option)&&quantity(after.inventory,item.id)<quantity(before.inventory,item.id)&&Number(after.player.hp)>Number(before.player.hp))return yes(`food:${item.id} consumed with healing`);
+    if(/^bury$/i.test(option)&&quantity(before.inventory,item.id)-quantity(after.inventory,item.id)===1&&xp(after,'prayer')>xp(before,'prayer'))return yes(`bone:${item.id} consumed with Prayer XP`);
     if(/wear|wield|equip/i.test(option)&&(after.equipment??[]).some((i:any)=>i.id===item.id)&&!same(before.equipment,after.equipment))return yes(`equipment:${item.id} observed`);
     return no('requested inventory effect not verified');
   }

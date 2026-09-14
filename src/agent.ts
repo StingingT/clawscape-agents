@@ -645,7 +645,7 @@ function cautiousPickpocketCandidates(state: GameState): Candidate[] {
   return [];
 }
 
-function ammoCandidates(state: GameState): Candidate[] {
+function ammoCandidates(state: GameState, target = 50): Candidate[] {
   if (build !== "ranged-magic") return [];
   const inventory = state.inventory ?? [];
   const maxArrowRank = Math.min(permittedArrowRank(level(state, 'ranged')), bowArrowCap(String(state.combatStyle?.weaponName ?? '')));
@@ -654,14 +654,14 @@ function ammoCandidates(state: GameState): Candidate[] {
     .reduce((total, item) => total + (typeof item.count === "number" ? item.count : 1), 0);
   // Aim to restock to 50. Do not abandon a safe beginner fight until the
   // quiver is genuinely low; then ammunition takes priority over combat.
-  if (arrows >= 15) return [];
+  if (arrows >= target) return [];
   const ranged = level(state, "ranged");
   const coins = (state.inventory ?? []).filter((item) => /coins/i.test(text(item.name)))
     .reduce((total, item) => total + (typeof item.count === "number" ? item.count : 1), 0);
   // Lowe's live world stock prices bronze arrows at 10 coins each. A minimum
   // reserve of 15 is enough to resume ranged training; do not force a risky
   // money-making loop merely to afford the ideal batch of 50.
-  const minimumPurchaseBudget = Math.max(0, (15 - arrows) * 10);
+  const minimumPurchaseBudget = Math.max(0, (target - arrows) * 10);
   const shop = state.shop ?? {};
   const stock = Array.isArray(shop.shopItems) ? shop.shopItems as Json[] : [];
   const player = state.player ?? {};
@@ -672,7 +672,7 @@ function ammoCandidates(state: GameState): Candidate[] {
       .filter((item) => typeof item.buyPrice !== "number" || Number(item.buyPrice) <= coins)
       .sort((a, b) => arrowRank(String(b.name)) - arrowRank(String(a.name)))[0];
     const unitPrice = typeof choice?.buyPrice === "number" ? Math.max(1, choice.buyPrice) : 1;
-    const affordable = Math.min(50 - arrows, Math.floor(coins / unitPrice));
+    const affordable = Math.min(target - arrows, Math.floor(coins / unitPrice));
     if (choice && affordable > 0 && typeof choice.slot === "number") return [{ id: "buy-arrows-" + choice.slot, type: "shopBuy", fields: { slot: choice.slot, amount: affordable, reason: "maintain ranged ammunition reserve" }, waitTicks: 2 }];
     return [];
   }
@@ -710,13 +710,13 @@ function workingCashReserve(state: GameState): number {
   // When an agent cannot safely recover, bank every coin immediately. Its
   // next trip can withdraw/buy again; a death cannot reclaim carried money.
   if (hp * 100 / Math.max(1, maxHp) <= 55) return 50;
-  if (role === "economy") return 0;
+  if (role === "economy") return agency?.summary().goal?.workingReserveGp ?? 0;
   // Stinger keeps enough for a 50-arrow bronze refill. Other fighters retain
   // a small amount for basic supplies, but bank the rest against death/loss.
-  return build === "ranged-magic" ? 500 : 250;
+  return Math.max(build === "ranged-magic" ? 500 : 250,agency?.summary().goal?.workingReserveGp ?? 0);
 }
 
-function bankingCandidates(state: GameState): Candidate[] {
+function bankingCandidates(state: GameState, task?: Task): Candidate[] {
   const inventory = state.inventory ?? [];
   const equippedNames = (state.equipment ?? []).map(item => text(item.name));
   const carriedWeapons = inventory.filter(item => /^(bronze|iron|steel|mithril|adamant|rune) (sword|scimitar|longsword|battleaxe|mace|dagger|warhammer)$/i.test(text(item.name)));
@@ -726,7 +726,7 @@ function bankingCandidates(state: GameState): Candidate[] {
   const equippedArrows = (state.equipment ?? []).filter(item => isFinishedArrow(text(item.name))).reduce((sum, item) => sum + Number(item.count ?? 1), 0);
   const surplusArrows = surplusArrowAmount(carriedArrows + equippedArrows);
   const foodMemory = work.learning?.food;
-  const tripFood = agency?.policy.foodTarget ?? (character==='clawscout'?Math.max(3,learnedFoodReserve(foodMemory)):learnedFoodReserve(foodMemory));
+  const tripFood = (task?.target?.fact==='food'?task.target.minimum:undefined) ?? agency?.policy.foodTarget ?? (character==='clawscout'?Math.max(3,learnedFoodReserve(foodMemory)):learnedFoodReserve(foodMemory));
   const foodTotal = learnedFoodCount(inventory);
   const surplusFood = Math.max(0, foodTotal - tripFood);
   // Raw fish is an input and can always be stored. Cooked food is stored only
@@ -1027,7 +1027,7 @@ function foodCandidates(state: GameState): Candidate[] {
   }).slice(0, 1);
 }
 
-function productionCandidates(state: GameState, requestedFood = false): Candidate[] {
+function productionCandidates(state: GameState, requestedFood = false, targetFood?: number): Candidate[] {
   // Economy work still needs a small learned food reserve for mine travel and
   // exploration. If that reserve is missing, allow the ordinary fish/cook
   // recovery route to take ownership temporarily, then resume production.
@@ -1039,7 +1039,7 @@ function productionCandidates(state: GameState, requestedFood = false): Candidat
   if (!requestedFood && role === 'economy' && !economyNeedsFood(state)) return [];
   const locs = state.nearbyLocs ?? [];
   const foodMemory = work.learning?.food;
-  const requiredFood = agency?.policy.foodTarget ?? (character==='clawscout'?Math.max(3,learnedFoodReserve(foodMemory)):learnedFoodReserve(foodMemory));
+  const requiredFood = targetFood ?? agency?.policy.foodTarget ?? (character==='clawscout'?Math.max(3,learnedFoodReserve(foodMemory)):learnedFoodReserve(foodMemory));
   const carriedFood = learnedFoodCount(inv);
   if (!work.foodBatch && carriedFood < requiredFood) {
     // Cached stock is a lead; opening the bank refreshes quantities before withdrawal.
@@ -1192,17 +1192,31 @@ async function actionsForTask(state: GameState, task: Task): Promise<Candidate[]
     const guide=(state.nearbyNpcs??[]).find(n=>/runescape guide|tutorial guide/i.test(String(n.name))&&n.reachable===true);
     if(guide)return [{id:'tutorial-guide',type:'talkToNpc',fields:{npcIndex:guide.index},waitTicks:3}];
   }
-  if (state.bank?.isOpen === true) { const transaction=bankingCandidates(state);return transaction.length?transaction:[{id:'close-bank',type:'closeModal',waitTicks:1}]; }
+  if(task.kind==='funds') {
+    const coins=(state.inventory??[]).filter(i=>Number(i.id)===995||/^coins$/i.test(String(i.name))).reduce((n,i)=>n+Number(i.count??1),0);
+    const required=Math.max(0,(task.target?.minimum??0)-coins);
+    if(!required)return [];
+    if(state.shop?.isOpen===true)return [{id:'close-shop-for-funding',type:'closeShop',waitTicks:1}];
+    if(state.bank?.isOpen!==true)return bankAt(state);
+    const row=(state.bank.items??[]).find((i:any)=>(Number(i.id)===995||/^coins$/i.test(String(i.name)))&&Number.isInteger(i.slot)&&Number(i.count)>=required);
+    return row?[{id:'withdraw-planned-funds',type:'bankWithdraw',fields:{slot:row.slot,amount:required},waitTicks:2}]:[];
+  }
+  if (state.bank?.isOpen === true) { const transaction=bankingCandidates(state,task);return transaction.length?transaction:[{id:'close-bank',type:'closeModal',waitTicks:1}]; }
   switch(task.kind) {
-    case 'food': return productionCandidates(state,true);
-    case 'ammunition': return [...quiverRefill(state), ...ammoCandidates(state), ...arrowProductionCandidates(state), ...safeAmmoSupplyCandidates(state)];
-    case 'bank': return bankingCandidates(state);
+    case 'food': return productionCandidates(state,true,task.target?.minimum);
+    case 'ammunition': return [...quiverRefill(state), ...ammoCandidates(state,task.target?.minimum), ...arrowProductionCandidates(state), ...safeAmmoSupplyCandidates(state)];
+    case 'bank': return bankingCandidates(state,task);
     case 'equipment': return gearCandidates(state);
     case 'combat': {
       if(!state.combatStyle?.styles?.some((s:any)=>s.trainsSkills?.some((k:string)=>k.toLowerCase()===task.skill)))return [];
       const gear=gearCandidates(state,task.skill);
       if(gear.length)return gear;
       return training ? training.next(state,(from,to)=>navigator!.assess(from,to)) : [];
+    }
+    case 'prayer': {
+      const bone=(state.inventory??[]).find((i:any)=>i.optionsWithIndex?.some((o:any)=>/^bury$/i.test(String(o.text))));
+      const option=(bone?.optionsWithIndex as Json[]|undefined)?.find(o=>/^bury$/i.test(String(o.text)));
+      return bone&&option?[{id:'bury-owned-bone',type:'useInventoryItem',fields:{slot:bone.slot,optionIndex:option.opIndex},waitTicks:2}]:[];
     }
     case 'production': {
       work.economy ??= {bankItems:work.bankItems??[]};
@@ -1282,7 +1296,7 @@ async function runEpisode(): Promise<void> {
     const safetyPending=agency.pending('safety');
     if(safetyPending) {
       const check=verifyActionOutcome(safetyPending.before,state,safetyPending.action,safetyPending.execution);
-      agency.record(safetyPending.commandId,state,check.uncertain?(agency.settleNavigation(safetyPending.commandId,state)??verification(check)):verification(check));
+      agency.record(safetyPending.commandId,state,check.uncertain?(agency.settleStep(safetyPending.commandId,state)??verification(check)):verification(check));
       if(agency.pending('safety')){await cliCall(['wait','2']);continue;}
     }
     // Safety can preempt a goal but cannot overwrite its pending action or choose ordinary work.
@@ -1302,9 +1316,9 @@ async function runEpisode(): Promise<void> {
     const pending=agency.pending();
     if(pending) {
       const check=verifyActionOutcome(pending.before,state,pending.action,pending.execution);
-      agency.record(pending.commandId,state,check.uncertain?(agency.settleNavigation(pending.commandId,state)??verification(check)):verification(check));
+      agency.record(pending.commandId,state,check.uncertain?(agency.settleStep(pending.commandId,state)??verification(check)):verification(check));
       if(agency.pending()) {
-        console.log(JSON.stringify({agency:'reconciling',commandId:pending.commandId,reason:check.reason}));
+        console.log(JSON.stringify({agency:'reconciling',commandId:pending.commandId,reason:check.reason,operation:pending.action.type,action:pending.action,startedAt:pending.startedAt,source:'agency-v2.json'}));
         await cliCall(['wait','2']);continue;
       }
       if(check.verified)observeAgencyResult(pending.before,state,pending.action as Candidate);
@@ -1316,7 +1330,7 @@ async function runEpisode(): Promise<void> {
       await cliCall(['wait','3']);continue;
     }
     const committedRoute=agency.routeStep(planned,state);
-    const options=available(committedRoute?[committedRoute as Candidate]:await actionsForTask(state,planned.task));
+    const options=available(committedRoute?[committedRoute as Candidate]:await actionsForTask(state,planned.task)).filter(a=>agency!.eligible(a,state));
     if(!options.length){agency.blocked('Selected task has no feasible current executor step: '+planned.task.id);continue;}
     const action=choose(stateKey(state),options);
     // One-item purchases use the current quoted price; no unbounded bulk purchase estimate.
@@ -1327,6 +1341,7 @@ async function runEpisode(): Promise<void> {
     if(action.id.startsWith('goal-')&&!equipmentGoals.validate(fresh,action)){state=fresh;continue;}
     if(!validateMetal(fresh,action,state)||!validateBow(fresh,action,state)||!validateFishing(fresh,action,state)){state=fresh;continue;}
     state=fresh;
+    if(agency.prepareFunding(action,state))continue;
     const commandId=randomUUID();
     try { agency.begin(planned,action,state,commandId); }
     catch(error) { if(!agency.pending())agency.blocked('Pre-dispatch validation refused '+action.id+': '+String(error));else throw error;continue; }
@@ -1339,7 +1354,7 @@ async function runEpisode(): Promise<void> {
       if(check.verified)observeAgencyResult(state,next,action);
       appendFileSync(experiencePath,JSON.stringify({at:new Date().toISOString(),commandId,goal:planned.decision.goal.id,
         method:planned.method.id,action,outcome:verification(check)})+'\n');
-      console.log(JSON.stringify({agency:'step',commandId,goal:agency.summary().goal,outcome:verification(check)}));
+      console.log(JSON.stringify({agency:'step',commandId,goal:planned.decision.goal.id,supportGoal:planned.decision.step.supportGoalId,method:planned.method.id,action:action.type,outcome:verification(check)}));
       state=next;
     } catch(error) {
       // A transport exception does not prove the server rejected the command.
@@ -1362,7 +1377,8 @@ async function main(): Promise<void> {
   const policy=existsSync(policyPath)?JSON.parse(readFileSync(policyPath,'utf8')):{};
   agency = new LiveAgency(resolve(dataDir,'agency-v2.json'), {agent:character,world:process.env.CLAWSCAPE_SERVER??'clawscape',revision:gearCatalog.namespace}, {
     policy:{foodTarget:Math.max(3,learnedFoodReserve(work.learning?.food)),...policy},
-    supported:['food','ammunition','equipment','bank','combat','production','gathering','exploration'],
+    supported:['food','ammunition','equipment','bank','combat','production','gathering','exploration','funds','prayer'],
+    developmentHint:build,
     preferences:role==='economy'?{crafting:2,gathering:1}:role==='resource'?{gathering:2}:{combat:2},
     routes:Object.entries(WORLD_ROUTES).map(([id,p])=>({id,...p,level:0,evidence:'bundled route lead; arrival not yet personally verified'})),
   });
