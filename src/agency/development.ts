@@ -34,8 +34,17 @@ function prayerChoice(s:LiveState,rules?:BuildRules):number|undefined {
 /** Compare guide hypotheses against own irreversible state, not a prescribed character name. */
 export function chooseDevelopment(state:LiveState,memory:Memory,now:number,hint?:string,rules?:BuildRules):Development {
   const known=skills(state),can=availableSkills(state),prayer=prayerChoice(state,rules);
-  const interest=(memory.preferences.combat??0)>Math.max(memory.preferences.crafting??0,memory.preferences.gathering??0)
-    || memory.active?.domain==='combat';
+  const combatPreference=memory.preferences.combat??0;
+  const nonCombatPreference=Math.max(memory.preferences.crafting??0,memory.preferences.gathering??0,memory.preferences.exploration??0);
+  const successful=memory.reviews.filter(r=>r.result==='success');
+  const combatSuccess=successful.filter(r=>r.goal.domain==='combat').length;
+  const nonCombatSuccess=successful.filter(r=>r.goal.domain!=='combat').length;
+  // Roles are priorities, not permanent restrictions. A broad/generalist hint deliberately
+  // starts unrestricted; later evidence can justify specialization. Economy/resource roles
+  // do not drift into a pure merely because one combat action became executable.
+  const learnedCombatSpecialisation=combatSuccess>=5 && combatSuccess>nonCombatSuccess;
+  const broadHint=hint==='broad'||hint==='generalist'||hint==='max';
+  const interest=!broadHint && (combatPreference>nonCombatPreference || hint==='ranged-magic' || learnedCombatSpecialisation);
   const names=[...(state.inventory??[]),...(state.equipment??[])].map((i:any)=>String(i.name));
   const bow=names.some(n=>/bow/i.test(n)),melee=names.some(n=>/sword|scimitar|dagger|mace/i.test(n));
   const alternatives=BUILD_GUIDES.map(g=>{
@@ -59,9 +68,13 @@ export function chooseDevelopment(state:LiveState,memory:Memory,now:number,hint?
     return {id:g.id,score,eligible,reason};
   });
   const best=alternatives.filter(a=>a.eligible).sort((a,b)=>b.score-a.score||a.id.localeCompare(b.id))[0];
-  if(!best)return {version:2,id:'open-development',name:'Open development',chosenAt:now,focus:can,protectedXp:{},history:[],
-    reason:'Follow feasible personal goals without calling incompatible or insufficiently observed stats a one-Defence pure.',
-    evidence:[own(state)],alternatives,sourceUrls:[],trainingLeadIds:[]};
+  if(!best)return {version:2,id:'open-development',name:broadHint?'Broad mastery':'Open development',chosenAt:now,focus:can,protectedXp:{},history:[],
+    reason:broadHint
+      ? 'Pursue broad skill mastery while role priorities guide what is useful now; pure templates remain optional hypotheses, not the default destination.'
+      : nonCombatPreference>=combatPreference
+        ? 'Prioritise crafting, gathering and exploration ambitions and develop combat as a support capability without adopting irreversible pure restrictions by default.'
+        : 'Follow feasible personal goals without calling incompatible or insufficiently observed stats a one-Defence pure.',
+    evidence:[own(state)],alternatives:alternatives.map(a=>!interest?{...a,eligible:false,reason:'Not currently pursued: observed priorities favour broad/non-combat development; specialization requires a later evidence-based reason.'}:a),sourceUrls:[],trainingLeadIds:[]};
   const g=buildGuide(best.id)!;
   const caps:Record<string,number>={defence:1,prayer:prayer!};
   if(g.attackCap)caps.attack=g.attackCap;
@@ -92,10 +105,16 @@ export function reviewDevelopment(current:Development,state:LiveState,memory:Mem
   if(memory.pending || memory.active)return current;
   let d=migrateDevelopment(current,state,now),known=skills(state);
   if(d.id==='open-development') {
+    const successful=memory.reviews.filter(r=>r.at>=d.chosenAt&&r.result==='success');
+    const combat=successful.filter(r=>r.goal.domain==='combat').length;
+    const other=successful.filter(r=>r.goal.domain!=='combat').length;
+    // Broad mastery is sticky enough to create genuinely generalist characters, but not
+    // immutable: sustained personal combat evidence can still justify reconsideration.
+    if(d.name==='Broad mastery' && !(combat>=5&&combat>other))return d;
     const candidate=chooseDevelopment(state,memory,now,undefined,rules);
     if(candidate.id==='open-development')return d;
     return {...candidate,history:[...d.history,{at:now,from:d.id,to:candidate.id,
-      reason:'New own capabilities make a guide-informed trial feasible; adopt before starting another goal.',evidence:candidate.evidence}].slice(-32)};
+      reason:'Repeated own combat results now justify testing a guide-informed specialization; this was not inferred from role or equipment alone.',evidence:candidate.evidence}].slice(-32)};
   }
   for(const [k,cap] of Object.entries(d.levelCaps??{}))if(knownStat(known[k])&&known[k].level>=cap&&!Object.hasOwn(d.protectedXp,k))
     d={...d,protectedXp:{...d.protectedXp,[k]:known[k].xp},evidence:[...d.evidence,`milestone-review:${k}:${cap}:${own(state)}`]};

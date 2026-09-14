@@ -5,10 +5,10 @@ const root=resolve(import.meta.dir,'..'), logs=resolve(root,'data/supervisor');
 mkdirSync(logs,{recursive:true});
 const release=acquireController(resolve(logs,'supervisor.lock'));
 const jobs=[
- {name:'clawscout',cwd:root,args:['run','src/agent.ts','--character','clawscout','--profile','online','--role','brawler','--build','melee','--forever']},
+ {name:'clawscout',cwd:root,args:['run','src/agent.ts','--character','clawscout','--profile','online','--role','brawler','--build','broad','--forever']},
  {name:'stinger',cwd:root,args:['run','src/agent.ts','--character','stinger','--profile','stinger','--role','brawler','--build','ranged-magic','--forever']},
- {name:'coincrafter',cwd:root,args:['run','src/agent.ts','--character','coincrafter','--profile','coincrafter','--role','economy','--build','melee','--forever']},
- {name:'featherer',cwd:root,args:['run','src/agent.ts','--character','featherer','--profile','featherer','--role','resource','--build','melee','--forever']},
+ {name:'coincrafter',cwd:root,args:['run','src/agent.ts','--character','coincrafter','--profile','coincrafter','--role','economy','--build','broad','--forever']},
+ {name:'featherer',cwd:root,args:['run','src/agent.ts','--character','featherer','--profile','featherer','--role','resource','--build','broad','--forever']},
  {name:'astra',cwd:resolve(root,'agents/advanced'),args:['src/live-entry.ts','run','--seconds','900']},
 ];
 let stopping=false;
