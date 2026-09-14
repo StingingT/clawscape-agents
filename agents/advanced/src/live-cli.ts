@@ -11,8 +11,8 @@ import { researchTraining, type ResearchSummary } from './guide-research.ts';
 import { liveHazardAt } from './live-hazards.ts';
 import {prepareRecovery,runRecovery} from './recovery-runner.ts';
 import {recoveryPreflight,RECOVERY_ID} from './live-recovery.ts';
-import { Director, createMemory } from './agency/director.ts';
-import type { Facts, Method, Observation as AgencyObservation, Opportunity } from './agency/types.ts';
+import { LiveAgency, isSelection, type Selection } from '../../../src/agency/live-adapter.ts';
+import { agencyState, agencyCandidate, arbiterVerification, observedVerification, urgentDecision } from './agency-bridge.ts';
 
 const root=resolve(import.meta.dir,'..'),data=resolve(root,'data/astra-live');
 const argv=process.argv.slice(2),mode=argv[0]??'status';
@@ -22,22 +22,6 @@ const atomic=(file:string,value:unknown)=>{const tmp=file+'.tmp';writeFileSync(t
 const brief=(o:Observation)=>({tick:o.tick,connected:o.connected,position:o.position,hp:o.hp,maxHp:o.max_hp,
   lifeId:o.life_id,respawns:o.respawns,skills:o.skills,inventory:o.inventory.map(i=>({name:i.name,count:i.count})),
   equipment:o.equipment.map(i=>({name:i.name,count:i.count}))});
-const agencyFacts=(o:Observation):Facts=>Object.fromEntries([
-  ['hp',o.hp??0],
-  ...o.skills.map(s=>[`skill:${s.name.toLowerCase()}`,s.current]),
-  ...o.inventory.map(i=>[`item:${i.name.toLowerCase()}`,i.count]),
-]);
-const agencyMethod=(d:LiveDecision):Method=>({
-  id:d.goal, capability:`astra:${d.intent?.operation??(d.destination?'move':'observe')}`,
-  domain:/combat|training/i.test(d.goal)?'combat':/explor|route|map/i.test(d.goal)?'exploration':'gathering',
-  prerequisites:[], effects:{[`goal:${d.goal}`]:1}, costGp:0, lossBoundGp:0, durationMs:1000,
-  risk:'safe',
-});
-const agencyView=(memory:any,o:Observation,method:Method):AgencyObservation=>({
-  agent:memory.agent,world:memory.world,revision:memory.revision,at:Date.now(),context:`astra:${dContext(o)}`,
-  facts:agencyFacts(o),budget:{spendableGp:1_000_000,maxLossGp:0,maxDeaths:0,maxDurationMs:300_000},capabilities:[method.capability],
-});
-const dContext=(o:Observation)=>o.position?`${o.position.x}:${o.position.z}:${o.position.plane}`:'unknown';
 async function main(){
   mkdirSync(data,{recursive:true});
   if(mode==='status'){
@@ -109,9 +93,10 @@ async function main(){
   let navigation:unknown=null;
   const saved=store.records<any>('live_policy_checkpoints').at(-1);
   const policy=new LivePolicy(saved);
-  const agencyFile=join(data,'agency-memory.json');
-  const agencyMemory=existsSync(agencyFile)?JSON.parse(readFileSync(agencyFile,'utf8')):createMemory({agent:'astra',world:profile.profile_id,revision:'live'});
-  const agency=new Director(agencyMemory);
+  const oldAgencyFile=join(data,'agency-memory.json');
+  if (existsSync(oldAgencyFile) && JSON.parse(readFileSync(oldAgencyFile,'utf8')).pending)
+    throw new Error('LEGACY_AGENCY_INTENT_RECONCILIATION_REQUIRED');
+  let agency:LiveAgency|undefined;
   let research:ResearchSummary|undefined,researchJob:Promise<void>|undefined;
   let researchQueued=0;
   const queueResearch=()=>{
@@ -139,7 +124,7 @@ async function main(){
       actions,verified,failed,elapsedSeconds:start?Math.round((Date.now()-start.observed_at)/1000):0,
       observation:latest?brief(latest):null,policy:policy.summary(),pending:store.pending().map(p=>({operation:p.command.intent.operation,status:p.result.status,reason:p.result.reason})),
       authority:'single cooperating local controller; server fencing unavailable',npcSpendingGp:0,
-      navigation,
+      navigation,agency:agency?.summary(),
       research:research?{status:research.status,suggestedMonsters:research.suggestedMonsters,rejected:research.rejected,fetchedAt:research.fetchedAt}:null};
     atomic(join(data,'status.json'),result);console.log(JSON.stringify({time:result.time,status,goal:activeGoal,reason:why,tick:latest?.tick,hp:latest?.hp,position:latest?.position,actions,verified,failed}));
   };
@@ -147,7 +132,17 @@ async function main(){
     const connected=await cli.command(['connect'],25_000);
     if(connected.connected!==true)throw new Error('CONNECT_NOT_CONFIRMED');
     latest=await adapter.snapshot();await sleep(600);latest=await adapter.snapshot();start=latest;
-    if(mode==='run')policy.resumeFromObservation(latest);
+    if(mode==='run') {
+      policy.resumeFromObservation(latest);
+      const settings=join(data,'agency-policy.json');
+      agency=new LiveAgency(join(data,'agency-v2.json'),{agent:latest.character,world:latest.world,revision:profile.profile_id},{
+        supported:['food','bank','equipment','combat','exploration'],preferences:{exploration:2,combat:1},
+        policy:existsSync(settings)?JSON.parse(readFileSync(settings,'utf8')):{},
+        routes:[{id:'documented-draynor-approach',x:3088,z:3226,level:0,evidence:'documented lead; still requires collision-safe travel and own arrival'},
+          {id:'documented-goblin-area',x:3252,z:3230,level:0,evidence:'documented lead; no encounter claimed before observation'},
+          {id:'documented-chicken-area',x:3232,z:3295,level:0,evidence:'documented lead; no encounter claimed before observation'}],
+      });
+    }
     store.append('observations_or_checkpoints',crypto.randomUUID(),start);
     queueResearch();
     publish('RUNNING','Connected; waiting for verified effects');
@@ -163,6 +158,8 @@ async function main(){
       if(!navigator.isReady() && !latest.activity?.design_open && latest.danger.active===false
         && latest.hp===latest.max_hp){await sleep(700);continue;}
       let decision:LiveDecision;
+      let planned:Selection|undefined;
+      let emergency=false;
       if(mode==='pilot'){
         if(latest.activity?.design_open)decision={goal:'pilot-design',reason:'Accept ordinary tutorial appearance',intent:{operation:'accept_design'}};
         else if(!pilotMoved){
@@ -182,21 +179,45 @@ async function main(){
           if(result.reason!=='CONTROL_REVOKED')throw new Error('TAKEOVER_TEST_FAILED');
           store.releaseManual();finished=true;reason='M1_MOVEMENT_INTERACTION_TAKEOVER_PASSED';break;
         }
-      }else decision=policy.next(latest);
+      } else {
+        if(!agency)throw new Error('AGENCY_NOT_INITIALIZED');
+        // Reconcile the SAME journaled action. A later action cannot satisfy its receipt.
+        await arbiter.reconcile();
+        for (const scope of ['safety','task'] as const) {
+          const receipt=agency.pending(scope);
+          if(!receipt)continue;
+          const stored=store.action(receipt.commandId);
+          let proof=receipt.action.type==='wait'
+            ? observedVerification(receipt.before,agencyState(latest),receipt.action)
+            : stored ? arbiterVerification(receipt.commandId,stored.result)
+            : {status:'rejected' as const,evidence:['No arbiter reservation exists; transport could not have started.']};
+          if(proof.status==='unknown'){
+            const observed=observedVerification(receipt.before,agencyState(latest),receipt.action);
+            if(observed.status==='verified')proof=observed;
+          }
+          agency.record(receipt.commandId,agencyState(latest),proof);
+        }
+        if(agency.pending('safety')){publish('RECONCILING','Unresolved safety action');await sleep(700);continue;}
+        const urgent=urgentDecision(latest);
+        if(urgent) { decision=urgent; emergency=true; }
+        else {
+          if(agency.pending()){publish('RECONCILING','Unresolved exact command; no replay');await sleep(700);continue;}
+          const selection=agency.plan(agencyState(latest));
+          if(!isSelection(selection)){publish('BLOCKED',selection.type==='blocked'?selection.reason:'Reconciliation required');await sleep(700);continue;}
+          planned=selection;
+          decision=policy.next(latest,planned.task);
+        }
+      }
       activeGoal=decision.goal;
       if(decision.blocked){
         // A disappearing NPC or a short UI transition is a new observation
         // requirement, not a reason to disconnect the whole controller.
         if(['TARGET_NOT_OBSERVED','STALE_OBSERVATION','UNRESOLVED_THREAT'].includes(decision.blocked) && Date.now()-lastProgress<60_000){await sleep(700);continue;}
-        const blockedReason = decision.blocked;
-        const fallback = policy.replanAfterBlock(latest, blockedReason);
-        if(!fallback.blocked){
-          decision = fallback;
-          activeGoal = fallback.goal;
-          publish('REPLANNING', (blockedReason ?? 'blocked') + ' -> ' + fallback.goal);
-        } else {
-          publish('BLOCKED',decision.blocked);reason=decision.blocked;break;
+        if(agency){
+          if(!agency.pending()&&!agency.pending('safety'))agency.blocked(decision.blocked);
+          publish('BLOCKED',decision.blocked);await sleep(700);continue;
         }
+        publish('BLOCKED',decision.blocked);reason=decision.blocked;break;
       }
       if(decision.destination){
         const step=await navigator.next(latest,decision.destination);
@@ -205,7 +226,7 @@ async function main(){
             next:step.intent?.operation==='move'?step.intent.destination:null};
           if(!recordedRoutes.has(step.route)){recordedRoutes.add(step.route);store.append('navigation_plans',crypto.randomUUID(),{at:Date.now(),from:latest.position,goal:decision.goal,...step.route});}
         }
-        if(step.blocked){policy.recordOutcome(latest,latest,decision,'FAILED');publish('REPLANNING',step.blocked);failed++;await sleep(700);continue;}
+        if(step.blocked){if(agency&&!agency.pending())agency.blocked(step.blocked);policy.recordOutcome(latest,latest,decision,'FAILED');publish('REPLANNING',step.blocked);failed++;await sleep(700);continue;}
         if(step.arrived){
           if(mode==='pilot'&&!pilotMoved){reason='PILOT_NO_ACTUAL_MOVEMENT';break;}
           policy.recordOutcome(latest,latest,decision,'ARRIVED');await sleep(500);continue;
@@ -213,24 +234,32 @@ async function main(){
         if(step.intent)decision={...decision,intent:step.intent};
       }
       if(!decision.intent){
+        if(agency&&planned&&decision.wait){
+          const before=latest,action=agencyCandidate(before,decision),commandId=crypto.randomUUID();
+          agency.begin(planned,action,agencyState(before),commandId);
+          await sleep(700);latest=await adapter.snapshot();
+          agency.record(commandId,agencyState(latest),observedVerification(agencyState(before),agencyState(latest),action));
+          policy.observe(before,latest);
+          continue;
+        }
         if(Date.now()-lastProgress>60_000){reason='NO_VERIFIED_PROGRESS_60_SECONDS';publish('BLOCKED',reason);break;}
         await sleep(700);continue;
       }
       const before=latest,intent=decision.intent;
-      const agencyMethodForAction=agencyMethod(decision);
-      const agencyObservation=agencyView(agency.memory,before,agencyMethodForAction);
-      const agencyOpportunity:Opportunity={id:`astra:${decision.goal}`,domain:agencyMethodForAction.domain,target:{fact:`goal:${decision.goal}`,minimum:1},reason:decision.reason,evidence:['fresh Astra policy decision'],source:'need'};
-      const agencyDecision=agency.next(agencyObservation,[agencyOpportunity],[agencyMethodForAction]);
-      if(agencyDecision.type==='blocked'){
-        store.append('events',crypto.randomUUID(),{kind:'AGENCY_PLANNER_BLOCKED',at:Date.now(),goal:decision.goal,reason:agencyDecision.reason});
-      }else if(agencyDecision.type==='execute'){
-        agency.begin(agencyObservation,agencyDecision,agencyMethodForAction,`astra-${crypto.randomUUID()}`);
-        atomic(agencyFile,agency.memory);
+      const commandId=crypto.randomUUID();
+      // One ID links the Director intent, arbiter reservation, dispatch and result.
+      if(agency){
+        const action=agencyCandidate(before,decision);
+        if(emergency) agency.beginSafety(action,agencyState(before),commandId);
+        else {
+          if(!planned)throw new Error('GOAL_SELECTION_REQUIRED');
+          agency.begin(planned,action,agencyState(before),commandId);
+        }
       }
       safety.safeEntities.clear();
       if('entity_ref' in intent)safety.safeEntities.add(intent.entity_ref);
       safety.allowedTiles.clear();if(intent.operation==='move')safety.allowedTiles.add(JSON.stringify(intent.destination));
-      const command={schema_version:'1.0',action_id:crypto.randomUUID(),character:'astra',world:before.world,
+      const command={schema_version:'1.0',action_id:commandId,character:'astra',world:before.world,
         session_id:before.session_id,world_epoch:before.world_epoch,profile_id:before.profile_id,lease,plan_id:decision.goal,
         based_on_snapshot:before.seq,expires_at:Date.now()+config.max_stale_ms,intent};
       let result=await arbiter.submit(command);actions++;
@@ -246,11 +275,7 @@ async function main(){
         }
       }
       latest=await adapter.snapshot();
-      if(result.status==='SUCCEEDED'){
-        const pending=agency.memory.pending;
-        if(pending) agency.record({commandId:pending.commandId,sequence:agency.memory.sequence+1,status:'verified',at:Date.now(),facts:{...agencyFacts(latest),[`goal:${decision.goal}`]:1},spentGp:0,lostGp:0,deaths:0,elapsedMs:Math.max(1,Date.now()-before.observed_at),evidence:[`arbiter verified ${decision.goal}`]});
-        atomic(agencyFile,agency.memory);
-      }
+      if(agency)agency.record(command.action_id,agencyState(latest),arbiterVerification(command.action_id,result));
       policy.recordOutcome(before,latest,decision,result.status);
       store.append('live_policy_checkpoints',crypto.randomUUID(),policy.summary());
       store.append('observations_or_checkpoints',crypto.randomUUID(),latest);

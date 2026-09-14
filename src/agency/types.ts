@@ -65,6 +65,7 @@ export type MethodStats = {
   lostGp: number;
   elapsedMs: number;
   cooldownUntil: number;
+  preparationMs?: number;
 };
 export type Review = {
   goal: Goal;
@@ -102,7 +103,7 @@ export type Outcome = {
   commandId: string;
   /** Monotonic per-agent event sequence supplied by its action journal. */
   sequence: number;
-  status: 'verified' | 'rejected' | 'unknown';
+  status: 'verified' | 'progress' | 'rejected' | 'unknown';
   at: number;
   facts: Facts;
   spentGp: number;
