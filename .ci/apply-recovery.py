@@ -43,7 +43,11 @@ for entry in entries:
         end = start
     data = ''.join(lines).encode('utf-8')
     if blob(data) != entry['after']:
-        raise SystemExit('Published source differs from tested source: ' + name)
+        # Restore nested-JSON transport escaping; never change the expected source hash.
+        restored = data.replace(bytes([39,10,39]), bytes([39,92,110,39]))
+        if blob(restored) != entry['after']:
+            raise SystemExit('Published source differs from tested source: ' + name)
+        data = restored
     outputs.append((path, data))
 
 if '--commit' not in sys.argv:
