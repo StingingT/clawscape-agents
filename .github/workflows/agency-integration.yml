@@ -5,18 +5,21 @@ on:
 permissions:
   contents: read
 jobs:
-  snapshot:
+  prepare:
     if: github.repository == 'StingingT/clawscape-agents'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
-          persist-credentials: false
-      - name: Snapshot tracked source only
-        run: git archive --format=zip HEAD > source.zip
+          bun-version: '1.3.10'
+      - name: Package pinned offline test runtime only
+        run: |
+          mkdir -p review-runtime
+          cp "$(command -v bun)" review-runtime/bun
+          npm install --prefix review-runtime --ignore-scripts zod@4.1.5
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: agency-source
-          path: source.zip
+          name: agency-offline-runtime
+          path: review-runtime/
           retention-days: 1
