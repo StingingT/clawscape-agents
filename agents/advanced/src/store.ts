@@ -48,13 +48,15 @@ export class Store {
       mode: string; lease: string | null; owner: string | null; expires: number; disabled: number;
     };
   }
-  acquire(owner: string, now: number): string {
+  acquire(owner:string,now:number):string {return this.claim(owner,now,false);}
+  acquireForReconciliation(owner:string,now:number):string {return this.claim(owner,now,true);}
+  private claim(owner: string, now: number, reconciliationOnly:boolean): string {
     return this.db.transaction(() => {
       const c = this.control();
       if (c.disabled) throw new Error("HARD_DISABLED");
       if (c.mode === "MANUAL") throw new Error("MANUAL_TAKEOVER");
       if (c.lease && c.expires > now) throw new Error("CONTROL_OWNED");
-      if (this.pending().length) throw new Error("RECONCILE_PENDING_BEFORE_RESTART");
+      if (!reconciliationOnly && this.pending().length) throw new Error("RECONCILE_PENDING_BEFORE_RESTART");
       const lease = crypto.randomUUID();
       this.db.query("UPDATE control SET mode='RUNNING',lease=?,owner=?,expires=?")
         .run(lease, owner, now + 5000);

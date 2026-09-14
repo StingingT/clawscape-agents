@@ -9,7 +9,7 @@ const jobs=[
  {name:'stinger',cwd:root,args:['run','src/agent.ts','--character','stinger','--profile','stinger','--role','brawler','--build','ranged-magic','--forever']},
  {name:'coincrafter',cwd:root,args:['run','src/agent.ts','--character','coincrafter','--profile','coincrafter','--role','economy','--build','melee','--forever']},
  {name:'featherer',cwd:root,args:['run','src/agent.ts','--character','featherer','--profile','featherer','--role','resource','--build','melee','--forever']},
- {name:'astra',cwd:resolve(root,'agents/advanced'),args:['src/live-cli.ts','run','--seconds','900']},
+ {name:'astra',cwd:root,args:['scripts/astra.ts','run','--seconds','900']},
 ];
 let stopping=false;
 const children=new Map<string,ReturnType<typeof Bun.spawn>>();
@@ -31,7 +31,14 @@ async function run(job:typeof jobs[number]){
    const code=await child.exited;children.delete(job.name);
    if(stopping)break;
    let reason='process-exit';
-   if(job.name==='astra')try{reason=JSON.parse(readFileSync(resolve(job.cwd,'data/astra-live/status.json'),'utf8')).reason??reason;}catch{}
+   if(job.name==='astra')try{
+     const boot=JSON.parse(readFileSync(resolve(root,'data/supervisor/astra-startup.json'),'utf8'));
+     // Never reuse a previous launch's status to diagnose this failure.
+     if(boot.pid===child.pid&&Date.parse(boot.time)>=started){
+       reason=boot.reason??reason;
+       if(boot.dataDirectory)try{const live=JSON.parse(readFileSync(resolve(boot.dataDirectory,'status.json'),'utf8'));if(Date.parse(live.time)>=started)reason=boot.reason??live.reason??reason;}catch{}
+     }
+   }catch{}
    // CONTROL_REVOKED also occurs when the supervisor itself restarts or the
    // machine interrupts Astra. Treat only explicit manual takeover/disable
    // reasons as a durable pause; ordinary revocation must retry.

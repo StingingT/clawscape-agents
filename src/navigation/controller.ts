@@ -1,9 +1,10 @@
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { distance, interrupted, type Tile } from './geometry';
-import { isThreatened } from '../runtime-policy';
+import { distance, interrupted, type Tile } from './geometry.ts';
+import { isThreatened } from '../runtime-policy.ts';
 export const position = (s: any): Tile => ({ x: s.player.worldX, z: s.player.worldZ, level: s.player.level });
 type Leg = { target: Tile; doors: any[] };
 type RouteMemory = { from: Tile; to: Tile; legs: Leg[]; hash?: string; savedAt: number };
+export type NavigationDispatch = (action: {type:string;fields:any}, before:any) => void;
 type Port = { state(): Promise<any>; act(type: string, fields: any): Promise<any>; wait(ticks: number): Promise<any> };
 export class Navigator {
   private worker?: Worker;
@@ -23,7 +24,12 @@ export class Navigator {
   private safeTrail: Tile[] = [];
   private escapeTarget?: Tile;
   private escapeLife?: number;
-  constructor(private port: Port, private file: string, private planner?: (from: Tile, to: Tile, blocked: any[]) => Promise<any>, private questTravel=false) {
+  private port: Port;
+  private file: string;
+  private planner?: (from: Tile, to: Tile, blocked: any[]) => Promise<any>;
+  private questTravel: boolean;
+  constructor(port: Port, file: string, planner?: (from: Tile, to: Tile, blocked: any[]) => Promise<any>, questTravel=false) {
+    this.port=port; this.file=file; this.planner=planner; this.questTravel=questTravel;
     if (existsSync(file)) { try { const old = JSON.parse(readFileSync(file, 'utf8')); this.blocked = old.blocked ?? {}; this.routes = old.routes ?? {}; this.doors = old.doors ?? []; this.escapeTarget = old.escapeTarget; this.escapeLife = old.escapeLife; this.destination = old.destination ?? ''; this.recoveries = old.recoveries ?? 0; } catch {} }
     if (planner) { this.ready = true; return; }
     this.worker = new Worker(new URL('./map-worker.ts', import.meta.url).href);
@@ -97,7 +103,7 @@ export class Navigator {
     this.legs = [];
     return this.record('blocked', state, { reason, retryAfter: this.blockedUntil(to) });
   }
-  async escape(state: any) {
+  async escape(state: any, onDispatch?:NavigationDispatch) {
     const at = position(state);
     if (state.player.isDead || (this.escapeLife !== undefined && this.escapeLife !== state.player.lifeId)) {
       this.escapeTarget = undefined; this.escapeLife = undefined; this.safeTrail = []; this.legs = []; this.expected = undefined;
@@ -125,17 +131,17 @@ export class Navigator {
     if (!this.escapeTarget && at.level === 0 && at.x >= 3247 && at.x <= 3260 && at.z >= 3388 && at.z <= 3410)
       this.escapeTarget = {x:3254,z:3420,level:0};
     if (!this.escapeTarget) return this.record('interrupted', state, { reason: 'danger-no-verified-exit' });
-    const trip = await this.step(this.escapeTarget, state, true);
+    const trip = await this.step(this.escapeTarget, state, true, onDispatch);
     return { state: trip.state, navigation: { ...trip.navigation, escape: true } };
   }
-  private interrupt(state: any, reason: string) {
-    return reason === 'danger' ? this.escape(state) : Promise.resolve(this.record('interrupted', state, { reason }));
+  private interrupt(state: any, reason: string, onDispatch?:NavigationDispatch) {
+    return reason === 'danger' ? this.escape(state, onDispatch) : Promise.resolve(this.record('interrupted', state, { reason }));
   }
-  async step(to: Tile, initial: any, escaping = false) {
+  async step(to: Tile, initial: any, escaping = false, onDispatch?:NavigationDispatch) {
     let state = initial;
     if (this.fatal) return this.block(state, to, this.fatal);
     if (initial.player?.isDead) return this.record('interrupted', state, { reason: 'respawned' });
-    if (!escaping && isThreatened(initial)) return this.escape(state);
+    if (!escaping && isThreatened(initial)) return this.escape(state, onDispatch);
     if (!escaping) { this.escapeTarget = undefined; this.escapeLife = undefined; }
     const interruption = (next: any) => {
       const reason = interrupted(initial, next);
@@ -162,7 +168,7 @@ export class Navigator {
         this.legs = plan.legs;
         state = await this.port.state();
         const reason = interruption(state);
-        if (reason) return this.interrupt(state, reason);
+        if (reason) return this.interrupt(state, reason, onDispatch);
       } catch (error) { return this.block(state, to, String(error)); }
     }
     const leg = this.legs[0];
@@ -173,11 +179,13 @@ export class Navigator {
         const loc = state.nearbyLocs?.find((l: any) => l.level === door.level && l.x === door.x && l.z === door.z && l.reachable && /^(gate|door|large door)$/i.test(l.name) && l.optionsWithIndex?.some((o: any) => /^open$/i.test(o.text)));
         if (!loc) continue;
         const option = loc.optionsWithIndex.find((o: any) => /^open$/i.test(o.text));
-        await this.dispatch('interactLoc', { x: loc.x, z: loc.z, locId: loc.id, optionIndex: option.opIndex });
+        const fields={ x: loc.x, z: loc.z, locId: loc.id, optionIndex: option.opIndex };
+        onDispatch?.({type:'interactLoc',fields},structuredClone(state));
+        await this.dispatch('interactLoc', fields);
         let opened = false;
         for (let poll = 0; poll < 12; poll += 2) {
           state = await this.port.wait(2);
-          const reason = interruption(state); if (reason) return this.interrupt(state, reason);
+          const reason = interruption(state); if (reason) return this.interrupt(state, reason, onDispatch);
           const current = state.nearbyLocs?.find((l: any) => l.id === loc.id && l.x === loc.x && l.z === loc.z);
           if (!current || !current.optionsWithIndex?.some((o: any) => /^open$/i.test(o.text))) { opened = true; break; }
         }
@@ -187,11 +195,12 @@ export class Navigator {
           return this.record('replanning', state, { reason: 'door-did-not-open' });
         }
       }
+      onDispatch?.({type:'walkTo',fields:{...leg.target,running:true}},structuredClone(state));
       await this.dispatch('walkTo', { x: leg.target.x, z: leg.target.z, running: true });
       let previous = position(state), stationary = 0;
       for (let ticks = 0; ticks < 18; ticks += 2) {
         state = await this.port.wait(2);
-        const reason = interruption(state); if (reason) return this.interrupt(state, reason);
+        const reason = interruption(state); if (reason) return this.interrupt(state, reason, onDispatch);
         const current = position(state);
         if (distance(current, leg.target) === 0) {
           this.legs.shift(); this.expected = current;

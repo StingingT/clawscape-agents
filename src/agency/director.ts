@@ -163,14 +163,23 @@ export class Director {
 
   /** Only attributable, terminal outcomes update learning. Unknown is NOT failed. */
   record(outcome: Outcome): void {
-    if (!['verified', 'progress', 'rejected', 'unknown'].includes(outcome.status) || !Number.isSafeInteger(outcome.sequence) || outcome.sequence <= 0
+    if (!['verified', 'progress', 'deferred', 'rejected', 'unknown'].includes(outcome.status) || !Number.isSafeInteger(outcome.sequence) || outcome.sequence <= 0
       || ![outcome.at, outcome.spentGp, outcome.lostGp, outcome.deaths, outcome.elapsedMs].every(finiteNonnegative)
       || !Number.isInteger(outcome.deaths) || !Object.values(outcome.facts).every(Number.isFinite)) throw new Error('INVALID_OUTCOME');
     if (outcome.sequence <= this.memory.sequence) return;
     const pending = this.memory.pending, goal = this.memory.active;
     if (!pending || pending.commandId !== outcome.commandId || !goal || goal.key !== pending.goalKey) throw new Error('OUTCOME_WITHOUT_MATCHING_INTENT');
-    if (outcome.status === 'unknown' || (['verified', 'progress'].includes(outcome.status) && !outcome.evidence.length)) {
+    if (outcome.status === 'unknown' || (['verified', 'progress', 'deferred'].includes(outcome.status) && !outcome.evidence.length)) {
       pending.status = 'unknown'; return;
+    }
+    // Deferral is not a successful route, a productive method or a failed experiment.
+    // It closes an unsent/rebased step while leaving the quantitative goal intact.
+    if (outcome.status === 'deferred') {
+      if (outcome.spentGp || outcome.lostGp || outcome.deaths) throw new Error('DEFERRED_ACTION_HAS_COST_OR_LOSS');
+      goal.elapsedMs += outcome.elapsedMs;
+      this.memory.sequence = outcome.sequence;
+      delete this.memory.pending;
+      return;
     }
     const stats = this.memory.methods[methodKey(pending.context, pending.method.id)] ??= emptyStats();
     const productive = outcome.status === 'verified' && Object.keys(pending.method.effects)

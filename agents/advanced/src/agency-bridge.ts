@@ -40,7 +40,7 @@ export function agencyCandidate(o: Observation, decision: LiveDecision): LiveCan
     case 'deposit':return a('bankDeposit',{slot:i.slot,amount:i.amount});
     case 'withdraw':return a('bankWithdraw',{slot:i.slot,amount:i.amount});
     case 'style':return a('setCombatStyle',{style:i.style_index});
-    case 'dialogue':return a('clickDialogOption',{option:i.option_index});
+    case 'dialogue':return a('clickDialogOption',{optionIndex:i.option_index});
     case 'accept_design':return a('acceptCharacterDesign');
     case 'use_on_item':return a('useItemOnItem',{sourceSlot:i.slot,targetSlot:i.target_slot});
     case 'interact': case 'use_on_object': case 'pickup': {
@@ -59,6 +59,7 @@ export function agencyCandidate(o: Observation, decision: LiveDecision): LiveCan
 export function arbiterVerification(commandId:string,result:ActionResult|undefined):Verification {
   if(!result)return {status:'unknown',evidence:[],reason:'No action result yet.'};
   if(result.action_id!==commandId)throw new Error('RESULT_COMMAND_ID_MISMATCH');
+  if(result.status==='CANCELLED'&&result.reason==='MOTION_SUPERSEDED_WITHOUT_REPLAY'&&result.evidence.length)return {status:'deferred',evidence:result.evidence,reason:result.reason};
   if(result.status==='SUCCEEDED'&&result.evidence.length)return {status:'verified',evidence:result.evidence};
   if(result.status==='REJECTED'||result.status==='EXPIRED'||result.status==='CANCELLED'&&!/MAY_STILL|OUTCOME_UNKNOWN|PREEMPTED/.test(result.reason))
     return {status:'rejected',evidence:[`arbiter-before-dispatch:${result.reason}`]};

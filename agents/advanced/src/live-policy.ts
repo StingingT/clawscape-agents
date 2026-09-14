@@ -364,8 +364,14 @@ export class LivePolicy {
   /** Caller precondition: the main action journal has no pending commands.
    * Preserves numeric learning; discards session-bound route/target/dialogue state.
    * Unconfirmed policy effects must still be reconciled before rebasing. */
-  resumeFromObservation(o: Observation): void {
+  resumeFromObservation(o: Observation, archiveMotion?: (pending:unknown)=>void): void {
     if (!o.connected || o.fresh_at === null || !o.position) throw new Error("FRESH_CONNECTED_OBSERVATION_REQUIRED");
+    if (this.state.uncertain?.decision.intent?.operation==='move' && archiveMotion) {
+      // Caller has reconciled the authoritative action journal and owns the character.
+      // Archive the advisory motion state; never credit it as success or replay it.
+      archiveMotion(structuredClone(this.state.uncertain));
+      this.state.uncertain=null;
+    }
     if (this.state.uncertain) {
       if (!this.effect(this.state.uncertain.before, o, this.state.uncertain.decision)) throw new Error("RECONCILE_POLICY_OUTCOME_FIRST");
       this.applyEffect(this.state.uncertain.before, o, this.state.uncertain.decision);
@@ -664,17 +670,15 @@ export class LivePolicy {
     const names: Skill[] = ["attack", "strength", "defence"];
     const levels = names.map(n => skillLevel(o, n, true));
     if (levels.some(n => n === null)) return block("training", "MELEE_SKILLS_UNAVAILABLE", "All three base melee skills are required.");
-    const goals = levels.every(n => n! >= 20) ? [40, 60, 40] : [20, 20, 20];
-    if (requestedSkill && !names.includes(requestedSkill as Skill)) return block('training', 'UNSUPPORTED_TRAINING_SKILL', 'The executor supports only its observed melee styles.');
-    const lagging = requestedSkill ? {name:requestedSkill as Skill,ratio:0,remaining:1} : names.map((name, i) => ({ name, ratio: levels[i]! / goals[i]!, remaining: goals[i]! - levels[i]! }))
-      .filter(s => s.remaining > 0).sort((a, b) => a.ratio - b.ratio || names.indexOf(a.name) - names.indexOf(b.name))[0];
-    if (!lagging) return block("training", "PROPOSED_TARGETS_REACHED", "Observed 40 Attack/60 Strength/40 Defence reached; broader progression requires a new supported scope, not endless completion waits.");
+    if (!requestedSkill) return block('training','GOAL_SELECTION_REQUIRED','Select an evidence-based training goal before asking its executor for an action.');
+    if (!names.includes(requestedSkill as Skill)) return block('training','UNSUPPORTED_TRAINING_SKILL','The executor supports only its observed melee styles.');
+    const lagging={name:requestedSkill as Skill};
     const styleSkills = (s: string) => s.split(",").map(n => normalize(n).replace("defense", "defence"));
     const styles = o.activity!.styles.filter(s => styleSkills(s.skill).includes(lagging.name) && (!requestedSkill || styleSkills(s.skill).length === 1))
       .sort((a, b) => styleSkills(a.skill).length - styleSkills(b.skill).length || a.index - b.index);
     const style = styles.find(s => s.index === o.activity!.style) ?? styles[0];
     if (!style) return block(`training:${lagging.name}`, "UNSUPPORTED_COMBAT_STYLE", "No actual observed style trains the selected lagging skill; never assume numeric style mappings.");
-    if (o.activity!.style !== style.index) return { goal: `training:${lagging.name}`, reason: `Balance the proposed ${goals.join("/")} melee targets using observed ${style.name}.`,
+    if (o.activity!.style !== style.index) return { goal: `training:${lagging.name}`, reason: `Prepare the selected ${requestedSkill} trial using observed ${style.name}.`,
       intent: { operation: "style", style_index: style.index } };
     const candidates = o.entities.filter(e => encounter(e) && e.in_combat === false && e.reachable !== false
       && e.position.plane === o.position!.plane && distance(o.position!, e.position) <= 12);

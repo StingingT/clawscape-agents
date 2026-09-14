@@ -34,3 +34,6 @@ test('unsupported task does not silently fall back to the old training policy',(
 test('a selected supply task cannot default to a monster when its supply is already satisfied',()=>{
   const d=new LivePolicy().next(observed(),{id:'food',kind:'food'});expect(d.wait).toBe(true);expect(d.intent).toBeUndefined();
 });
+test('standalone policy cannot resurrect the old 20/20/20 or 40/60/40 progression ladder',()=>{
+  const d=new LivePolicy().next(observed());expect(d.blocked).toBe('GOAL_SELECTION_REQUIRED');
+});

@@ -27,4 +27,4 @@ export function interrupted(before: any, after: any): string | undefined {
   if (after.player.hp < before.player.hp || isThreatened(after)) return 'danger';
   if (after.tick < before.tick) return 'session-reset';
 }
-import { isThreatened } from '../runtime-policy';
+import { isThreatened } from '../runtime-policy.ts';

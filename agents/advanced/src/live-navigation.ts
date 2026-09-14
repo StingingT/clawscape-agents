@@ -12,15 +12,29 @@ export class LiveNavigator {
   private routeHint?:Tile;
   private failures=new Map<string,{until:number;count:number}>();
   private ready=false;
-  constructor(){
-    this.worker=new Worker(new URL('./live-map-worker.ts',import.meta.url).href);
+  private fatal?:string;
+  constructor(createWorker=()=>new Worker(new URL('./live-map-worker.ts',import.meta.url).href)){
+    this.worker=createWorker();
+    this.worker.onerror=(event)=>{
+      event.preventDefault?.();this.fatal='MAP_WORKER_FAILED';
+      for(const callback of this.callbacks.values())callback.reject(new Error(this.fatal));
+      this.callbacks.clear();
+    };
     this.worker.onmessage=({data})=>{
       if(data.ready){this.ready=true;return;}
       const callback=this.callbacks.get(data.id);if(!callback)return;
       this.callbacks.delete(data.id);data.error?callback.reject(new Error(data.error)):callback.resolve(data);
     };
   }
-  close(){this.worker.terminate();}
+  async prepare(timeoutMs=30_000):Promise<void>{
+    const deadline=Date.now()+timeoutMs;
+    while(!this.ready){
+      if(this.fatal)throw new Error(this.fatal);
+      if(Date.now()>=deadline)throw new Error('MAP_INITIALIZATION_TIMEOUT');
+      await new Promise(resolve=>setTimeout(resolve,50));
+    }
+  }
+  close(){this.worker.terminate();for(const callback of this.callbacks.values())callback.reject(new Error('NAVIGATOR_CLOSED'));this.callbacks.clear();}
   isReady(){return this.ready;}
   fail(destination:Tile,reason:string){
     const key=JSON.stringify(destination),old=this.failures.get(key);
@@ -29,6 +43,7 @@ export class LiveNavigator {
   }
   async next(o:Observation,hint:Tile):Promise<{intent?:Intent;arrived?:boolean;wait?:boolean;blocked?:string;route?:Route}> {
     if(!o.position)return {blocked:'POSITION_UNKNOWN'};
+    if(this.fatal)return {blocked:this.fatal};
     if(!this.ready)return {wait:true};
     if((this.failures.get(JSON.stringify(hint))?.until??0)>Date.now())return {blocked:'ROUTE_COOLDOWN'};
     if(o.position.plane!==hint.plane)return {blocked:'TRANSITION_REQUIRED'};

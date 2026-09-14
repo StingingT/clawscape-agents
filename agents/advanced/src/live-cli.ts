@@ -1,5 +1,9 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { resolve, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { runtimePaths } from '../../../src/runtime-paths.ts';
+import { migrateLegacyPlanner } from '../../../src/agency/legacy.ts';
+import { runAstra } from './startup.ts';
 import { Config, CompatibilityProfile, type Observation, type Intent } from './contracts.ts';
 import { CliSession, LiveAdapter } from './live-adapter.ts';
 import { ActionArbiter, type SafetyPolicy } from './arbiter.ts';
@@ -14,7 +18,8 @@ import {recoveryPreflight,RECOVERY_ID} from './live-recovery.ts';
 import { LiveAgency, isSelection, type Selection } from '../../../src/agency/live-adapter.ts';
 import { agencyState, agencyCandidate, arbiterVerification, observedVerification, urgentDecision } from './agency-bridge.ts';
 
-const root=resolve(import.meta.dir,'..'),data=resolve(root,'data/astra-live');
+const runtime=runtimePaths(fileURLToPath(new URL('../',import.meta.url)),process.argv.slice(2));
+const root=runtime.home,data=runtime.data;
 const argv=process.argv.slice(2),mode=argv[0]??'status';
 const option=(name:string,fallback:string)=>{const i=argv.indexOf('--'+name);return i>=0?(argv[i+1]??fallback):fallback;};
 const sleep=(ms:number)=>new Promise(r=>setTimeout(r,ms));
@@ -22,7 +27,7 @@ const atomic=(file:string,value:unknown)=>{const tmp=file+'.tmp';writeFileSync(t
 const brief=(o:Observation)=>({tick:o.tick,connected:o.connected,position:o.position,hp:o.hp,maxHp:o.max_hp,
   lifeId:o.life_id,respawns:o.respawns,skills:o.skills,inventory:o.inventory.map(i=>({name:i.name,count:i.count})),
   equipment:o.equipment.map(i=>({name:i.name,count:i.count}))});
-async function main(){
+export async function main(){
   mkdirSync(data,{recursive:true});
   if(mode==='status'){
     console.log(existsSync(join(data,'status.json'))?readFileSync(join(data,'status.json'),'utf8'):JSON.stringify({character:'astra',live:false,status:'NOT_STARTED'}));return;
@@ -36,7 +41,7 @@ async function main(){
         warning:'Revokes cooperating controller commands. Does not freeze the game; resume requires a new run.'}));
     }finally{store.close();}return;
   }
-  const config=Config.parse(JSON.parse(readFileSync(resolve(root,option('config','config.local.json')),'utf8')));
+  const config=Config.parse(JSON.parse(readFileSync(runtime.config,'utf8')));
   if(config.mode!=='live'||config.live_control!=='local-single-controller')throw new Error('LIVE_CONFIGURATION_REQUIRED');
   const cli=new CliSession(config,root);
   if(mode==='setup'){
@@ -55,7 +60,7 @@ async function main(){
   if(['run','pilot'].includes(mode)&&lastKnown&&liveHazardAt(lastKnown.position)){
     store.close();throw new Error('KNOWN_HAZARD_RECOVERY_REQUIRED');
   }
-  const profile=CompatibilityProfile.parse(JSON.parse(readFileSync(join(root,'docs/compatibility-profile.json'),'utf8')));
+  const profile=CompatibilityProfile.parse(JSON.parse(readFileSync(runtime.profile,'utf8')));
   const adapter=new LiveAdapter(cli,profile.profile_id,store.records<Observation>('observations_or_checkpoints').at(-1)?.seq??0);
   if(mode==='recover'){
     try{
@@ -85,17 +90,17 @@ async function main(){
       console.log(JSON.stringify({character:'astra',results:await a.reconcile(),remaining:store.pending().length}));
     }finally{store.close();}return;
   }
-  const lease=store.acquire('astra-live:'+process.pid,Date.now());
+  // Migration is under exclusive live-controller ownership below; do not alter ledgers at import time.
+  const oldAgencyFile=join(data,'agency-memory.json');
+  const saved=store.records<any>('live_policy_checkpoints').at(-1);
+  const policy=new LivePolicy(saved);
+  const lease=store.pending().length?store.acquireForReconciliation('astra-live:'+process.pid,Date.now()):store.acquire('astra-live:'+process.pid,Date.now());
   let revoked=false,latest:Observation|undefined,start:Observation|undefined,finished=false,reason='SESSION_LIMIT';
   const renewal=setInterval(()=>{try{store.renew(lease,Date.now());}catch{revoked=true;}},1000);
   const navigator=new LiveNavigator();
   const recordedRoutes=new WeakSet<object>();
   let navigation:unknown=null;
-  const saved=store.records<any>('live_policy_checkpoints').at(-1);
-  const policy=new LivePolicy(saved);
-  const oldAgencyFile=join(data,'agency-memory.json');
-  if (existsSync(oldAgencyFile) && JSON.parse(readFileSync(oldAgencyFile,'utf8')).pending)
-    throw new Error('LEGACY_AGENCY_INTENT_RECONCILIATION_REQUIRED');
+
   let agency:LiveAgency|undefined;
   let research:ResearchSummary|undefined,researchJob:Promise<void>|undefined;
   let researchQueued=0;
@@ -129,11 +134,23 @@ async function main(){
     atomic(join(data,'status.json'),result);console.log(JSON.stringify({time:result.time,status,goal:activeGoal,reason:why,tick:latest?.tick,hp:latest?.hp,position:latest?.position,actions,verified,failed}));
   };
   try{
+    migrateLegacyPlanner(oldAgencyFile);
+    publish('STARTING','Preparing the configured map before login');
+    await navigator.prepare();
     const connected=await cli.command(['connect'],25_000);
     if(connected.connected!==true)throw new Error('CONNECT_NOT_CONFIRMED');
     latest=await adapter.snapshot();await sleep(600);latest=await adapter.snapshot();start=latest;
+    // Reconcile the authoritative journal BEFORE rebasing policy or issuing ordinary commands.
+    // Observation/login uses the same ownership lease; submission is still blocked by pending actions.
+    const reconcileDeadline=Date.now()+15_000;
+    while(store.pending().length && Date.now()<reconcileDeadline){
+      await arbiter.reconcile();
+      if(store.pending().length){publish('RECONCILING','Pending journal: observation only, no replay');await sleep(700);}
+    }
+    if(store.pending().length)throw new Error('ACTION_RECONCILIATION_REQUIRED');
     if(mode==='run') {
-      policy.resumeFromObservation(latest);
+      latest=await adapter.snapshot();
+      policy.resumeFromObservation(latest,checkpoint=>{store.append('archived_motion_uncertainty',crypto.randomUUID(),{at:Date.now(),checkpoint,reason:'authoritative journal reconciled; fresh-state rebase without replay'});});
       const settings=join(data,'agency-policy.json');
       agency=new LiveAgency(join(data,'agency-v2.json'),{agent:latest.character,world:latest.world,revision:profile.profile_id},{
         supported:['food','bank','equipment','combat','exploration'],preferences:{exploration:2,combat:1},
@@ -237,6 +254,7 @@ async function main(){
         if(agency&&planned&&decision.wait){
           const before=latest,action=agencyCandidate(before,decision),commandId=crypto.randomUUID();
           agency.begin(planned,action,agencyState(before),commandId);
+          agency.noteExecution(commandId,action,agencyState(before));
           await sleep(700);latest=await adapter.snapshot();
           agency.record(commandId,agencyState(latest),observedVerification(agencyState(before),agencyState(latest),action));
           policy.observe(before,latest);
@@ -255,6 +273,7 @@ async function main(){
           if(!planned)throw new Error('GOAL_SELECTION_REQUIRED');
           agency.begin(planned,action,agencyState(before),commandId);
         }
+        agency.noteExecution(commandId,action,agencyState(before));
       }
       safety.safeEntities.clear();
       if('entity_ref' in intent)safety.safeEntities.add(intent.entity_ref);
@@ -312,4 +331,4 @@ async function main(){
     store.close();
   }
 }
-main().catch(error=>{console.error(JSON.stringify({error:error instanceof Error&&/^[A-Z_0-9]+$/.test(error.message)?error.message:'ASTRA_LIVE_COMMAND_FAILED',hint:'Check configuration, control state and local journal. External CLI output is intentionally suppressed.'}));process.exitCode=1;});
+if(import.meta.main) await runAstra(process.argv.slice(2),async()=>({main}));

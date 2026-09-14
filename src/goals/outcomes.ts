@@ -5,13 +5,11 @@ export const mission=(role:string)=>role==='economy'
   : 'Become stronger through useful equipment and build-compatible experience, while sustaining supplies and avoiding death';
 
 export function usefulXp(before:any,after:any,role:string,ranged:boolean){
-  const combat=new Set(ranged?['ranged','magic','hitpoints']:['attack','strength','hitpoints']);
+  const combat=new Set(ranged?['ranged','magic','defence','hitpoints']:['attack','strength','defence','hitpoints']);
   let result=0;
   for(const skill of after.skills??[]){
     const name=String(skill.name).toLowerCase(),old=before.skills?.find((x:any)=>String(x.name).toLowerCase()===name);
     if(!old||Number(old.baseLevel??old.level)>=99)continue;
-    if(role!=='economy'&&['defence','prayer'].includes(name))continue; // preserve agreed builds
-    if(role!=='economy'&&!ranged&&name==='attack'&&Number(old.baseLevel??old.level)>=40)continue;
     const gain=Math.max(0,Number(skill.experience??0)-Number(old.experience??0));
     result+=gain*(role==='economy'?.001:combat.has(name)?.01:.001);
   }

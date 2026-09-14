@@ -9,7 +9,7 @@ import {
 import { dirname, resolve } from "node:path";
 import { Navigator, position } from './navigation/controller';
 import { dialogueOption, bankOption, bowArrowCap, hasUsableArrows, isFood, isThreatened, harvestLevel, verifyBankTransfer } from './runtime-policy';
-import { bankAt, economyNext, productionDialog, shouldHeal, combatDisposition, meleeTrainingSkill, nearbyAmmoRecovery, quiverRefill, activeOpponent, isApprovedNpcTarget, foodCount, type EconomyMemory } from './progression-policy';
+import { bankAt, economyNext, productionDialog, shouldHeal, combatDisposition, nearbyAmmoRecovery, quiverRefill, activeOpponent, isApprovedNpcTarget, foodCount, type EconomyMemory } from './progression-policy';
 import { loadCatalog } from './training/catalog';
 import { TrainingDiscovery } from './training/discovery';
 import { acquireController } from './controller-lease';
@@ -23,7 +23,7 @@ import { EquipmentGoals, usable } from './goals/planner';
 import { PeerMarket } from './economy/market';
 import { metalDialog, validateMetal } from './economy/metalworking';
 import { mayPickpocketForAmmo } from './supply-policy';
-import { chooseResourceGoal, shouldBankResource, type ResourceGoal } from './economy/resource-agent';
+import { type ResourceGoal } from './economy/resource-agent';
 import { selectWork, observeWork, objectives } from './economy/objectives';
 import { bowNext, bowReserve, validateBow, observeBow, bowBlocked } from './economy/bowmaking';
 import { mission, outcomeReward } from './goals/outcomes';
@@ -42,6 +42,7 @@ import { actionGoalKind, actionMatchesGoal, goalTitle, isPreparationAction, mean
 import { proposalsFromGoals } from './learning-pipeline';
 import { observeWorld, recordRouteResult } from './shared-world';
 import { LiveAgency, isSelection, type Selection, type Verification } from './agency/live-adapter.ts';
+import { migrateLegacyPlanner } from './agency/legacy.ts';
 import type { Task, TaskKind, Route } from './agency/world-model.ts';
 import { randomUUID } from 'node:crypto';
 
@@ -89,9 +90,6 @@ const arg = (name: string, fallback: string): string => {
 };
 const character = arg("character", "demo");
 const steps = Number(arg("steps", "40"));
-const alpha = Number(arg("alpha", "0.25"));
-const gamma = Number(arg("gamma", "0.90"));
-const epsilon = Number(arg("epsilon", "0.15"));
 const profile = arg("profile", "default").replace(/[^a-z0-9_-]/gi, "");
 const role = arg("role", "brawler").replace(/[^a-z0-9_-]/gi, "");
 const build = arg("build", "melee").replace(/[^a-z0-9_-]/gi, "");
@@ -101,14 +99,6 @@ const forumEnabled = process.argv.includes('--forum') && !process.argv.includes(
 const githubLearnings = process.argv.includes("--github-learnings");
 const bulkPickaxes = process.argv.includes("--bulk-pickaxes");
 const intervalMs = Number(arg("interval-ms", "5000"));
-const BUILD = { attackCap: 40, defenceCap: 1, prayerCap: 1, strengthCheck: 40, foodTripMinimum: 3, foodTripTarget: 8, bankFoodReserve: 100 } as const;
-const LONG_TERM_GOALS: Record<string, string> = {
-  clawscout: 'Build a sustainable melee character: improve weapon, shield, food and combat levels, then safely trial stronger areas.',
-  stinger: 'Build a ranged-first character with reliable arrows and a magic route: complete supply skills, discover profitable drops and grow into stronger monsters.',
-  coincrafter: 'Build sustainable wealth through the best available production: maintain woodcutting/fletching, complete the mining-to-smithing tool chain and learn rune production.',
-  astra: 'Independently learn the world: finish prerequisites, map safe routes, test viable activities and become stronger through evidence-based choices.',
-  featherer: 'Build a steady server supply of feathers: safely farm chickens, bank large batches, then test cow hides and other scarce resources.'
-};
 const WORLD_ROUTES = {
   lumbridge: { x: 3232, z: 3230 },
   // Verified normal ground knife source used by the economy controller. It
@@ -148,9 +138,6 @@ const WORLD_ROUTES = {
 const dataDir = profile === "" || profile === "default"
   ? resolve(root, "data")
   : resolve(root, "data", profile);
-// Changed objective scales must not silently reuse rewards for raw item counts.
-// Preserve the former table on disk as history; learn this objective separately.
-const qPath = resolve(dataDir, "q-table-outcomes-v2.json");
 const experiencePath = resolve(dataDir, "experience.jsonl");
 const observationsPath = resolve(dataDir, "world-observations.jsonl");
 const forumInboxPath = resolve(dataDir, "forum-inbox.jsonl");
@@ -158,16 +145,6 @@ const forumStatePath = resolve(dataDir, "forum-state.json");
 const githubLearningPath = resolve(dataDir, "github-learnings.jsonl");
 const githubLearningStatePath = resolve(dataDir, "github-learning-state.json");
 mkdirSync(dataDir, { recursive: true });
-
-const loadQ = (): QTable => {
-  if (!existsSync(qPath)) return {};
-  try {
-    return JSON.parse(readFileSync(qPath, "utf8")) as QTable;
-  } catch {
-    return {};
-  }
-};
-const q = loadQ();
 let navigator: Navigator | undefined;
 let training: TrainingDiscovery | undefined;
 let travelAction: Candidate | null = null;
@@ -176,135 +153,9 @@ let agency: LiveAgency | undefined;
 let marketRetryAt=0;
 const workPath = resolve(dataDir, 'work-state.json');
 const actionIntentPath = resolve(dataDir, 'action-intent.json');
-const goalLifecyclePath = resolve(dataDir, 'goal-lifecycle.json');
-const goalLifecycle: GoalLifecycle = loadLifecycle(goalLifecyclePath);
 const work: { foodBatch?: FoodBatch; fishing?: FishingPreparation; economy?: EconomyMemory; resource?: { goal?: ResourceGoal; site?: string; lastBankAt?: number }; autonomy?: AutonomyMemory; learning?: Json & { food?: FoodExperience }; appearance?: AppearanceMemory; foodWithdrawalPending?: boolean | 'raw'; fishingToolFundingUntil?: number; fishingToolTradeAttempted?: boolean; pickpocketStreak?: number; bankReturn?: { x: number; z: number; level: number }; bankReturnReady?: boolean; bankItems?: Json[]; failures: Record<string, { until: number; count: number }> } = (() => {
   try { return { failures: {}, ...JSON.parse(readFileSync(workPath, 'utf8')) }; } catch { return { failures: {} }; }
 })();
-
-function agencyFacts(state: GameState): Record<string, number> {
-  const facts: Record<string, number> = { hp: Number(state.player?.hp ?? 0), coins: coinsIn((state.inventory ?? []) as Json[]) };
-  for (const skill of state.skills ?? []) facts[`skill:${String(skill.name).toLowerCase()}`] = Number(skill.level ?? skill.baseLevel ?? 0);
-  return facts;
-}
-
-const lifecycleDefinition = () => ({
-  id: `${character}:continuous-progression`,
-  kind: 'continuous' as const,
-  title: LONG_TERM_GOALS[character] ?? `Progress as a ${role}`,
-  role, build,
-  why: 'make verified progress while learning safer and more efficient methods',
-  steps: ['identify the next worthwhile subgoal', 'prepare prerequisites', 'execute and measure one productive cycle', 'review the evidence and adapt'],
-  prerequisites: [{ id: 'world-access', description: 'connected character with a usable route', status: 'unknown' as const }],
-  success: ['experience, useful items, gold, equipment, or verified exploration increases'],
-  partial: ['the attempt produces evidence or a safe partial result'],
-  failure: ['death, repeated rejection, or no meaningful progress within the bounded timeout'],
-  limits: { deadlineMs: 30 * 60_000, maxRisk: role === 'economy' ? 1 : 3 },
-});
-
-function ensureLifecycleGoal(now=Date.now()): void {
-  // Keep a concrete goal across controller iterations and restarts. The old
-  // implementation recreated the generic bootstrap goal whenever the active
-  // goal was concrete, erasing the goal's plan/review/learning context.
-  const goal = goalLifecycle.active ?? setGoal(goalLifecycle, lifecycleDefinition(), now);
-  if (goal.phase === 'set') advanceGoal(goalLifecycle, 'plan', now);
-  if (goal.phase === 'plan') advanceGoal(goalLifecycle, 'prepare', now);
-  // The bootstrap goal is only a migration-safe container. Once the planner
-  // selects an action, startConcreteGoal replaces it with a real, bounded
-  // goal. Never recreate a generic task over an already active concrete one.
-  if (goal.kind === 'continuous' || goal.id.endsWith(':continuous-progression')) {
-    ensureTask(goalLifecycle, {
-      id: `${character}:bootstrap-cycle`,
-      target: role === 'economy' ? 'select the first verified production or mining/smithing cycle' : 'select the first verified supply, exploration, or combat cycle',
-      method: 'observe-state-and-select-a-concrete-goal',
-      dependencies: ['connected observation', 'safe route or observed interaction'],
-      resourceBudget: { deaths: 0, noProgressAttempts: 3 },
-      stopConditions: ['unsafe health', 'unresolved action outcome', 'three no-effect attempts'],
-    }, now);
-  }
-  saveLifecycle(goalLifecyclePath, goalLifecycle);
-}
-
-function activeConcreteGoalKind(): ActionGoalKind | undefined {
-  const active = goalLifecycle.active;
-  if (!active || active.kind === 'continuous' || active.id.endsWith(':continuous-progression')) return undefined;
-  return active.kind as ActionGoalKind;
-}
-
-function startConcreteGoal(action: Candidate, now = Date.now()): void {
-  let active = goalLifecycle.active;
-  // A goal may make route progress without ever producing its promised
-  // outcome. Cap that preparation/recovery phase so movement is not confused
-  // with learning or completion.
-  if (active && active.kind !== 'continuous' && active.task && active.task.attempts >= 20
-    && active.learnings.length === 0
-    && !active.outcomes.some(outcome => outcome.status === 'success')) {
-    recordGoalOutcome(goalLifecycle, {
-      at: now,
-      status: 'failure',
-      evidence: [`goal attempt budget exhausted without a productive result: ${active.task.id}`],
-      reason: 'twenty bounded actions without a verified productive outcome',
-    });
-    blockGoal(goalLifecycle, 'goal attempt budget exhausted; select a different feasible objective');
-    if (goalLifecycle.active) {
-      goalLifecycle.active.phase = 'suspended';
-      goalLifecycle.active.updatedAt = now;
-    }
-    saveLifecycle(goalLifecyclePath, goalLifecycle);
-    active = goalLifecycle.active;
-  }
-  const actionKind = actionGoalKind(action);
-  // Service actions are prerequisites of the current goal. They must not
-  // replace it with a new bank/shop goal on every trip.
-  const kind = isPreparationAction(action) ? (activeConcreteGoalKind() ?? actionKind) : actionKind;
-  const replace = !active
-    || active.kind === 'continuous'
-    || active.id.endsWith(':continuous-progression')
-    || ['learn', 'completed', 'blocked', 'suspended'].includes(active.phase)
-    || active.task?.status === 'blocked'
-    || !activeConcreteGoalKind();
-  if (replace) {
-    const id = `${character}:goal:${kind}:${now}`;
-    setGoal(goalLifecycle, {
-      id,
-      kind,
-      title: goalTitle(kind),
-      role,
-      build,
-      why: 'choose the highest-value feasible next step from fresh observations and prior evidence',
-      steps: ['identify the worthwhile outcome', 'prepare verified prerequisites', 'execute a bounded productive attempt', 'review evidence and learn a better method'],
-      prerequisites: [
-        { id: 'fresh-observation', description: 'fresh state and reachable target or route', status: 'ready', evidence: `selected from ${action.id}` },
-        { id: 'safety', description: 'risk and resource limits remain acceptable', status: 'unknown' },
-      ],
-      success: ['XP, useful items, gold, equipment, or verified exploration increases'],
-      partial: ['a prerequisite or new route is verified without wasting the full budget'],
-      failure: ['death, repeated rejection, or no meaningful result within the bounded attempt'],
-      limits: { deadlineMs: 30 * 60_000, maxRisk: role === 'economy' ? 1 : 3, maxResource: { deaths: 0, noProgressAttempts: 3 } },
-    }, now);
-  }
-  const goal = goalLifecycle.active;
-  if (!goal) return;
-  if (goal.phase === 'set') advanceGoal(goalLifecycle, 'plan', now);
-  if (goal.phase === 'plan') advanceGoal(goalLifecycle, 'prepare', now);
-  ensureTask(goalLifecycle, {
-    id: `${goal.id}:attempt`,
-    target: goal.title,
-    method: action.id,
-    dependencies: ['fresh observation', 'verified target or route', 'safe supplies and equipment'],
-    resourceBudget: { deaths: 0, noProgressAttempts: 3 },
-    stopConditions: ['unsafe health', 'unresolved outcome', 'two repeated no-effect attempts'],
-  }, now);
-  advanceGoal(goalLifecycle, 'execute', now);
-  saveLifecycle(goalLifecyclePath, goalLifecycle);
-}
-
-function goalCompatibleOptions(options: Candidate[]): Candidate[] {
-  const kind = activeConcreteGoalKind();
-  if (!kind || ['learn', 'completed', 'blocked', 'suspended'].includes(goalLifecycle.active?.phase ?? '')) return options;
-  const compatible = options.filter(action => actionMatchesGoal(action, kind));
-  return compatible.length ? compatible : options;
-}
 if (bulkPickaxes && role === 'economy') {
   work.economy ??= { bankItems: work.bankItems ?? [] };
   work.economy.metal ??= {};
@@ -330,30 +181,6 @@ if (startupCycle || /^(peer-message-|await-combat-state-clear$|economy-metal-rec
   work.autonomy.active = undefined;
   work.autonomy.recentActions = [];
   saveWork();
-}
-
-// Appearance is an agent-owned preference, separate from build mechanics. Each
-// character gets a stable style once, so restarts do not repeatedly mutate it.
-const appearancePresets: Record<string, { name: string; args: string[] }> = {
-  clawscout: { name: 'brawler', args: ['looks', 'set', '--gender', 'man', '--hair', 'man_hair_wildspikes', '--jaw', 'man_jaw_goatee', '--torso', 'man_torso_jacket', '--arms', 'man_arms_musclebound', '--legs', 'man_legs_shorts', '--skin', '4', '--hair-colour', '8', '--torso-colour', '12'] },
-  stinger: { name: 'ranger', args: ['looks', 'set', '--gender', 'man', '--hair', 'man_hair_long', '--jaw', 'man_jaw_none', '--torso', 'man_torso_shirt', '--arms', 'man_arms_loose_sleeved', '--legs', 'man_legs_flares', '--skin', '2', '--hair-colour', '10', '--torso-colour', '6'] },
-  coincrafter: { name: 'merchant-smith', args: ['looks', 'set', '--gender', 'man', '--hair', 'man_hair_cropped', '--jaw', 'man_jaw_moustache', '--torso', 'man_torso_two_toned', '--arms', 'man_arms_large_cuffed', '--legs', 'man_legs_turn_ups', '--skin', '6', '--hair-colour', '5', '--torso-colour', '14'] },
-  astra: { name: 'explorer', args: ['looks', 'set', '--gender', 'woman', '--hair', 'woman_hair_long', '--torso', 'woman_torso_simple', '--arms', 'woman_arms_bare_arms', '--legs', 'woman_legs_shorts', '--skin', '3', '--hair-colour', '9', '--torso-colour', '11'] },
-};
-
-async function customizeAppearance(): Promise<void> {
-  if (work.appearance?.completed) return;
-  const preset = appearancePresets[character];
-  if (!preset) return;
-  try {
-    await cliCall(preset.args);
-    work.appearance = { completed: true, preset: preset.name, updatedAt: new Date().toISOString() };
-    saveWork();
-    console.log(JSON.stringify({ appearance: 'customized', character, preset: preset.name }));
-  } catch (error) {
-    // Cosmetic failure must never prevent the agent from playing or recovering.
-    console.error(JSON.stringify({ appearance: 'deferred', character, error: String(error).slice(0, 240) }));
-  }
 }
 const gearCatalog = loadGearCatalog();
 const equipmentGoals = new EquipmentGoals(resolve(dataDir, 'equipment-goals.json'), gearCatalog, role, build === 'ranged-magic');
@@ -390,14 +217,6 @@ function available(options: Candidate[]): Candidate[] {
     .sort((a, b) => (work.failures[a.id]?.until ?? 0) - (work.failures[b.id]?.until ?? 0))[0];
   return retry ? [retry] : [];
 }
-function noteFailure(action: Candidate) {
-  const count = (work.failures[action.id]?.count ?? 0) + 1;
-  work.failures[action.id] = { count, until: Date.now() + Math.min(300_000, 30_000 * count) };
-  if(role==='economy'&&work.economy?.objectives?.intent&&action.id.startsWith('economy-')&&count>=2)work.economy.objectives.blocked[work.economy.objectives.intent.id]=Date.now()+300_000;
-  if(action.id.startsWith('economy-bow-')&&work.economy&&count>=2)bowBlocked(work.economy,'Repeated action or route failure: '+action.id);
-  if (typeof action.fields?.trainingSite === 'string') training?.block(action.fields.trainingSite, 'action-or-route-failed');
-  saveWork();
-}
 
 function loadForumState(): ForumState {
   if (!existsSync(forumStatePath)) return { sent: {}, replies: {} };
@@ -406,11 +225,6 @@ function loadForumState(): ForumState {
 
 function saveForumState(value: ForumState): void {
   writeFileSync(forumStatePath, JSON.stringify(value, null, 2) + "\n");
-}
-
-function loadGitHubLearningState(): GitHubLearningState {
-  if (!existsSync(githubLearningStatePath)) return { queued: {}, published: {} };
-  try { return JSON.parse(readFileSync(githubLearningStatePath, "utf8")) as GitHubLearningState; } catch { return { queued: {}, published: {} }; }
 }
 
 async function cliCall(args: string[]): Promise<Json> {
@@ -435,55 +249,6 @@ function text(value: unknown): string {
 function level(state: GameState, name: string): number {
   const skill = (state.skills ?? []).find((item) => text(item.name) === name);
   return typeof skill?.level === "number" ? skill.level : 1;
-}
-
-function progression(state: GameState): Json {
-  return {objective:mission(role),longTermGoal:LONG_TERM_GOALS[character] ?? mission(role),autonomy:work.autonomy?.active,...progressionDetails(state),...(role==='economy'?{productionDecision:work.economy?.objectives?.decision}:{} )};
-}
-function runeMysteriesComplete(): boolean {
-  try { return JSON.parse(readFileSync(resolve(dataDir, 'rune-mysteries.json'), 'utf8')).completed === true; } catch { return false; }
-}
-function progressionDetails(state: GameState): Json {
-  const equipment = equipmentGoals.plan(state);
-  let runeMysteries: Json = { complete: false, status: 'not yet checked by the quest runner' };
-  try { const saved = JSON.parse(readFileSync(resolve(dataDir, 'rune-mysteries.json'), 'utf8')); runeMysteries = { complete: saved.completed === true, stage: saved.stage, checkedAt: saved.journalAt, blocker: saved.blocked }; } catch {}
-  const equipmentBrief = { target: equipment.target, phase: equipment.goal?.phase, reason: equipment.goal?.reason, status: equipment.status };
-  if (character === 'featherer') {
-    const items = [...(work.bankItems ?? []), ...(state.inventory ?? [])];
-    const total = (pattern: RegExp) => items.reduce((sum, item) => pattern.test(String(item.name ?? '')) ? sum + Number(item.count ?? 1) : sum, 0);
-    const feathers = total(/^feather$/i);
-    const hides = total(/^cowhide$/i);
-    const resourceGoal = chooseResourceGoal(work.bankItems ?? [], state.inventory ?? []);
-    return {
-      stage: resourceGoal === 'feathers' ? 'feather-supply' : resourceGoal === 'cow-hides' ? 'cowhide-supply' : 'resource-survey',
-      goal: resourceGoal === 'feathers' ? `Bank 500 feathers (${feathers}/500)` : resourceGoal === 'cow-hides' ? `Bank 50 cow hides (${hides}/50)` : 'Survey and supply another scarce resource',
-      resourceGoal,
-      feathers,
-      cowHides: hides,
-      safety: 'farm only reachable targets; bank in batches; keep combat fallback available',
-      equipment: equipmentBrief,
-      runeMysteries,
-    };
-  }
-  if (equipment.target) return { stage: 'equipment-progression', goal: equipment.target, equipment: equipmentBrief, runeMysteries };
-  if (equipment.capital && !equipment.capital.complete) return { stage: equipment.capital.targetCoins===null?'realize-production-profit':'fund-upgrades', goal: equipment.capital.targetCoins===null?'Sell unreserved production surplus':'Build liquid upgrade reserve',
-    coins: equipment.capital.observedCoins, targetCoins: equipment.capital.targetCoins, reason: equipment.capital.reason, equipment: equipmentBrief, runeMysteries };
-  const knowledge = knowledgeSummary(role, build, work.learning);
-  const foodMemory = work.learning?.food;
-  const foodPolicy = { trainingReserve: learnedFoodReserve(foodMemory), pvpReserve: learnedFoodReserve(foodMemory, true), bankReserve: foodBankReserve(foodMemory), observedEncounters: foodMemory?.encounters ?? 0, observedFoodConsumed: foodMemory?.foodConsumed ?? 0 };
-  if (role === "economy") return { stage: "banked-production", goal: work.economy?.goal ?? "recover tools, process stored logs, gather near a bank", reason: work.economy?.reason, selectedSite: work.economy?.selectedSite, woodcutting: level(state, 'woodcutting'), fletching: level(state, 'fletching'), runeMysteries, runeLearning: knowledge, foodPolicy, equipment: equipmentBrief };
-  if (build === "ranged-magic") return { stage: "ranged-magic-foundation", goal: runeMysteries.complete ? "Farm verified local rune/arrow sources while maintaining ranged supplies" : "Maintain ranged supplies; complete Rune Mysteries with the single-owner quest runner", runeMysteries, runeLearning: knowledge, foodPolicy, style: "train with the bow while the magic supply route is unavailable", gear: "best useful acquired bow and compatible arrows", equipment: equipmentBrief };
-  const attack = level(state, "attack");
-  const strength = level(state, "strength");
-  const foodCount = (state.inventory ?? []).reduce((sum, item) => /^(shrimp|anchovies|trout|salmon|sardines|herring|tuna|lobster|swordfish|bread|pizza)/i.test(String(item.name)) ? sum + (typeof item.count === "number" ? item.count : 1) : sum, 0);
-  if (foodCount < learnedFoodReserve(foodMemory)) return { stage: "food-supply", goal: "Learn the smallest safe cooked-food reserve", style: "fish/cook only when the learned trip reserve is short", gear: "keep current combat gear; resupply before risking it" };
-  if (strength < BUILD.strengthCheck) {
-    return { stage: "strength-foundation", goal: "Strength 40", style: "strength", gear: "best available one-handed weapon + shield" };
-  }
-  if (attack < BUILD.attackCap) {
-    return { stage: "rune-gate", goal: "Attack 40", style: "attack", gear: "upgrade weapon whenever an exposed shop/drop permits it" };
-  }
-  return { stage: "combat-growth", goal: "Improve melee capability through useful levels, gear and sustainable encounter choices", style: "strength within the agreed build", gear: "best worthwhile supported upgrade; capped XP alone is not progress" };
 }
 
 function forumAnswerEvidence(state: GameState, request: string): string | null {
@@ -512,107 +277,6 @@ function socialVoice(): { opener: string; plan: string } {
   if (character === "astra") return { opener: "Thanks, that helps", plan: "I'm still mapping the world and testing what I can safely handle." };
   if (character === "featherer") return { opener: "Useful lead", plan: "I'm building a reliable feather supply first, then I'll test cow hides and other scarce resources." };
   return { opener: "Useful lead", plan: "I'm gathering supplies now, so I can bring food or materials once I have a decent batch." };
-}
-
-function socialIntent(state: GameState): string {
-  const plan = progression(state);
-  return `${String(plan.stage ?? "exploring")}:${String(plan.goal ?? "learn the area")}`;
-}
-
-async function socialPulse(state: GameState): Promise<void> {
-  if (!forumEnabled) return;
-  const saved = loadForumState();
-  const now = Date.now();
-  // Proactive questions are one-shot requests for help, not status updates.
-  // Once an agent has asked its role-specific question, do not repeat it when
-  // the goal, episode, or supervisor process changes. A future answer can be
-  // handled by syncForum(); until then the agent continues from verified local
-  // knowledge and prior successful work.
-  const displayName = character.charAt(0).toUpperCase() + character.slice(1);
-  const alreadyAsked = (saved as any).questionAsked === true || String(saved.lastChatKey ?? '').includes(`${displayName} here.`);
-  if (alreadyAsked) {
-    saved.lastIntent = socialIntent(state);
-    (saved as any).questionAsked = true;
-    saveForumState(saved);
-    return;
-  }
-  const intent = socialIntent(state);
-  const firstSocial = !saved.lastIntent;
-  const plan = progression(state);
-  const goal = String(plan.goal ?? "learning the world");
-  const messages: Record<string, { chat: string; title: string; body: string }> = {
-    clawscout: {
-      chat: `ClawScout here. Does anyone know a worthwhile melee monster for my current level?`,
-      title: "ClawScout: which melee monster should I test next?",
-      body: `I'm ClawScout, a melee brawler working on ${goal}. Which monster would you recommend I test next, and why? Please give one answer. I will report whether I gained XP and useful drops, and whether the food cost was safe.`
-    },
-    stinger: {
-      chat: `Stinger here. Which monster has given you the most useful arrow or rune drops?`,
-      title: "Stinger: asking for one arrow or rune source",
-      body: `I'm Stinger, building a ranged/magic setup and currently working on ${goal}. What is one reliable monster for arrows or runes in this world? If you have not tested it yourself, please say so. I will verify the drop before relying on it.`
-    },
-    coincrafter: {
-      chat: `CoinCrafter here. Does anyone know the best bank-nearby ore route they have actually tested?`,
-      title: "CoinCrafter: asking about one ore route",
-      body: `I'm CoinCrafter, trying to turn gathering and processing into steady progress and profit. My current goal is ${goal}. Which one bank-nearby ore route have you personally tested? I am especially interested in the time from mining to banking, not just the mine name.`
-    },
-    astra: {
-      chat: `Astra here. What is one place you tested that was useful for early progression?`,
-      title: "Astra: asking for one tested progression place",
-      body: `I'm Astra, still learning this world independently. My current goal is ${goal}. What is one place you personally tested that helped progression? Please include what you gained there; I will verify the route and result myself.`
-    },
-    featherer: {
-      chat: `Featherer here. What is one resource that is currently in short supply?`,
-      title: "Featherer: asking about one scarce resource",
-      body: `I'm Featherer, building a steady supply of feathers for ranged training. My current goal is ${goal}. What is one resource the server currently needs most? Please give one tested answer; I will verify the route and result myself.`
-    }
-  };
-  const message = messages[character] ?? messages.astra;
-  const socialKey = `${message.chat}|${intent}`;
-  // Party proposals are evidence-based: only report a mine and offer an escort
-  // when the same observation contains both the resource and a nearby attackable
-  // monster. A message is a proposal, not permission to control the other agent.
-  if (character === 'clawscout' && !(saved as any).orePartyProposalAt || character === 'clawscout' && now - Number((saved as any).orePartyProposalAt ?? 0) >= 30 * 60_000) {
-    const ore = (state.nearbyLocs ?? []).find(loc => /^(mithril|adamant(?:ite)?|adamant) ore|mithril|adamant/i.test(String(loc.name)) && loc.reachable === true);
-    const threat = (state.nearbyNpcs ?? []).find(npc => Number(npc.combatLevel ?? 0) > 0 && npc.optionsWithIndex?.some(option => /^attack$/i.test(String(option.text))));
-    if (ore && threat) {
-      const body = `I found ${String(ore.name)} nearby. The area is occupied by ${String(threat.name)} (level ${Number(threat.combatLevel)}), so it is not a free mining spot. If you want to test it, I can try to protect the route while you mine; let me know first.`;
-      try { await cliCall(["act", "privateMessage", "--json", JSON.stringify({ targetName: "Coincrafter", message: body.slice(0, 220) })]); } catch (error) { console.log(JSON.stringify({ social: 'party-proposal-deferred', error: String(error).slice(0, 180) })); }
-      (saved as any).orePartyProposalAt = now;
-      (saved as any).orePartyEvidence = { ore: String(ore.name), threat: String(threat.name), combatLevel: Number(threat.combatLevel), at: new Date(now).toISOString() };
-      saveForumState(saved);
-    }
-  }
-  // A long-running controller may start a new episode every few minutes. A
-  // time-only cooldown therefore still repeats the same question forever.
-  // Treat an unchanged question and unchanged goal as already handled; a new
-  // goal or a changed observation can produce a new human-like update.
-  if ((firstSocial || (saved.lastChatKey !== socialKey && now - (saved.lastChatAt ?? 0) >= 15 * 60_000))) {
-    try {
-      await cliCall(["act", "say", "--json", JSON.stringify({ message: message.chat.slice(0, 220) })]);
-      console.log(JSON.stringify({ social: "chat", character }));
-    } catch (error) {
-      console.log(JSON.stringify({ social: "chat-deferred", error: String(error).slice(0, 180) }));
-    }
-    saved.lastChatAt = now;
-    saved.lastChatKey = socialKey;
-    (saved as any).questionAsked = true;
-  }
-  const postKey = `${message.title}|${goal}|${intent}`;
-  if ((firstSocial || (saved.lastPostKey !== postKey && now - (saved.lastPostAt ?? 0) >= 45 * 60_000))) {
-    const bodyPath = resolve(dataDir, "social-update.txt");
-    writeFileSync(bodyPath, message.body + "\n");
-    try {
-      await cliCall(["forum", "post", "--title", message.title, "--body-file", bodyPath]);
-      console.log(JSON.stringify({ social: "forum-post", character }));
-    } catch (error) {
-      console.log(JSON.stringify({ social: "forum-deferred", error: String(error).slice(0, 180) }));
-    }
-    saved.lastPostAt = now;
-    saved.lastPostKey = postKey;
-  }
-  saved.lastIntent = intent;
-  saveForumState(saved);
 }
 
 async function syncForum(state: GameState): Promise<void> {
@@ -652,43 +316,6 @@ async function syncForum(state: GameState): Promise<void> {
     console.log(JSON.stringify({ forum: "joined-conversation", topicId, to: author }));
     break;
   }
-}
-
-async function discussForumProblem(message: string): Promise<void> {
-  if (!forumEnabled || !/another action is in progress|can't reach|failed to/i.test(message)) return;
-  const saved = loadForumState();
-  saved.sent ??= {};
-  const key = "problem:" + message.toLowerCase().replace(/\d+/g, "#").slice(0, 120);
-  if (saved.sent[key]) return;
-  const plain = message.replace(/[\r\n]+/g, " ").slice(0, 180);
-  const bodyPath = resolve(dataDir, "forum-problem.txt");
-  writeFileSync(bodyPath, "I've hit a snag while working on my current plan: " + plain + ". Has anyone found a reliable way around this?\n");
-  try {
-    await cliCall(["forum", "post", "--title", character + ": looking for advice on a stuck action", "--body-file", bodyPath]);
-    saved.sent[key] = new Date().toISOString();
-    saveForumState(saved);
-    console.log(JSON.stringify({ forum: "asked-for-help", problem: plain }));
-  } catch (error) {
-    // Posting is optional social behaviour. A cooldown must not stop gameplay.
-    console.log(JSON.stringify({ forum: "problem-post-deferred", error: error instanceof Error ? error.message : String(error) }));
-  }
-}
-
-async function maybePublishGitHubLearning(state: GameState): Promise<void> {
-  if (!githubLearnings) return;
-  const proposals = proposalsFromGoals([...goalLifecycle.history, ...(goalLifecycle.active ? [goalLifecycle.active] : [])] as any);
-  if (!proposals.length) return;
-  const saved = loadGitHubLearningState();
-  saved.queued ??= {};
-  saved.published ??= {};
-  for (const proposal of proposals) {
-    if (saved.queued[proposal.key] || saved.published[proposal.key]) continue;
-    const request = { time: new Date().toISOString(), character, proposal, reviewRequired: true, importPolicy: 'agents may import only after maintainer review and merge' };
-    appendFileSync(githubLearningPath, JSON.stringify(request) + "\n");
-    saved.queued[proposal.key] = new Date().toISOString();
-    console.log(JSON.stringify({ github: "knowledge-change-requested", key: proposal.key, reviewRequired: true }));
-  }
-  writeFileSync(githubLearningStatePath, JSON.stringify(saved, null, 2) + "\n");
 }
 
 function economyCandidates(state: GameState): Candidate[] {
@@ -827,36 +454,6 @@ function arrowProductionCandidates(state: GameState): Candidate[] {
     }, waitTicks: 3 }];
   }
   return [];
-}
-
-function lobsterProgressionCandidates(state: GameState): Candidate[] {
-  // Owner's current priority is a Black Knight trial using existing bank food.
-  if(character==='clawscout')return [];
-  if (character !== 'clawscout' || role === 'economy' || build === 'ranged-magic' || level(state, 'fishing') < 40) return [];
-  const inv = state.inventory ?? [];
-  const prep=lobsterPreparation(state,work.fishing??={},work.bankItems??[],()=>bankAt(state).map(a=>({...a,id:'lobster-'+a.id})));
-  saveWork();
-  if(prep.status!=='ready')return prep.actions;
-  // An upgrade is not an endless fishing mandate. With food in reserve,
-  // return ownership to gear acquisition and combat progression.
-  const storedFood=(work.bankItems??[]).filter(i=>/^(shrimps|anchovies|trout|salmon|lobster|swordfish)$/i.test(String(i.name))).reduce((n,i)=>n+Number(i.count),0);
-  if(learnedFoodCount(inv)>=learnedFoodReserve(work.learning?.food)&&storedFood>=foodBankReserve(work.learning?.food))return [];
-  if(inv.length>=28||inv.some(i=>/^raw lobster$/i.test(String(i.name))))return [];
-
-  const spot = (state.nearbyNpcs ?? []).find(npc => /fishing\s*spot/i.test(text(npc.name)) && npc.reachable === true && (npc.optionsWithIndex as Json[] | undefined)?.some(option => /^cage$/i.test(text(option.text))));
-  const cage = (spot?.optionsWithIndex as Json[] | undefined)?.find(option => /^cage$/i.test(text(option.text)));
-  if (spot && typeof spot.index === 'number' && typeof cage?.opIndex === 'number') return [{ id: `lobster-fish-${spot.index}`, type: 'interactNpc', fields: { npcIndex: spot.index, optionIndex: cage.opIndex, reason: 'fish lobsters at the observed Karamja cage spot' }, waitTicks: 5 }];
-
-  const sailor = (state.nearbyNpcs ?? []).find(npc => /seaman|captain tobias/i.test(text(npc.name)) && npc.reachable === true);
-  const talk = (sailor?.optionsWithIndex as Json[] | undefined)?.find(option => /talk/i.test(text(option.text)));
-  if (sailor && typeof sailor.index === 'number' && typeof talk?.opIndex === 'number') return [{ id: 'sail-to-karamja-lobster-fishing', type: 'interactNpc', fields: { npcIndex: sailor.index, optionIndex: talk.opIndex, reason: 'take the verified Port Sarim route to Karamja' }, waitTicks: 4 }];
-
-  const player = state.player ?? {};
-  const distanceToSailor = Math.hypot(Number(player.worldX) - WORLD_ROUTES.portSarimSailor.x, Number(player.worldZ) - WORLD_ROUTES.portSarimSailor.z);
-  if (distanceToSailor > 8) return [{ id: 'travel-to-karamja-sailor', type: 'walkTo', fields: { ...WORLD_ROUTES.portSarimSailor, running: true, reason: 'reach the verified Port Sarim sailor before crossing to Karamja' }, waitTicks: 4 }];
-  const distanceToSpot = Math.hypot(Number(player.worldX) - WORLD_ROUTES.karamjaLobsterFishing.x, Number(player.worldZ) - WORLD_ROUTES.karamjaLobsterFishing.z);
-  if (distanceToSpot > 8) return [{ id: 'travel-to-karamja-lobster-spot', type: 'walkTo', fields: { ...WORLD_ROUTES.karamjaLobsterFishing, running: true, reason: 'survey the guide-listed Karamja cage spot' }, waitTicks: 4 }];
-  return [{ id: 'scan-for-lobster-spot', type: 'scanNearbyLocs', fields: { radius: 24, reason: 'find the live cage fishing spot after arriving in Karamja' }, waitTicks: 3 }];
 }
 
 function cautiousPickpocketCandidates(state: GameState): Candidate[] {
@@ -1084,40 +681,6 @@ function localEconomyDiscovery(state: GameState): Candidate[] {
   }];
 }
 
-function stateKey(state: GameState): string {
-  const player = state.player ?? {};
-  const inv = state.inventory ?? [];
-  const npcs = state.nearbyNpcs ?? [];
-  const locs = state.nearbyLocs ?? [];
-  const dialog = state.dialog ?? {};
-  const phase = state.inGame === false
-    ? "login"
-    : player === null
-      ? "no-player"
-      : (player.isDead === true ? "dead" : "alive");
-  const names = [...npcs, ...locs]
-    .map((item) => text(item.name))
-    .filter((name) => name.includes("tree") || name.includes("guide"))
-    .sort()
-    .join(",");
-  const enemyTypes = npcs.map((item) => text(item.name)).filter(Boolean).sort().join(",");
-  const hasAxe = inv.some((item) => text(item.name).includes("axe"));
-  const dialogOpen = dialog.isOpen === true ? "dialog" : "quiet";
-  const hp = typeof player.hp === "number" ? player.hp : 0;
-  const maxHp = typeof player.maxHp === "number" ? player.maxHp : 1;
-  const hpBand = hp * 100 / Math.max(1, maxHp) <= 40 ? "low-hp" : "safe-hp";
-  const combat = player.combat as Json | undefined;
-  const fighting = combat?.inCombat === true ? "fighting" : "free";
-  const safeTargets = npcs.filter((npc) => {
-    const options = Array.isArray(npc.optionsWithIndex) ? npc.optionsWithIndex : [];
-    return npc.reachable === true && npc.inCombat !== true &&
-      options.some((option) => text((option as Json).text).includes("attack"));
-  }).length;
-  const worldX = typeof player.worldX === "number" ? Math.floor(player.worldX / 10) : -1;
-  const worldZ = typeof player.worldZ === "number" ? Math.floor(player.worldZ / 10) : -1;
-  return [phase, dialogOpen, hpBand, fighting, `targets${safeTargets}`, inv.length >= 28 ? "full" : `inv${inv.length}`, hasAxe ? "axe" : "no-axe", names, `enemies:${enemyTypes}`, `${worldX},${worldZ}`].join("|");
-}
-
 function dialogCandidates(state: GameState): Candidate[] {
   const dialog = state.dialog ?? {};
   if (dialog.isOpen !== true) return [];
@@ -1147,185 +710,6 @@ function dialogCandidates(state: GameState): Candidate[] {
     fields: { optionIndex: option.index },
     waitTicks: role === 'economy' && work.economy?.product ? 4 : 2,
   }];
-}
-
-async function goalCandidates(state: GameState): Promise<Candidate[]> {
-  return training ? training.next(state, (from, to) => navigator!.assess(from, to))
-    : await autonomousRecovery(state, 'training-unavailable');
-}
-
-function nearbyCombatRecovery(state: GameState): Candidate[] {
-  // Economy characters only defend themselves through the normal combat
-  // arbitration path. They must not turn a safe mining/gathering fallback
-  // into unsolicited combat.
-  if (role === 'economy') return [];
-  const combatLevel = Number(state.player?.combatLevel ?? 1);
-  const minimum = build === 'ranged-magic' ? 10 : Math.max(10, Math.floor(combatLevel * 0.35));
-  const maximum = Math.max(minimum, Math.floor(combatLevel * 0.80));
-  const targets = (state.nearbyNpcs ?? [])
-    .filter(npc => npc.reachable === true && typeof npc.index === 'number')
-    .filter(npc => Number(npc.combatLevel ?? 0) >= minimum && Number(npc.combatLevel ?? 0) <= maximum)
-    .map(npc => ({ npc, attack: (npc.optionsWithIndex as Json[] | undefined)?.find(o => /^attack$/i.test(String(o.text))) }))
-    .filter(row => typeof row.attack?.opIndex === 'number')
-    .sort((a, b) => Number(b.npc.combatLevel ?? 0) - Number(a.npc.combatLevel ?? 0));
-  const target = targets[0];
-  if (!target) return [];
-  return [{
-    id: `autonomy-attack-${target.npc.index}`,
-    type: 'interactNpc',
-    fields: {
-      npcIndex: target.npc.index,
-      optionIndex: target.attack!.opIndex,
-      reason: `use a fresh reachable level-${Number(target.npc.combatLevel)} combat trial instead of repeating navigation`
-    },
-    waitTicks: 5,
-  }];
-}
-
-function featherResourceCandidates(state: GameState): Candidate[] {
-  if (character !== 'featherer') return [];
-  const inventory = state.inventory ?? [];
-  const bank = work.bankItems ?? [];
-  const goal = chooseResourceGoal(bank, inventory);
-  work.resource ??= {};
-  work.resource.goal = goal;
-
-  if (state.bank?.isOpen === true && !shouldBankResource(goal, inventory)) {
-    return [{ id: 'featherer-close-completed-bank', type: 'closeModal', fields: { reason: 'no further resource deposit is required' }, waitTicks: 1 }];
-  }
-
-  if (shouldBankResource(goal, inventory)) {
-    work.resource.lastBankAt = Date.now();
-    saveWork();
-    return bankAt(state);
-  }
-
-  const desiredDrop = goal === 'feathers' ? /^feather$/i : goal === 'cow-hides' ? /^cowhide$/i : null;
-  const drop = desiredDrop && (state.groundItems ?? [])
-    .filter(item => item.reachable === true && Number(item.distance ?? 99) <= 8 && desiredDrop.test(String(item.name ?? ''))
-      && typeof item.id === 'number' && typeof item.x === 'number' && typeof item.z === 'number')
-    .sort((a, b) => Number(a.distance ?? 99) - Number(b.distance ?? 99))[0];
-  if (drop) {
-    return [{
-      id: `resource-pickup-${goal}-${drop.id}-${drop.x}-${drop.z}`,
-      type: 'pickupItem',
-      fields: { x: drop.x, z: drop.z, itemId: drop.id, reason: `collect the ${goal === 'feathers' ? 'feather' : 'cowhide'} drop before starting another combat cycle` },
-      waitTicks: 2,
-    }];
-  }
-
-  if (goal === 'resource-survey') {
-    const sites = [WORLD_ROUTES.eastCowResource, WORLD_ROUTES.varrockSouthEastMine, WORLD_ROUTES.lumbridgeTrees];
-    const site = sites[(work.failures['resource-survey']?.count ?? 0) % sites.length]!;
-    work.resource.site = 'resource-survey';
-    saveWork();
-    const player = state.player ?? {};
-    if (Math.max(Math.abs(Number(player.worldX) - site.x), Math.abs(Number(player.worldZ) - site.z)) > 8) {
-      return [{ id: 'resource-survey-route', type: 'walkTo', fields: { ...site, running: true, reason: 'survey a different resource area after completing the feather and hide reserves' }, waitTicks: 4 }];
-    }
-    return [{ id: 'resource-survey-scan', type: 'scanNearbyLocs', fields: { radius: 24, reason: 'look for a scarce or useful resource near the surveyed site' }, waitTicks: 3 }];
-  }
-
-  const isChicken = goal === 'feathers';
-  if (isChicken) {
-    // The chicken route has a real transition at the pen entrance. Prefer the
-    // currently observed reachable gate/door over scanning from the outside;
-    // the option index is copied from this fresh observation.
-    const gate = (state.nearbyLocs ?? []).find(loc => {
-      const open = (loc.optionsWithIndex as Json[] | undefined)?.find(option => /^open$/i.test(text(option.text)));
-      return loc.reachable === true && /gate|door/i.test(text(loc.name)) && typeof loc.id === 'number' && typeof loc.x === 'number' && typeof loc.z === 'number' && typeof open?.opIndex === 'number';
-    });
-    const open = (gate?.optionsWithIndex as Json[] | undefined)?.find(option => /^open$/i.test(text(option.text)));
-    if (gate && typeof open?.opIndex === 'number') {
-      return [{ id: `open-chicken-gate-${gate.id}-${gate.x}-${gate.z}`, type: 'interactLoc', fields: { x: gate.x, z: gate.z, locId: gate.id, optionIndex: open.opIndex, reason: 'open the observed chicken-farm gate before selecting a reachable target' }, waitTicks: 2 }];
-    }
-  }
-  const pattern = isChicken ? /^chicken$/i : /^cow$/i;
-  const attackable = (state.nearbyNpcs ?? [])
-    .filter(npc => pattern.test(String(npc.name)) && npc.reachable === true && npc.inCombat !== true && typeof npc.index === 'number')
-    .map(npc => ({ npc, attack: (npc.optionsWithIndex as Json[] | undefined)?.find(option => /^attack$/i.test(text(option.text))) }))
-    .filter(row => typeof row.attack?.opIndex === 'number')
-    .sort((a, b) => Number(a.npc.distance ?? 99) - Number(b.npc.distance ?? 99));
-  const target = attackable[0];
-  const hp = Number(state.player?.hp ?? 0), maxHp = Math.max(1, Number(state.player?.maxHp ?? 1));
-  const hasFood = foodCount(state) > 0;
-  // Chickens are a deliberately low-risk resource loop; cows require an
-  // actual food reserve before the first trial. Combat arbitration still
-  // handles healing and retreat after the action begins.
-  if (target && (hasFood || (isChicken && hp > maxHp * .85))) {
-    work.resource.site = isChicken ? 'chickens' : 'cows';
-    saveWork();
-    return [{ id: `resource-attack-${isChicken ? 'chicken' : 'cow'}-${target.npc.index}`, type: 'interactNpc', fields: { npcIndex: target.npc.index, optionIndex: target.attack!.opIndex, reason: isChicken ? 'farm feathers from a fresh reachable chicken' : 'test cowhide supply after the feather reserve is healthy' }, waitTicks: 6 }];
-  }
-
-  const route = isChicken
-    ? ((work.failures['resource-scan-fred-chickens']?.count ?? 0) >= 2 ? WORLD_ROUTES.fredChickenResource : WORLD_ROUTES.eastChickenResource)
-    : ((work.failures['resource-scan-west-cows']?.count ?? 0) >= 2 ? WORLD_ROUTES.westCowResource : WORLD_ROUTES.eastCowResource);
-  work.resource.site = isChicken ? 'chickens' : 'cows';
-  saveWork();
-  const player = state.player ?? {};
-  if (Math.max(Math.abs(Number(player.worldX) - route.x), Math.abs(Number(player.worldZ) - route.z)) > 8) {
-    return [{ id: `resource-route-${isChicken ? 'chickens' : 'cows'}`, type: 'walkTo', fields: { ...route, running: true, reason: isChicken ? 'reach a verified chicken enclosure for a steady feather batch' : 'reach a verified cattle field for a bounded cowhide trial' }, waitTicks: 4 }];
-  }
-  return [{ id: `resource-scan-${isChicken ? 'chickens' : 'cows'}`, type: 'scanNearbyLocs', fields: { radius: 24, reason: isChicken ? 'refresh the verified chicken enclosure before choosing a target' : 'refresh the verified cattle field before choosing a target' }, waitTicks: 3 }];
-}
-
-// This is used only after the normal goal planner has no executable action.
-// Each waypoint is a known, collision-checked area that can reveal a new NPC,
-// resource, shop, or route; it is never treated as proof that a target exists.
-async function autonomousRecovery(state: GameState, blockedGoal: string): Promise<Candidate[]> {
-  const here = position(state);
-  const nearbyCombat = nearbyCombatRecovery(state);
-  if (nearbyCombat.length && /no-candidates|no-executable|action-cycle|training-unavailable/i.test(blockedGoal)) return nearbyCombat;
-  // CoinCrafter can end up at the bank after a failed metalworking route with
-  // a valid tool kit already carried. A local scan has no new information in
-  // that state; resume the verified mine route directly.
-  if (role === 'economy' && /no-executable|economy-recovery|mine-route|action-cycle/i.test(blockedGoal)
-    && here.level === WORLD_ROUTES.varrockSouthEastMine.level
-    && Math.max(Math.abs(here.x - WORLD_ROUTES.varrockWestBank.x), Math.abs(here.z - WORLD_ROUTES.varrockWestBank.z)) <= 2) {
-    return [{ id: 'autonomy-resume-mining-from-bank', type: 'walkTo', fields: { ...WORLD_ROUTES.varrockSouthEastMine, running: true, reason: 'resume metalworking from the bank after a blocked route' }, waitTicks: 3 }];
-  }
-  const routes = /full-inventory|bank-route/i.test(blockedGoal)
-    ? [['bank', WORLD_ROUTES.varrockWestBank]] as const
-    : role === 'economy'
-    ? [['trees', WORLD_ROUTES.lumbridgeTrees], ['mine', WORLD_ROUTES.varrockSouthEastMine], ['bank', WORLD_ROUTES.varrockWestBank]] as const
-    : build === 'ranged-magic'
-      ? [['north-survey', WORLD_ROUTES.stingerNorthSurvey], ['barbarians', WORLD_ROUTES.barbarianVillage], ['edgeville', WORLD_ROUTES.edgeville], ['food', WORLD_ROUTES.draynorFishing], ['knife', WORLD_ROUTES.lumbridgeKnife], ['archery', WORLD_ROUTES.lowesArchery], ['runes', WORLD_ROUTES.wizardsTower]] as const
-      : [['food', WORLD_ROUTES.draynorFishing], ['barbarians', WORLD_ROUTES.barbarianVillage], ['bank', WORLD_ROUTES.varrockWestBank]] as const;
-  const from = here;
-  let loadingMap = false;
-  for (const [name, target] of routes) {
-    if (from.level !== target.level || Math.max(Math.abs(from.x - target.x), Math.abs(from.z - target.z)) > 2) {
-      const route = await navigator!.assess(from, target);
-      if (route.status === 'loading-map') { loadingMap = true; continue; }
-      if (route.status === 'ready') return [{
-        id: `autonomy-explore-${name}`,
-        type: 'walkTo',
-        fields: { ...target, running: true, reason: `No executable ${blockedGoal}; survey a verified ${name} area for the next safe action` },
-        waitTicks: 2,
-      }];
-    }
-  }
-  // A scan is useful once, but becomes another infinite loop when the map
-  // contains no actionable rows. After repeated scan failures, force a
-  // different known waypoint so the next observation has genuinely new
-  // context. The direct dispatch is still verified by Navigator.step.
-  const scanFailures = work.failures['autonomy-scan-current-area']?.count ?? 0;
-  if (scanFailures >= 2 || /action-cycle/i.test(blockedGoal)) {
-    const start = scanFailures % routes.length;
-    for (let offset = 0; offset < routes.length; offset++) {
-      const [name, target] = routes[(start + offset) % routes.length]!;
-      if (from.level === target.level && Math.max(Math.abs(from.x - target.x), Math.abs(from.z - target.z)) <= 2) continue;
-      return [{
-        id: `autonomy-force-${name}`,
-        type: 'walkTo',
-        fields: { ...target, running: true, reason: `Repeated recovery scans; relocate to a different verified ${name} area` },
-        waitTicks: 3,
-      }];
-    }
-  }
-  if (loadingMap) return [{ id: 'autonomy-map-loading', type: 'wait', waitTicks: 3 }];
-  return [{ id: 'autonomy-scan-current-area', type: 'scanNearbyLocs', fields: { radius: 32, reason: `No executable ${blockedGoal}; refresh local world evidence` }, waitTicks: 2 }];
 }
 
 function gearCandidates(state: GameState, selectedSkill?: string): Candidate[] {
@@ -1388,49 +772,17 @@ function gearCandidates(state: GameState, selectedSkill?: string): Candidate[] {
   }
 
   const styles = Array.isArray(combatStyle?.styles) ? combatStyle.styles as Json[] : [];
-  const attack = (state.skills ?? []).find((skill) => text(skill.name) === "attack");
-  const strength = (state.skills ?? []).find((skill) => text(skill.name) === "strength");
-  const attackLevel = typeof attack?.level === "number" ? attack.level : 1;
-  const strengthLevel = typeof strength?.level === "number" ? strength.level : 1;
-  // Brawler progression: keep Defence and Prayer at 1, build Strength first,
-  // briefly train Attack to 40 for rune-tier weapons, then return to Strength.
-  const desiredSkill = selectedSkill ?? (build === "ranged-magic" ? "ranged" : meleeTrainingSkill(attackLevel, strengthLevel));
+  if(!selectedSkill)return [];
+  const desiredSkill=selectedSkill;
   const strengthStyle = styles.find((style) => {
     const trains = Array.isArray(style.trainsSkills) ? style.trainsSkills : [];
     const normalized = trains.map((skill) => text(skill).toLowerCase());
-    const forbidden = selectedSkill ? ['prayer'] : build === 'ranged-magic' ? ['defence', 'prayer', 'attack', 'strength'] : ['defence', 'prayer'];
-    return normalized.includes(desiredSkill) && !normalized.some(skill => forbidden.includes(skill));
+    return normalized.length===1 && normalized[0]===desiredSkill;
   });
   if (typeof strengthStyle?.index === "number" && combatStyle?.currentStyle !== strengthStyle.index) {
     return [{ id: `style-${desiredSkill}-${strengthStyle.index}`, type: "setCombatStyle", fields: { style: strengthStyle.index }, waitTicks: 1 }];
   }
   return [];
-}
-
-function combatLoadoutCandidates(state: GameState): Candidate[] {
-  // A bow occupies both hands. Do not run melee shield/2H experiments while
-  // Stinger is following the ranged/magic build; staff experiments are added
-  // only after a staff and spell metadata have been observed.
-  if (build === "ranged-magic") return [];
-  const target = (state.nearbyNpcs ?? []).find((npc) => npc.reachable === true && npc.inCombat !== true && Array.isArray(npc.optionsWithIndex) && (npc.optionsWithIndex as Json[]).some((o) => /attack/i.test(text(o.text))));
-  if (!target) return [];
-  const targetName = text(target.name);
-  const inventory = state.inventory ?? [];
-  const equipment = state.equipment ?? [];
-  const weaponName = text(state.combatStyle?.weaponName);
-  const shieldEquipped = equipment.some((item) => /shield/i.test(text(item.name)));
-  const twoHanded = inventory.find((item) => /two-handed|2h|battleaxe|warhammer|halberd|godsword/i.test(text(item.name)));
-  const options: Candidate[] = [];
-  if (twoHanded && weaponName !== text(twoHanded.name) && typeof twoHanded.slot === "number") {
-    const wield = (twoHanded.optionsWithIndex as Json[] | undefined)?.find((o) => /wield|equip/i.test(text(o.text)));
-    if (typeof wield?.opIndex === "number") options.push({ id: "experiment-2h-" + twoHanded.slot, type: "useInventoryItem", fields: { slot: twoHanded.slot, optionIndex: wield.opIndex }, waitTicks: 2 });
-  }
-  if (!shieldEquipped) {
-    const shield = inventory.find((item) => /shield|defender/i.test(text(item.name)));
-    const wield = (shield?.optionsWithIndex as Json[] | undefined)?.find((o) => /wield|equip/i.test(text(o.text)));
-    if (shield && typeof shield.slot === "number" && typeof wield?.opIndex === "number") options.push({ id: "experiment-shield-" + shield.slot, type: "useInventoryItem", fields: { slot: shield.slot, optionIndex: wield.opIndex }, waitTicks: 2 });
-  }
-  return options;
 }
 
 function foodCandidates(state: GameState): Candidate[] {
@@ -1572,573 +924,9 @@ function productionCandidates(state: GameState, requestedFood = false): Candidat
   return [];
 }
 
-async function candidates(state: GameState): Promise<Candidate[]> {
-  if(role==='economy'){
-    work.economy??={bankItems:work.bankItems??[]};
-    const previous=work.economy.objectives?.intent?.id,intent=selectWork(state,work.economy);
-    if(previous!==intent?.id)travelAction=null;
-    const memory=objectives(work.economy),reserve:Record<number,number>=bowReserve(work.economy);
-    for(const need of memory.needs)if(need.verified&&need.downstreamReady&&need.expires>Date.now())reserve[need.outputId]=Math.max(reserve[need.outputId]??0,need.quantity);
-    const inv=state.inventory??[],processing=inv.some(i=>String(i.name).toLowerCase()===work.economy!.processing);
-    const unfinished=intent?.mode==='finish'||processing||intent?.mode!=='logs'&&inv.some(i=>/^(.*logs|logs|.*ore|.*bar)$/i.test(String(i.name)));
-    // A metalworking tool visit is an active prerequisite, not a liquidation
-    // opportunity. Let metalNext buy the observed hammer/pickaxe before the
-    // generic capital planner can close the shop and reopen it indefinitely.
-    equipmentGoals.setWorkIntent(intent?{track:intent.track,outputId:intent.outputId,reserve,prices:memory.prices,allowLiquidation:intent.track!=='metalworking'&&!unfinished&&Number(state.player?.animId??-1)<0}:undefined);
-    saveWork();
-  }
-  if(Date.now()>=marketRetryAt)try{peerMarket?.observe(state, equipmentGoals.memory.bank, equipmentGoals.memory.bankCheckedAt,work.economy?.objectives?.decision);}
-  catch(error){marketRetryAt=Date.now()+60_000;console.error(JSON.stringify({marketError:String(error),policy:'Keep normal goals running; retry market later'}));}
-  // Until transfer primitives are verified, never let the generic dialog
-  // chooser accidentally accept a trade (including unsolicited requests).
-  if((state as any).trade?.isOpen)return [{id:'decline-unverified-trade',type:'closeModal',waitTicks:2}];
-  if (state.player?.isDead === true) return [{ id: "wait-respawn", type: "wait", waitTicks: 5 }];
-  if (state.modalOpen === true && state.inventory?.length === 0) {
-    return [{ id: "accept-design", type: "acceptCharacterDesign", waitTicks: 2 }];
-  }
-  // Survival arbitration is global: crafting, smithing, dialogue and shop
-  // preparation must not bypass an urgent heal merely because their branch
-  // appears earlier in the planner.
-  const urgentFoodBeforePreparation = foodCandidates(state);
-  if (urgentFoodBeforePreparation.length > 0) {
-    equipmentGoals.interrupt('heal before ordinary preparation');
-    return state.bank?.isOpen === true || state.shop?.isOpen === true
-      ? [{ id: 'close-modal-to-heal', type: 'closeModal', waitTicks: 1 }]
-      : urgentFoodBeforePreparation;
-  }
-  const metalWorkingSelected = role === 'economy' &&
-    (work.economy?.objectives?.intent?.track === 'metalworking' || work.economy?.objectives?.decision?.chosen?.track === 'metalworking');
-  if (equipmentGoals.crafting() && state.dialog?.isOpen === true && state.dialog?.isWaiting !== true && !metalWorkingSelected) {
-    const recipe = await equipmentGoals.next(state, (from,to) => navigator!.assess(from,to));
-    if (recipe) return [recipe];
-  }
-  if(role==='economy'&&work.economy){const recipe=metalDialog(state,work.economy);if(recipe){saveWork();return [recipe];}}
-  const dialogs = dialogCandidates(state);
-  // Survival arbitration precedes ordinary dialogue and transaction work.
-  const urgentFood = foodCandidates(state);
-  if (urgentFood.length > 0) {
-    equipmentGoals.interrupt('heal');
-    return state.bank?.isOpen === true || state.shop?.isOpen === true
-      ? [{ id: 'close-modal-to-heal', type: 'closeModal', waitTicks: 1 }] : urgentFood;
-  }
-  if (role === 'economy') {
-    if (!economyNeedsFood(state)) {
-      const staleRecovery = work.autonomy?.active?.action ?? '';
-      if (/^(bank-for-fishing-tool-funds|return-to-fishing-tool-shop|trade-for-fishing-tool(?:-funded)?|bank-after-fishing-shop-trade-failure|travel-for-fishing-tool)$/.test(staleRecovery)) {
-        delete work.autonomy?.active;
-        delete work.fishingToolFundingUntil;
-        delete work.fishingToolTradeAttempted;
-        work.economy ??= { bankItems: work.bankItems ?? [] };
-        work.economy.goal = 'independent-production-fallback';
-        work.economy.reason = 'safe production does not require a carried food reserve';
-        saveWork();
-      }
-    }
-    work.learning ??= {};
-    const escape = (work.learning.escape ??= {}) as {active?:boolean;safeSince?:number};
-    const opponent=activeOpponent(state);
-    if (!escape.active && canDefend(state,opponent)) return [{id:'continue-combat',type:'wait',waitTicks:1}];
-    if (mustEscape(state, escape)) {
-      work.learning.unsafeAuburyUntil = Date.now()+30*60_000;
-      saveWork(); travelAction=null;
-      return [{id:'escape-combat',type:'retreat',waitTicks:2}];
-    }
-    saveWork();
-  }
-  if (dialogs.length > 0) return dialogs;
-
-  // Once a non-economy agent has opened the bank, finish that transaction
-  // before ammunition, cooking, or exploration candidates can take control.
-  // Otherwise Stinger can open the bank successfully and immediately return
-  // to the trees without depositing the accumulated arrow shafts.
-  if (role !== 'economy' && state.bank?.isOpen === true) {
-    const transaction = available(bankingCandidates(state));
-    return transaction.length ? transaction : [{ id: 'close-bank-after-transaction', type: 'closeModal', waitTicks: 1 }];
-  }
-
-  // Stinger needs a reliable food path for ranged exploration. Do not wait
-  // until the current food reserve is empty before acquiring fishing gear:
-  // otherwise a tree/combat candidate can keep him stationary while the
-  // recovery route remains unreachable. Fishing gear is a real progression
-  // prerequisite, so route to Gerrant whenever it is missing.
-  if(character==='stinger' && coinsIn(state.inventory??[])<5 && !(state.inventory??[]).some(i=>/small fishing net/i.test(String(i.name)))) {
-    if(state.shop?.isOpen)return [{id:'close-unfunded-fishing-shop',type:'closeShop',waitTicks:1}];
-    return bankAt(state);
-  }
-  if (character === 'stinger' && !(state.inventory ?? []).some((item) =>
-    /small fishing net|fishing rod|lobster pot|harpoon/i.test(String(item.name)))) {
-    if (state.shop?.isOpen === true) {
-      const net = (state.shop.shopItems as Json[] ?? []).find(item => /small fishing net/i.test(String(item.name)) && Number(item.count)>0 && Number(item.buyPrice)<=coinsIn(state.inventory??[]));
-      if (net) return [{id:'buy-recovery-net',type:'shopBuy',fields:{slot:net.slot,amount:1},waitTicks:2}];
-      return [{id:'close-unhelpful-fishing-shop',type:'closeShop',waitTicks:1}];
-    }
-    const gerrant = (state.nearbyNpcs ?? []).find((npc) => /gerrant/i.test(String(npc.name)) && npc.reachable === true);
-    const trade = (gerrant?.optionsWithIndex as Json[] | undefined)?.find((option) => /trade/i.test(text(option.text)));
-    if (gerrant && typeof gerrant.index === 'number' && typeof trade?.opIndex === 'number') {
-      return [{ id: 'stinger-trade-for-fishing-gear', type: 'interactNpc', fields: { npcIndex: gerrant.index, optionIndex: trade.opIndex }, waitTicks: 3 }];
-    }
-    const player = state.player ?? {};
-    const distance = Math.hypot((Number(player.worldX) || 0) - WORLD_ROUTES.gerrantsFishingShop.x,
-      (Number(player.worldZ) || 0) - WORLD_ROUTES.gerrantsFishingShop.z);
-    if (distance > 8) return [{ id: 'stinger-go-fishing-shop', type: 'walkTo', fields: { ...WORLD_ROUTES.gerrantsFishingShop, running: true, reason: 'obtain fishing gear for reliable food recovery' }, waitTicks: 3 }];
-  }
-
-  // Tutorial progression is mandatory: without the guide the character has no
-  // starter tools or food, so do not route toward the wider world yet.
-  if ((state.inventory?.length ?? 0) === 0) {
-    const guide = (state.nearbyNpcs ?? []).find((npc) => /runescape guide|tutorial guide|guide/i.test(text(npc.name)) && typeof npc.index === "number");
-    if (guide) return [{ id: "tutorial-guide-" + guide.index, type: "talkToNpc", fields: { npcIndex: guide.index }, waitTicks: 3 }];
-  }
-
-  // CoinCrafter can safely mine, bank and smith without carrying food. Food
-  // recovery is still available through an explicit production goal, but it
-  // must not pre-empt a safe economy cycle merely because the combat reserve
-  // is empty.
-  if (role !== 'economy') {
-    const food = foodCandidates(state);
-    if (food.length > 0) {
-      equipmentGoals.interrupt('heal');
-      return state.bank?.isOpen === true || state.shop?.isOpen === true
-        ? [{ id: 'close-modal-to-heal', type: 'closeModal', waitTicks: 1 }] : food;
-    }
-  }
-
-  // Refilling a depleted quiver from carried ammunition is part of combat,
-  // not an equipment experiment. Do this before an empty quiver causes retreat.
-  if (build === 'ranged-magic') {
-    const reload = available(quiverRefill(state));
-    if (reload.length) return state.bank?.isOpen || state.shop?.isOpen
-      ? [{id:'close-modal-to-reload',type:'closeModal',waitTicks:1}] : reload;
-  }
-
-  const disposition = combatDisposition(state, role === 'economy', build === 'ranged-magic', work.learning?.food?.maxObservedDamage);
-  if (training?.timedOut(state)) { travelAction = null; return [{ id: 'escape-encounter-timeout', type: 'retreat', waitTicks: 2 }]; }
-  if (disposition !== 'quiet') {
-    equipmentGoals.interrupt(disposition === 'engaged' ? 'finish current combat' : 'escape danger');
-    travelAction = null;
-    if (disposition === 'engaged') return [{ id: 'continue-combat', type: 'wait', waitTicks: 2 }];
-    return [{ id: 'escape-combat', type: 'retreat', waitTicks: 2 }];
-  }
-  // The server can leave inCombat=true for a short period after a kill. Do
-  // not let a prepared gathering or travel action run through that window.
-  // Waiting gives the next observation a chance to confirm the encounter has
-  // actually ended without interrupting a legitimate combat action.
-  if (state.player?.combat?.inCombat === true && (state.player?.combat?.targetType === 'player' || isApprovedNpcTarget(activeOpponent(state)))) {
-    travelAction = null;
-    return [{ id: 'await-combat-state-clear', type: 'wait', waitTicks: 1 }];
-  }
-
-  // Featherer is a supply specialist. Once immediate combat safety is clear,
-  // its chicken/cow objective outranks generic starter-kit cleanup and gear
-  // acquisition; those items are useful fallback equipment in the field.
-  if (character === 'featherer') {
-    const resource = available(featherResourceCandidates(state));
-    if (resource.length > 0) {
-      travelAction = null;
-      return resource;
-    }
-  }
-
-  // Featherer must not reopen the bank indefinitely after a completed
-  // deposit.  Once the resource transaction has no further observed work,
-  // close the interface and let the resource selector choose the next site.
-  if (character === 'featherer' && state.bank?.isOpen === true) {
-    return [{ id: 'featherer-close-completed-bank', type: 'closeModal', fields: { reason: 'resume gathering after the observed bank transaction' }, waitTicks: 1 }];
-  }
-
-  // ClawScout's weapon recovery is a prerequisite for any combat plan.  Do
-  // this before funding/shop logic so an item already owned cannot leave him
-  // unarmed in a service loop.  The option index is always copied from the
-  // current observation.
-  if (character === 'clawscout' && !(state.equipment ?? []).some(item => /sword|scimitar|longsword|battleaxe|mace|dagger|warhammer/i.test(text(item.name)))) {
-    const weapon = (state.inventory ?? []).filter(item => /sword|scimitar|longsword|battleaxe|mace|dagger|warhammer/i.test(text(item.name)))
-      .sort((a, b) => Number(b.slot ?? 99) - Number(a.slot ?? 99))[0];
-    const wield = (weapon?.optionsWithIndex as Json[] | undefined)?.find(option => /^(wield|wear|equip)$/i.test(text(option.text)));
-    if (weapon && typeof weapon.slot === 'number' && typeof wield?.opIndex === 'number') {
-      return state.bank?.isOpen || state.shop?.isOpen
-        ? [{ id: 'clawscout-close-to-equip', type: 'closeModal', waitTicks: 1 }]
-        : [{ id: `clawscout-equip-${weapon.id}`, type: 'useInventoryItem', fields: { slot: weapon.slot, optionIndex: wield.opIndex, reason: 'equip the strongest currently owned weapon before combat' }, waitTicks: 1 }];
-    }
-  }
-
-  // Cleanup is a prerequisite for food recovery: otherwise a stale cooking
-  if(role==='economy' && !basicKit(state)) {
-    // Equip only catalog-validated, level-usable pieces; retain the mining tools.
-    const kit=(state.inventory??[]).find(i=>gearCatalog.items.some(g=>g.id===i.id&&['melee','shield','body'].includes(g.family)&&usable(g,state))
-      && !(state.equipment??[]).some(e=>gearCatalog.items.some(g=>g.id===e.id&&g.family===gearCatalog.items.find(k=>k.id===i.id)?.family)));
-    const op=(kit?.optionsWithIndex as Json[]|undefined)?.find(o=>/^(wear|wield)$/i.test(String(o.text)));
-    if(kit&&op) return state.bank?.isOpen||state.shop?.isOpen?[{id:'defence-close-to-equip',type:'closeModal',waitTicks:1}]
-      :[{id:'defence-equip-'+kit.id,type:'useInventoryItem',fields:{slot:kit.slot,optionIndex:op.opIndex},waitTicks:1}];
-    const defence=await defensiveGoals.next(state,(from,to)=>navigator!.assess(from,to));
-    if(defence){travelAction=null;return [{...defence,fields:{...defence.fields,defensiveGoal:true}}];}
-  }
-
-  // Cleanup is a prerequisite for food recovery: otherwise a stale cooking
-  if (work.foodBatch && !state.shop?.isOpen) {
-    const batch = available(productionCandidates(state));
-    if (batch.length) { travelAction = null; return batch; }
-  }
-
-  // Cleanup is a prerequisite for food recovery: otherwise a stale cooking
-  // itinerary can keep the agent carrying obsolete items while it tries to
-  // solve a full/dirty inventory. This is deliberately limited to explicit
-  // clutter or oversized arrow-material stacks.
-  const equippedNames = (state.equipment ?? []).map(item => text(item.name));
-  const urgentInventoryCleanup = (state.inventory ?? []).some(item => isUrgentClutter(item, build, equippedNames,state.inventory?.length??0)) ||
-    (state.inventory ?? []).some(item => /arrow shaft/i.test(text(item.name)) && Number(item.count ?? 0) >= 100);
-  if (urgentInventoryCleanup && !state.bank?.isOpen && !state.shop?.isOpen) {
-    const cleanup = available(bankingCandidates(state));
-    if (cleanup.length) {
-      equipmentGoals.interrupt('bank obsolete gear and excess arrow materials before resupply');
-      travelAction = null;
-      return cleanup;
-    }
-  }
-
-  // Safety and current combat precede acquisitions. Food recovery interrupts,
-  // but never deletes, the persistent equipment/funding goal.
-  const learnedTripFood = character==='clawscout'?Math.max(3,learnedFoodReserve(work.learning?.food)):learnedFoodReserve(work.learning?.food);
-  if (role !== 'economy' && learnedFoodCount(state.inventory ?? []) < learnedTripFood && !state.bank?.isOpen && !state.shop?.isOpen) {
-    const supplies = available(productionCandidates(state));
-    if (supplies.length) { equipmentGoals.interrupt(`replenish learned food reserve (${learnedTripFood})`); travelAction = null; return supplies; }
-    // Never convert an unavailable food route into an idle wait loop. Preserve
-    // the equipment goal, but switch to bounded world discovery so a different
-    // fishing spot, bank, food source, or safe training site can be learned.
-    const foodRecovery = await autonomousRecovery(state, 'food-route-unavailable');
-    if (foodRecovery.length) return available(foodRecovery);
-    return [{ id: 'explore-food-alternative', type: 'scanNearbyLocs', fields: { radius: 30, reason: 'find an alternative food or productive route' }, waitTicks: 2 }];
-  }
-  const arrowProduction = available(arrowProductionCandidates(state));
-  if (arrowProduction.length) {
-    equipmentGoals.interrupt('complete ranged ammunition from observed materials');
-    travelAction = null;
-    return arrowProduction;
-  }
-  const lobsterProgression = available(lobsterProgressionCandidates(state));
-  if (lobsterProgression.length) {
-    equipmentGoals.interrupt('progress to level-40 lobster fishing');
-    travelAction = null;
-    return lobsterProgression;
-  }
-  // An empty quiver makes combat and funding attempts unsafe. Supply recovery
-  // has to precede the gear planner, otherwise a desperate archer can keep
-  // pickpocketing, enter combat, and abandon the arrow route it just reached.
-  if (character === 'stinger') {
-    const arrowCount = (state.inventory ?? []).filter(item => isFinishedArrow(text(item.name)))
-      .reduce((sum, item) => sum + Number(item.count ?? 1), 0);
-    const carriedCoins = coinsIn(state.inventory ?? []);
-    if (arrowCount === 0 && carriedCoins < 10 && state.bank?.isOpen === true) {
-      const bankCoins = (work.bankItems ?? []).find(item => /^coins$/i.test(text(item.name)) && Number(item.count ?? 0) > 0);
-      if (bankCoins && typeof bankCoins.slot === 'number') {
-        return [{ id: 'stinger-withdraw-working-cash', type: 'bankWithdraw', fields: { slot: bankCoins.slot, amount: Math.min(500, Number(bankCoins.count)) , reason: 'fund a safe ammunition or pickaxe purchase from verified surplus bank cash' }, waitTicks: 2 }];
-      }
-    }
-    if (arrowCount === 0 && carriedCoins < 10) {
-      const productive = available(productionCandidates(state));
-      if (productive.length) {
-        equipmentGoals.interrupt('earn working cash or gather missing arrow inputs before ranged training');
-        travelAction = null;
-        return productive;
-      }
-    }
-  }
-  const rangedSupply = preferRangedSupply(
-    build === 'ranged-magic',
-    available([...nearbyAmmoRecovery(state), ...ammoCandidates(state)]),
-    [],
-  );
-  if (rangedSupply.length) {
-    equipmentGoals.interrupt('restore ranged supplies');
-    travelAction = null;
-    return rangedSupply;
-  }
-  // Once the economy intent is the staged metal chain, its tool purchase,
-  // mining, smelting and Smithing actions must be selected before the generic
-  // social/capital planners. This prevents a queued shop-close action from
-  // starving a required hammer or pickaxe purchase.
-  if (metalWorkingSelected) {
-    travelAction = null;
-    const recentMetal = (work.autonomy?.recentActions ?? []).slice(-4);
-    const capitalOscillation = recentMetal.length === 4
-      && recentMetal[0] === recentMetal[2]
-      && recentMetal[1] === recentMetal[3]
-      && /metal-(secure-gold|withdraw-tool-cash)/.test(recentMetal[0] ?? '')
-      && /metal-(secure-gold|withdraw-tool-cash)/.test(recentMetal[1] ?? '');
-    if (capitalOscillation) {
-      // Moving the same cash between inventory and bank is not preparation.
-      // Suspend this metal attempt and select a genuinely productive fallback
-      // while retaining the long-term mining/smithing goal for later review.
-      const intentId = work.economy?.objectives?.intent?.id;
-      if (intentId) work.economy!.objectives!.blocked[intentId] = Date.now() + 30 * 60_000;
-      delete work.economy?.objectives?.intent;
-      work.economy!.goal = 'independent-production-fallback';
-      work.economy!.reason = 'cash preparation oscillated without reaching a purchase or mining step';
-      work.autonomy!.recentActions = [];
-      saveWork();
-      const fallback = available(productionCandidates(state));
-      if (fallback.length) return fallback;
-    }
-    // A persistent metal-recovery blocker must not become an idle objective.
-    // After five minutes without verified progress, suspend this attempt and
-    // hand control to an independent production or Rune-essence investigation.
-    const activeRecovery = work.autonomy?.active;
-    if (activeRecovery?.action === 'economy-metal-recovery' && activeRecovery.lastProgress === 0 && Date.now() - Number(activeRecovery.since ?? Date.now()) >= 300_000) {
-      if (work.economy?.objectives?.intent?.id) work.economy.objectives.blocked[work.economy.objectives.intent.id] = Date.now() + 30 * 60_000;
-      delete work.economy?.objectives?.intent;
-      work.economy!.goal = 'independent-production-fallback';
-      work.economy!.reason = 'metalworking blocker exceeded bounded recovery window';
-      saveWork();
-      const runeFallback = Number(work.learning?.unsafeAuburyUntil??0)>Date.now() || (Number(state.player?.maxHp)<20 && learnedFoodCount(state.inventory??[])<3) ? [] : available(runeDiscoveryCandidates(state, WORLD_ROUTES.auburysRuneShop, runeMysteriesComplete(), true) as Candidate[]);
-      if (runeFallback.length) return runeFallback;
-      const alternate = available(productionCandidates(state));
-      if (alternate.length) return alternate;
-    }
-    // Safe mining does not require carried food. Food recovery is reserved for
-    // combat-risk routes; a banked food reserve is still maintained whenever
-    // an agent actually needs food for a dangerous activity.
-    const metalPlan = available(economyNext(state, work.economy, id => (work.failures[id]?.until ?? 0) > Date.now()));
-    saveWork();
-    if (metalPlan.length && metalPlan[0]?.id !== 'economy-review-profit-prerequisites') return metalPlan;
-    const recovery = available(await autonomousRecovery(state, 'metalworking-recovery-cooldown'));
-    return recovery.length ? recovery : [{ id: 'economy-metal-recovery', type: 'wait', waitTicks: 5 }];
-  }
-  // CoinCrafter keeps production as the main objective, but periodically
-  // performs a bounded, observation-driven Rune Mysteries follow-up. This
-  // discovers the private server's essence route without replacing the
-  // profitable woodcutting/fletching loop.
-  if (role === 'economy') {
-    work.learning ??= {};
-    const probeDue = Number(work.learning.runeProbeAt ?? 0) <= Date.now();
-    const runeActions = Number(work.learning?.unsafeAuburyUntil??0)>Date.now() || (Number(state.player?.maxHp)<20 && learnedFoodCount(state.inventory??[])<3) ? [] : available(runeDiscoveryCandidates(state, WORLD_ROUTES.auburysRuneShop, runeMysteriesComplete(), probeDue) as Candidate[]);
-    if (runeActions.length) {
-      equipmentGoals.interrupt('bounded rune-essence discovery experiment');
-      travelAction = null;
-      return runeActions;
-    }
-  }
-  // The finite bow chain owns its ingredients and transaction. Safety above
-  // still wins; unrelated axe funding must not sell its reserved unstrung bows.
-  if(role==='economy'&&work.economy?.objectives?.intent?.mode==='finish'){
-    equipmentGoals.interrupt('Complete bounded bowmaking batch');
-    if(!state.bank?.isOpen&&!state.shop?.isOpen&&travelAction&&available([travelAction]).length)return [travelAction];
-    travelAction=null;
-    const plan=available(bowNext(state,work.economy,id=>(work.failures[id]?.until??0)>Date.now()));saveWork();
-    return plan.length?plan:[{id:'economy-bow-recovery',type:'wait',waitTicks:5}];
-  }
-  // Metalworking owns its tool prerequisites end-to-end. If the generic gear
-  // planner also runs here, it can close the required shop for a capital audit
-  // and reopen it on the next tick, starving the mining/smithing controller.
-  if (character === 'featherer') {
-    const resource = available(featherResourceCandidates(state));
-    if (resource.length > 0) {
-      travelAction = null;
-      return resource;
-    }
-  }
-  const metalToolChain = metalWorkingSelected;
-  // ClawScout has already spent too long retrying the sword-shop route. An
-  // iron longsword is no longer allowed to block combat progression: let the
-  // training discovery system test the verified Black Knight site instead.
-    const equipmentPlan = equipmentGoals.plan(state);
-    const activeWeapon = (state.equipment ?? []).find(item => /sword|scimitar|longsword|battleaxe|mace|dagger|warhammer|bow|staff/i.test(text(item.name)));
-    const weaponRank = (name: string) => ({bronze:1, iron:2, steel:3, mithril:4, adamant:5, rune:6}[String(name).toLowerCase().split(' ')[0]] ?? 0);
-    const planWeapon = typeof equipmentPlan.target === 'string' && /sword|scimitar|longsword|battleaxe|mace|dagger|warhammer|bow|staff/i.test(equipmentPlan.target) ? weaponRank(equipmentPlan.target) : 0;
-    // Gear is natural progression: an active weapon is already useful. Do not
-    // force a shop/funding loop when the current weapon meets or exceeds the
-    // planner's target; drops, crafting, trades and later observations remain
-    // valid upgrade paths.
-    const satisfiedByCurrentWeapon = !!activeWeapon && planWeapon > 0 && weaponRank(text(activeWeapon.name)) >= planWeapon;
-    const acquisition = metalToolChain || satisfiedByCurrentWeapon ? undefined : await equipmentGoals.next(state, (from,to) => navigator!.assess(from,to));
-  if (acquisition) {
-    // Capital withdrawal hands the batch to the economy transaction. Without
-    // this marker, the generic bank logic immediately deposits the same bows
-    // and creates a zero-progress withdraw/deposit oscillation.
-    if (role === 'economy' && acquisition.id === 'goal-capital-withdraw') {
-      work.economy ??= { bankItems: work.bankItems ?? [] };
-      work.economy.selling = true;
-      saveWork();
-    }
-    travelAction = null;
-    return [acquisition];
-  }
-
-  if (role === 'economy') {
-    work.economy ??= { bankItems: work.bankItems ?? [] };
-    if (!state.bank?.isOpen && !state.shop?.isOpen && travelAction && available([travelAction]).length) return [travelAction];
-    travelAction = null;
-    const plan = available(economyNext(state, work.economy, id => (work.failures[id]?.until ?? 0) > Date.now()));
-    saveWork();
-    if (plan.length && plan[0]?.id !== 'economy-review-profit-prerequisites') return plan;
-    // A passive profitability review is not a terminal state. Keep learning by
-    // surveying a local resource, a different prepared site, or the mine route.
-    const freshResource = available(localEconomyDiscovery(state));
-    return freshResource.length ? freshResource : available(await autonomousRecovery(state, 'economy-recovery-cooldown'));
-  }
-
-  // Bank and shop interfaces own their transaction until explicitly closed.
-  if (state.bank?.isOpen === true) return available(bankingCandidates(state)).length ? available(bankingCandidates(state)) : [{ id: 'close-stalled-bank', type: 'closeModal', waitTicks: 2 }];
-  if (state.shop?.isOpen === true) {
-    const recoveryBuy = (state.inventory ?? []).some(isFood) ? [] : productionCandidates(state).filter(a => a.type === 'shopBuy');
-    const purchases = available([...recoveryBuy, ...ammoCandidates(state)]);
-    if (purchases.length) return purchases;
-    // Use a fresh recovery identity after a rejected close so one stale
-    // failure record cannot trap ClawScout inside the shop indefinitely.
-    return [{ id: (work.failures['close-finished-shop']?.count ?? 0) > 0 ? 'close-stalled-shop' : 'close-finished-shop', type: 'closeModal', waitTicks: 1 }];
-  }
-  if (character === 'featherer') {
-    const resource = available(featherResourceCandidates(state));
-    if (resource.length > 0) {
-      travelAction = null;
-      return resource;
-    }
-  }
-  // A prepared travel leg must not outrank a newly observed inventory cleanup.
-  // Otherwise a stale cooking or resource route can carry obsolete gear and
-  // materials across the world indefinitely before the next bank visit.
-  const preTravelBanking = available(bankingCandidates(state));
-  if (preTravelBanking.length) {
-    equipmentGoals.interrupt('bank obsolete gear and excess production materials');
-    travelAction = null;
-    return preTravelBanking;
-  }
-  // Featherer has a resource-first objective. A bank/shop route persisted by
-  // the generic equipment planner must not survive a role change and replay
-  // forever ahead of the chicken/cow selector.
-  if (character === 'featherer' && travelAction && /bank|shop|gear|iron|scimitar/i.test(travelAction.id)) travelAction = null;
-  // Discovery reevaluates readiness between legs; supplies can invalidate a
-  // commitment. Ordinary service trips retain their existing transaction owner.
-  if (travelAction && !travelAction.fields?.trainingSite && available([travelAction]).length) return [travelAction];
-  travelAction = null;
-
-  if (work.bankReturn && work.bankReturnReady) {
-    const home = work.bankReturn;
-    if (position(state).level === home.level && Math.max(Math.abs(Number(state.player?.worldX) - home.x), Math.abs(Number(state.player?.worldZ) - home.z)) <= 1) { delete work.bankReturn; delete work.bankReturnReady; saveWork(); }
-    else if (available([{ id: 'return-to-work', type: 'walkTo', waitTicks: 2 }]).length) return [{ id: 'return-to-work', type: 'walkTo', fields: home, waitTicks: 2 }];
-  }
-
-  const resource = available(featherResourceCandidates(state));
-  if (resource.length > 0) return resource;
-
-  const gear = available(gearCandidates(state));
-  if (gear.length > 0) return gear;
-
-  if (role !== 'economy' && (state.inventory ?? []).some(i => /^raw shrimps$/i.test(String(i.name)))) {
-    const cooking = available(productionCandidates(state)).filter(a => a.id.startsWith('cook-') || a.id === 'travel-to-cooking-source');
-    if (cooking.length) return cooking;
-  }
-
-  const banking = available(bankingCandidates(state));
-  if (banking.length > 0) return banking;
-
-  // Stinger may use guide-listed monsters only when that monster is actually
-  // visible, reachable, appropriately levelled, and has a live Attack option.
-  // Drops are picked up and measured before the lead becomes trusted.
-  const dropLearning = (dropLearningCandidates(state, build) as Candidate[]).filter(a=>(work.failures[a.id]?.until??0)<=Date.now());
-  if (dropLearning.length > 0) return dropLearning;
-
-  if (role !== 'economy' && !(state.inventory ?? []).some(isFood)) {
-    const recovery = available(productionCandidates(state));
-    if (recovery.length) return recovery;
-  }
-
-  const ammo = available(ammoCandidates(state));
-  if (ammo.length > 0) return ammo;
-
-  // Peer trading is optional social activity. It is deliberately last among
-  // actionable work so a queued message cannot starve gear, food, banking,
-  // travel, discovery or training.
-  const social=process.argv.includes('--peer-trade') && Date.now()>=marketRetryAt?peerMarket?.next(state):undefined;
-  if(social)return [social];
-
-  const combatLoadout = combatLoadoutCandidates(state);
-  if (combatLoadout.length > 0) return combatLoadout;
-
-  const production = available(productionCandidates(state));
-  if (production.length > 0) return production;
-
-  const economy = available(economyCandidates(state));
-  if (economy.length > 0) return economy;
-
-  if ((state.inventory?.length ?? 0) >= 28) return available(await autonomousRecovery(state, 'full-inventory-await-bank-route'));
-
-  const goal = available(await goalCandidates(state));
-  if (goal.length > 0) {
-    // One optional drop-source experiment per ten minutes, only when there is
-    // no committed training trip. Never substitute imps for viable training.
-    if(goal.every(passive)&&!training?.memory.commitment&&Date.now()>=Number(work.learning?.dropProbeAt??0)){
-      const probe=(dropLearningCandidates(state,build,true) as Candidate[]).filter(a=>(work.failures[a.id]?.until??0)<=Date.now());
-      if(probe.length)return probe;
-    }
-    // A source-respawn or map-loading wait must not turn the character into an
-    // idle bot. Survey a distinct safe area and let fresh observations select
-    // a new goal; the original site remains in cooldown-aware memory.
-    if (goal.every(passive)) {
-      const recovery = available(await autonomousRecovery(state, goal[0]!.id));
-      if (recovery.length) return recovery;
-    }
-    return goal;
-  }
-
-  const result: Candidate[] = [];
-  for (const npc of state.nearbyNpcs ?? []) {
-    if (text(npc.name).includes("runescape guide") && typeof npc.index === "number") {
-      result.push({ id: `talk-guide-${npc.index}`, type: "talkToNpc", fields: { npcIndex: npc.index }, waitTicks: 2 });
-    }
-  }
-  for (const loc of state.nearbyLocs ?? []) {
-    if (!text(loc.name).includes("tree")) continue;
-    const options = Array.isArray(loc.optionsWithIndex) ? loc.optionsWithIndex : [];
-    const chop = options.find((option) => text((option as Json).text).includes("chop"));
-    if (
-      loc.reachable === true &&
-      chop !== undefined &&
-      typeof loc.x === "number" &&
-      typeof loc.z === "number" &&
-      typeof loc.id === "number"
-    ) {
-      result.push({
-        id: `chop-${loc.id}-${loc.x}-${loc.z}`,
-        type: "interactLoc",
-        fields: { x: loc.x, z: loc.z, locId: loc.id, optionIndex: typeof chop?.opIndex === "number" ? chop.opIndex : 1 },
-        waitTicks: 5,
-      });
-    }
-  }
-  // If no normal planner action is executable, keep learning the world by
-  // moving to a verified fallback area or scanning for a resource. Never leave
-  // the character on a bare wait when a recoverable alternative exists.
-  const recovery = await autonomousRecovery(state, 'no-executable-action');
-  result.push(...recovery);
-  return available(result);
-}
-
-function reward(before: GameState, after: GameState, action: Candidate): number {
-  return outcomeReward(before,after,action,role,build==='ranged-magic',gearCatalog);
-}
-
-function choose(key: string, options: Candidate[]): Candidate {
-  options = preferActive(options);
-  // A lesson belongs to the completed goal that produced it. Do not let a
-  // stale lesson from a previous cycle force the same action forever.
-  const active = goalLifecycle.active;
-  const preferred = active && active.phase === 'execute' && active.kind !== 'continuous'
-    ? active.learnings.at(-1)?.behavior?.replace(/^retain-or-refine:/, '')
-    : undefined;
-  if (preferred && !preferred.includes('undefined')) {
-    const learned = options.find(o => o.id === preferred && (work.failures[o.id]?.count ?? 0) < 2);
-    if (learned) options = [learned, ...options.filter(o => o !== learned)];
-  }
-  const values = q[key] ?? {};
-  if (Math.random() < epsilon) return options[Math.floor(Math.random() * options.length)]!;
-  return options.reduce((best, option) => (values[option.id] ?? 0) > (values[best.id] ?? 0) ? option : best, options[0]!);
-}
-
-function learn(key: string, action: Candidate, value: number, nextKey: string, nextOptions: Candidate[]): void {
-  q[key] ??= {};
-  const nextValues = q[nextKey] ?? {};
-  const nextBest = nextOptions.length === 0 ? 0 : Math.max(...nextOptions.map((candidate) => nextValues[candidate.id] ?? 0));
-  const old = q[key][action.id] ?? 0;
-  q[key][action.id] = Number((old + alpha * (value + gamma * nextBest - old)).toFixed(6));
+function choose(_key: string, options: Candidate[]): Candidate {
+  // The Director already owns the outcome and learned method. Do not reapply old pure-build Q values.
+  return preferActive(options)[0]!;
 }
 
 /** Task-specific executors are asked for actions only AFTER the Director chooses a goal. */
@@ -2194,15 +982,16 @@ function urgentAgencyAction(state:GameState):Candidate|undefined {
   if(state.player?.combat?.targetType==='player' || combatDisposition(state,false,build==='ranged-magic')==='recover')
     return {id:'emergency-retreat',type:'retreat',waitTicks:2};
 }
-function verification(value:ReturnType<typeof verifyActionOutcome>):Verification {
-  return {status:value.verified?'verified':value.uncertain?'unknown':'rejected',evidence:value.evidence,reason:value.reason};
-}
-async function executeAgencyAction(state:GameState,action:Candidate):Promise<{next:GameState;result:Json}> {
+async function executeAgencyAction(state:GameState,action:Candidate,commandId?:string):Promise<{next:GameState;result:Json}> {
   if(action.type==='walkTo'||action.type==='retreat') {
-    const trip=action.type==='retreat'?await navigator!.escape(state):await navigator!.step({x:Number(action.fields?.x),z:Number(action.fields?.z),level:Number(action.fields?.level??0)},state);
+    const onDispatch=(step:{type:string;fields:any},before:GameState)=>{
+      if(commandId)agency!.noteExecution(commandId,{...action,type:step.type,fields:step.fields},before);
+    };
+    const trip=action.type==='retreat'?await navigator!.escape(state,onDispatch):await navigator!.step({x:Number(action.fields?.x),z:Number(action.fields?.z),level:Number(action.fields?.level??state.player?.level??0)},state,false,onDispatch);
     const next=trip.state.tick===state.tick?stateFrom(await cliCall(['wait','2'])):trip.state;
     return {next,result:{navigation:trip.navigation}};
   }
+  if(commandId)agency!.noteExecution(commandId,action,state);
   if(action.type==='wait') {
     const result=await cliCall(['wait',String(action.waitTicks)]);return {next:stateFrom(result),result};
   }
@@ -2239,7 +1028,7 @@ async function runEpisode(): Promise<void> {
       // the verifier schema changes. These actions cannot duplicate a purchase
       // or transfer, so quarantine the stale record after one fresh read and
       // resume planning. Mutating intents remain blocked until reconciled.
-      const readOnly = /^(walkTo|retreat|wait|scanNearbyLocs|closeModal)$/.test(legacy.type);
+      const readOnly = /^(walkTo|retreat|wait|scanNearbyLocs)$/.test(legacy.type);
       if (!readOnly) throw new Error('LEGACY_ACTION_RECONCILIATION_REQUIRED:'+legacy.commandId);
       finishActionIntent(actionIntentPath,legacy,'failed',check?.evidence ?? [],'stale non-mutating intent quarantined after restart: '+(check?.reason ?? 'no verified movement/read result'));
       console.error(JSON.stringify({actionIntent:'quarantined-stale-read-only',commandId:legacy.commandId,type:legacy.type}));
@@ -2250,8 +1039,8 @@ async function runEpisode(): Promise<void> {
     training?.observe(state);
     const safetyPending=agency.pending('safety');
     if(safetyPending) {
-      const check=verifyActionOutcome(safetyPending.before,state,safetyPending.action);
-      agency.record(safetyPending.commandId,state,verification(check));
+      const check=agency.reconcile(safetyPending.commandId,state);
+      agency.record(safetyPending.commandId,state,check);
       if(agency.pending('safety')){await cliCall(['wait','2']);continue;}
     }
     // Safety can preempt a goal but cannot overwrite its pending action or choose ordinary work.
@@ -2259,8 +1048,8 @@ async function runEpisode(): Promise<void> {
     if(emergency) {
       const commandId=agency.beginSafety(emergency,state,randomUUID());
       try {
-        const {next,result}=await executeAgencyAction(state,emergency);
-        agency.record(commandId,next,verification(verifyActionOutcome(state,next,emergency,result)));
+        const {next,result}=await executeAgencyAction(state,emergency,commandId);
+        agency.record(commandId,next,agency.reconcile(commandId,next,result));
         state=next;
       } catch(error) {
         agency.record(commandId,state,{status:'unknown',evidence:[],reason:String(error)});
@@ -2269,13 +1058,13 @@ async function runEpisode(): Promise<void> {
     }
     const pending=agency.pending();
     if(pending) {
-      const check=verifyActionOutcome(pending.before,state,pending.action);
-      agency.record(pending.commandId,state,verification(check));
+      const check=agency.reconcile(pending.commandId,state);
+      agency.record(pending.commandId,state,check);
       if(agency.pending()) {
         console.log(JSON.stringify({agency:'reconciling',commandId:pending.commandId,reason:check.reason}));
         await cliCall(['wait','2']);continue;
       }
-      if(check.verified)observeAgencyResult(pending.before,state,pending.action as Candidate);
+      if(check.status==='verified')observeAgencyResult(pending.before,state,pending.action as Candidate);
     }
     // No legacy action candidates or synthetic per-click goals are constructed before this selection.
     const planned=agency.plan(state);
@@ -2285,7 +1074,7 @@ async function runEpisode(): Promise<void> {
     }
     const options=available(await actionsForTask(state,planned.task));
     if(!options.length){agency.blocked('Selected task has no feasible current executor step: '+planned.task.id);continue;}
-    const action=choose(stateKey(state),options);
+    const action=choose('',options);
     // One-item purchases use the current quoted price; no unbounded bulk purchase estimate.
     if(action.type==='shopBuy')action.fields={...action.fields,amount:1};
     const fresh=stateFrom(await cliCall(['state']));
@@ -2299,13 +1088,13 @@ async function runEpisode(): Promise<void> {
     catch(error) { if(!agency.pending())agency.blocked('Pre-dispatch validation refused '+action.id+': '+String(error));else throw error;continue; }
     training?.beforeAction(state,action);
     try {
-      const {next,result}=await executeAgencyAction(state,action);
-      const check=verifyActionOutcome(state,next,action,result);
-      agency.record(commandId,next,verification(check));
-      if(check.verified)observeAgencyResult(state,next,action);
+      const {next,result}=await executeAgencyAction(state,action,commandId);
+      const check=agency.reconcile(commandId,next,result);
+      agency.record(commandId,next,check);
+      if(check.status==='verified')observeAgencyResult(state,next,action);
       appendFileSync(experiencePath,JSON.stringify({at:new Date().toISOString(),commandId,goal:planned.decision.goal.id,
-        method:planned.method.id,action,outcome:verification(check)})+'\n');
-      console.log(JSON.stringify({agency:'step',commandId,goal:agency.summary().goal,outcome:verification(check)}));
+        method:planned.method.id,action,outcome:check})+'\n');
+      console.log(JSON.stringify({agency:'step',commandId,goal:agency.summary().goal,outcome:check}));
       state=next;
     } catch(error) {
       // A transport exception does not prove the server rejected the command.
@@ -2325,8 +1114,7 @@ async function main(): Promise<void> {
     training = new TrainingDiscovery(resolve(dataDir, 'training-knowledge.json'), character, loadCatalog(), build === 'ranged-magic', false);
   }
   const oldAgencyPath=resolve(dataDir,'agency-memory.json');
-  if(existsSync(oldAgencyPath)&&JSON.parse(readFileSync(oldAgencyPath,'utf8')).pending)
-    throw new Error('LEGACY_AGENCY_INTENT_REQUIRES_RECONCILIATION');
+  migrateLegacyPlanner(oldAgencyPath);
   const policyPath=resolve(dataDir,'agency-policy.json');
   const policy=existsSync(policyPath)?JSON.parse(readFileSync(policyPath,'utf8')):{};
   agency = new LiveAgency(resolve(dataDir,'agency-v2.json'), {agent:character,world:process.env.CLAWSCAPE_SERVER??'clawscape',revision:gearCatalog.namespace}, {

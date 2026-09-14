@@ -1,3 +1,4 @@
+import { upstreamRoot } from '../../../src/runtime-paths.ts';
 import {readFileSync} from 'node:fs';
 import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
@@ -6,7 +7,7 @@ import {RECOVERY_ID,RECOVERY_MAP_HASH,planRecovery,recoveryLegs} from './live-re
 // Independent offline collision memory. No connection, game writes, door unmasking,
 // or removal of the normal navigator's hazard exclusions.
 try{
-  const upstream=resolve(import.meta.dir,'../../tmp/clawscape/upstream');
+  const upstream=upstreamRoot();
   const raw=readFileSync(resolve(upstream,'sdk/collision-data.json'));
   const hash=createHash('sha256').update(raw).digest('hex');
   if(hash!==RECOVERY_MAP_HASH)throw new Error('RECOVERY_MAP_CHANGED');

@@ -82,7 +82,7 @@ export function quiverRefill(s:any): Action[] {
   return arrows && option ? [{id:'wield-ammo-'+arrows.slot,type:'useInventoryItem',fields:{slot:arrows.slot,optionIndex:option.opIndex},waitTicks:2}] : [];
 }
 export function meleeTrainingSkill(attack: number, strength: number) {
-  return strength < 40 ? 'strength' : attack < 40 ? 'attack' : 'strength';
+  return attack < strength ? 'attack' : 'strength';
 }
 export function fletchingRecipe(log: string, level: number): string | null {
   const tiers = [

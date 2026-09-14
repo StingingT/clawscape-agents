@@ -1,17 +1,16 @@
-import { expect, test } from 'bun:test';
-import { chooseResourceGoal, shouldBankResource } from './resource-agent';
-
-const items = (name: string, count: number) => [{ name, count }];
-
-test('resource agent fills the feather reserve before switching resources', () => {
-  expect(chooseResourceGoal([], [])).toBe('feathers');
-  expect(chooseResourceGoal(items('Feather', 499), [])).toBe('feathers');
-  expect(chooseResourceGoal(items('Feather', 500), [])).toBe('cow-hides');
+import {test,expect} from 'bun:test';
+import {chooseResourceGoal,shouldBankResource} from './resource-agent';
+test('no fixed feather or cowhide quota is selected without a supplied need',()=>{
+  expect(chooseResourceGoal([],[])).toBe('resource-survey');
+  expect(chooseResourceGoal([],[{name:'Feather',count:1}])).toBe('resource-survey');
 });
-
-test('resource agent keeps cow-hide collection bounded and surveys afterward', () => {
-  expect(chooseResourceGoal([...items('Feather', 500), ...items('Cowhide', 49)], [])).toBe('cow-hides');
-  expect(chooseResourceGoal([...items('Feather', 500), ...items('Cowhide', 50)], [])).toBe('resource-survey');
-  expect(shouldBankResource('feathers', items('Feather', 200))).toBe(true);
-  expect(shouldBankResource('cow-hides', items('Cowhide', 20))).toBe(true);
+test('a goal-derived resource need counts both personally known bank and inventory',()=>{
+  expect(chooseResourceGoal([{name:'Feather',count:3}],[{name:'Feather',count:2}],{feathers:5,'cow-hides':2})).toBe('cow-hides');
+  expect(chooseResourceGoal([],[],{feathers:12})).toBe('feathers');
+});
+test('banking batch size comes from the current plan rather than a fixed reserve',()=>{
+  const stock=[{name:'Feather',count:10}];
+  expect(shouldBankResource('feathers',stock)).toBe(false);
+  expect(shouldBankResource('feathers',stock,10)).toBe(true);
+  expect(shouldBankResource('feathers',stock,20)).toBe(false);
 });

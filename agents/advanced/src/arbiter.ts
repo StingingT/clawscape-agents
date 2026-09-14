@@ -1,5 +1,6 @@
 import { ActionCommand, ActionResult, Observation, type Intent } from "./contracts.ts";
 import { Store } from "./store.ts";
+import { movementProgress, verifyActionOutcome } from "../../../src/action-outcome.ts";
 
 export interface Adapter {
   snapshot(): Promise<Observation>;
@@ -24,8 +25,8 @@ export function evidence(intent: Intent, before: Observation, after: Observation
   switch (intent.operation) {
     case "close_interface": return before.bank.open && after.bank.open === false ? ["bank-closed"]
       : before.shop_open && after.shop_open === false ? ["shop-closed"]
-      : before.activity?.modal_open && after.activity?.modal_open === false ? ["modal-closed"] : [];
-    case "move": return same(after.position, intent.destination) ? ["destination-observed"] : [];
+      : before.activity?.modal_open && after.activity?.modal_open === false ? ["modal-closed"] : before.dialog.open && after.dialog.open===false ? ["dialogue-closed"] : [];
+    case "move": return same(after.position, intent.destination) ? ["destination-observed"] : movementProgress(before.position,after.position,intent.destination) ? ["verified-movement-leg-progress"] : [];
     case "eat": return (total(before.inventory,intent.item_id) ?? 0) > (total(after.inventory,intent.item_id) ?? 0)
       && before.hp !== null && after.hp !== null && after.hp > before.hp ? ["food-decreased", "hp-increased"] : [];
     case "deposit":
@@ -37,7 +38,12 @@ export function evidence(intent: Intent, before: Observation, after: Observation
       return deltaInv === direction * intent.amount && deltaBank === -direction * intent.amount
         ? ["inventory-and-bank-reconciled"] : [];
     }
-    case "dialogue": return !same(before.dialog,after.dialog) ? ["dialogue-state-changed"] : [];
+    case "dialogue": {
+      const normalize=(o:Observation)=>({tick:o.tick,player:{lifeId:o.life_id},inventory:o.inventory,
+        skills:o.skills.map(s=>({name:s.name,experience:s.xp})),dialog:{isOpen:o.dialog.open,options:o.dialog.options,text:o.dialog.text}});
+      const proof=verifyActionOutcome(normalize(before),normalize(after),{type:'clickDialogOption',fields:{optionIndex:intent.option_index}});
+      return proof.verified?proof.evidence:[];
+    }
     case "equip": return after.equipment.some(i => i.id === intent.item_id)
       && !same(before.equipment, after.equipment) ? ["equipment-observed"] : [];
     case "style": return after.activity?.style === intent.style_index ? ["combat-style-observed"] : [];
@@ -149,6 +155,7 @@ export function safety(intent: Intent, o: Observation, policy: SafetyPolicy, now
   return null;
 }
 export class ActionArbiter {
+  private stationaryMoves=new Map<string,{at:number;tick:number;position:unknown}>();
   private busy = false;
   constructor(readonly store: Store, private adapter: Adapter, private policy: SafetyPolicy,
     private now: () => number = Date.now) {}
@@ -235,7 +242,19 @@ export class ActionArbiter {
       const proof = evidence(pending.command.intent,checkpoint.before,after);
       if (proof.length) {
         const r = this.result(pending.command.action_id,"SUCCEEDED","RECONCILED_EFFECT",proof);
+        this.stationaryMoves.delete(pending.command.action_id);
         this.store.result(r); results.push(r);
+      } else if (pending.command.intent.operation==='move' && this.now()-pending.result.at>=15_000
+        && after.connected && after.character===checkpoint.before.character && after.world===checkpoint.before.world
+        && after.life_id===checkpoint.before.life_id && after.position?.plane===checkpoint.before.position?.plane
+        && after.hp!==null && after.hp>0 && after.hp>=(checkpoint.before.hp??after.hp)
+        && after.danger.active===false && after.activity?.target_type==='none' && after.tick!==null) {
+        const id=pending.command.action_id,previous=this.stationaryMoves.get(id);
+        if(previous && same(previous.position,after.position) && after.tick>previous.tick && this.now()-previous.at>=1200){
+          const r=this.result(id,'CANCELLED','MOTION_SUPERSEDED_WITHOUT_REPLAY',['two fresh stationary observations; no arrival or economic effect claimed']);
+          this.store.result(r);results.push(r);this.stationaryMoves.delete(id);
+        } else if(!previous||!same(previous.position,after.position)||after.tick<previous.tick)
+          this.stationaryMoves.set(id,{at:this.now(),tick:after.tick,position:structuredClone(after.position)});
       }
     }
     return results;

@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { verifyActionOutcome } from '../action-outcome.ts';
 import { Director, createMemory } from './director.ts';
 import type { Decision, Identity, Memory, Method, Observation, Outcome } from './types.ts';
 import { buildCatalogue, capabilityContext, cash, defaultPolicy, emptyKnowledge, observeFacts, observeKnowledge,
@@ -8,10 +9,13 @@ import { buildCatalogue, capabilityContext, cash, defaultPolicy, emptyKnowledge,
 
 export type LiveCandidate = { id: string; type: string; fields?: Record<string, any>; waitTicks?: number };
 export type Selection = { decision: Extract<Decision,{type:'execute'}>; method: Method; task: Task; view: Observation };
-export type Receipt = { commandId:string; action:LiveCandidate; before:LiveState; startedAt:number; scope:'task'|'safety'; methodId?:string };
+export type Receipt = { commandId:string; action:LiveCandidate; before:LiveState; startedAt:number; scope:'task'|'safety'; methodId?:string;
+  dispatchState?:'prepared'|'sent'; execution?:{action:LiveCandidate;before:LiveState};
+  stationary?:{tick:number;at:number;x:number;z:number;level:number};
+};
 type Document = { version:2; memory:Memory; knowledge:Knowledge; receipt?:Receipt; safetyReceipt?:Receipt;
   lastCommands:string[]; blocked?:string };
-export type Verification = { status:'verified'|'rejected'|'unknown'; evidence:string[]; reason?:string };
+export type Verification = { status:'verified'|'deferred'|'rejected'|'unknown'; evidence:string[]; reason?:string };
 
 const atomic = (file:string,value:unknown) => {
   mkdirSync(dirname(file),{recursive:true});
@@ -80,15 +84,56 @@ export class LiveAgency {
     const cost=authorizeAction(state,action,selection.method,view.budget.spendableGp);
     const priced={...selection.method,costGp:cost};
     this.director.begin(view,selection.decision,priced,commandId);
-    this.document.receipt={commandId,action:structuredClone(action),before:structuredClone(state),startedAt:this.clock(),scope:'task',methodId:selection.method.id};
+    this.document.receipt={commandId,action:structuredClone(action),before:structuredClone(state),startedAt:this.clock(),scope:'task',methodId:selection.method.id,dispatchState:'prepared'};
     this.save();return commandId;
   }
   /** Urgent survival is independent of the goal; it cannot overwrite an unresolved ordinary intent. */
   beginSafety(action:LiveCandidate,state:LiveState,commandId=randomUUID()):string {
     if(this.document.safetyReceipt)throw new Error('RECONCILE_SAFETY_ACTION_FIRST');
     if(!safetyAction(state,action))throw new Error('NOT_AN_URGENT_SAFETY_ACTION');
-    this.document.safetyReceipt={commandId,action:structuredClone(action),before:structuredClone(state),startedAt:this.clock(),scope:'safety'};
+    this.document.safetyReceipt={commandId,action:structuredClone(action),before:structuredClone(state),startedAt:this.clock(),scope:'safety',dispatchState:'prepared'};
     this.save();return commandId;
+  }
+  /** Persist the exact subcommand before transport: the route goal is not its current waypoint. */
+  noteExecution(commandId:string,action:LiveCandidate,before:LiveState):void {
+    const receipt=this.document.receipt?.commandId===commandId?this.document.receipt:this.document.safetyReceipt;
+    if(!receipt||receipt.commandId!==commandId)throw new Error('EXECUTION_WITHOUT_MATCHING_INTENT');
+    if(receipt.action.type!=='walkTo'&&receipt.action.type!=='retreat'&&action.type!==receipt.action.type)
+      throw new Error('EXECUTION_OPERATION_MISMATCH');
+    receipt.execution={action:structuredClone(action),before:structuredClone(before)};
+    receipt.dispatchState='sent';delete receipt.stationary;this.save();
+  }
+  /** Inspect only; never replay a packet. Normal command ID and goal accounting remain unchanged. */
+  reconcile(commandId:string,after:LiveState,result?:any):Verification {
+    const receipt=this.document.receipt?.commandId===commandId?this.document.receipt:this.document.safetyReceipt;
+    if(!receipt||receipt.commandId!==commandId)throw new Error('RECONCILE_WITHOUT_MATCHING_INTENT');
+    const action=receipt.execution?.action??receipt.action, before=receipt.execution?.before??receipt.before;
+    // No callback was reached before a crash/map-loading return: nothing was sent.
+    // Unknown older-format receipts have no dispatchState, and do NOT enter this path.
+    if(receipt.dispatchState==='prepared') {
+      if(result?.navigation?.status==='blocked')return {status:'rejected',evidence:['navigation planning rejected before dispatch'],reason:result.navigation.reason};
+      return {status:'deferred',evidence:['journal confirms no command reached transport'],reason:'Replan the unsent step from fresh state.'};
+    }
+    const check=verifyActionOutcome(before,after,action,result);
+    if(check.verified)return {status:'verified',evidence:check.evidence};
+    // A stale movement command is replaceable, unlike a purchase, dialogue or transfer.
+    // Require same life/plane, no threat and two distinct stationary observations.
+    if((action.type==='walkTo'||action.type==='retreat')&&check.uncertain&&this.clock()-receipt.startedAt>=15_000
+      && before.player?.lifeId===after.player?.lifeId && before.player?.level===after.player?.level
+      && after.player?.isDead!==true && Number(after.player?.hp)>0 && after.player?.combat?.inCombat!==true
+      && !['npc','player'].includes(after.player?.combat?.targetType)
+      && Number(after.player?.hp)>=Number(before.player?.hp)
+      && [after.tick,after.player?.worldX,after.player?.worldZ,after.player?.level].every(Number.isInteger)) {
+      const p=after.player, previous=receipt.stationary;
+      if(previous && previous.x===p.worldX&&previous.z===p.worldZ&&previous.level===p.level
+        && after.tick>previous.tick&&this.clock()-previous.at>=1_200) {
+        return {status:'deferred',evidence:['two fresh stationary movement observations; command superseded without claiming arrival'],reason:'Rebase movement; preserve the unfinished goal.'};
+      }
+      if(!previous||previous.x!==p.worldX||previous.z!==p.worldZ||previous.level!==p.level||after.tick<previous.tick)
+        receipt.stationary={tick:after.tick,at:this.clock(),x:p.worldX,z:p.worldZ,level:p.level};
+      this.save();
+    }
+    return {status:check.uncertain?'unknown':'rejected',evidence:check.evidence,reason:check.reason};
   }
   record(commandId:string,after:LiveState,verification:Verification,metrics?:{spentGp:number;lostGp:number;deaths:number;elapsedMs:number}):void {
     if(this.document.lastCommands.includes(commandId))return;

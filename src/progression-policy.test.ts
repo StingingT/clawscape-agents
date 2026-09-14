@@ -12,7 +12,7 @@ test('dangerous health or missing food does not hold combat',()=>{const s=fight(
 test('old damage does not interrupt peaceful tasks',()=>{const s=state();s.player.combat.lastDamageTick=80;expect(combatDisposition(s)).toBe('quiet');});
 test('ranged holding requires compatible ammunition',()=>{const s=fight();s.combatStyle={weaponName:'Shortbow'};s.equipment=[item('Steel arrow')];expect(combatDisposition(s,false,true)).toBe('recover');s.equipment=[item('Iron arrow')];expect(combatDisposition(s,false,true)).toBe('engaged');});
 test('nearest local target beats distant namesakes',()=>expect(chooseLocalTargets([{name:'Giant spider',distance:15},{name:'Goblin',distance:2},{name:'Giant spider',distance:7}])[0].name).toBe('Goblin'));
-test('strength 56 and attack 16 train Attack',()=>{expect(meleeTrainingSkill(16,56)).toBe('attack');expect(meleeTrainingSkill(16,25)).toBe('strength');});
+test('legacy balancing helper has no fixed Strength-40 gate',()=>{expect(meleeTrainingSkill(16,56)).toBe('attack');expect(meleeTrainingSkill(16,25)).toBe('attack');expect(meleeTrainingSkill(60,56)).toBe('strength');});
 test('pickaxes and battleaxes cannot satisfy woodcutting tool requirement',()=>{expect(axeRank('Bronze pickaxe')).toBe(0);expect(axeRank('Steel battleaxe')).toBe(0);});
 test('woodcutting 71 alone does not make yew efficient for fletching 1',()=>expect(selectWoodSite(state()).name).toBe('edgeville-willow'));
 test('willow endpoint is the proven east approach, outside the tree footprint',()=>expect(selectWoodSite(state())).toMatchObject({x:3113,z:3487}));

@@ -1,3 +1,4 @@
+import { upstreamRoot } from '../runtime-paths.ts';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { mapEntries } from '../training/catalog';
@@ -17,7 +18,7 @@ export const canMine=(s:any)=>[...(s.inventory??[]),...(s.equipment??[])].some(i
 // depleted rocks and arbitrary name matches must never be treated as ore.
 let rockHints:any[]|undefined;
 export function miningHints(){
-  if(!rockHints){const map='m51_52';rockHints=mapEntries(readFileSync(resolve(import.meta.dir,'../../../tmp/clawscape/upstream/server/content/maps/'+map+'.jm2'),'utf8'),map,'LOC')
+  if(!rockHints){const map='m51_52';rockHints=mapEntries(readFileSync(resolve(upstreamRoot(),'server/content/maps/'+map+'.jm2'),'utf8'),map,'LOC')
     .filter(p=>p.level===0&&p.x>=3280&&p.x<=3292&&p.z>=3360&&p.z<=3372&&[2090,2091,2092,2093,2094,2095].includes(p.id));}
   return rockHints;
 }
@@ -33,7 +34,7 @@ const miningRouteHints = [
 export function miningHintsFor(ids:number[]) {
   return miningRouteHints.flatMap(site => {
     if (!site.ids.some(id => ids.includes(id))) return [];
-    const contents=readFileSync(resolve(import.meta.dir,`../../../tmp/clawscape/upstream/server/content/maps/${site.map}.jm2`),'utf8');
+    const contents=readFileSync(resolve(upstreamRoot(),`server/content/maps/${site.map}.jm2`),'utf8');
     return mapEntries(contents,site.map,'LOC').filter(p=>p.level===0&&ids.includes(p.id));
   });
 }

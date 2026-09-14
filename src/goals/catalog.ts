@@ -1,3 +1,4 @@
+import { upstreamRoot } from '../runtime-paths.ts';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -18,7 +19,7 @@ const field = (text: string, key: string) => {
 
 // A source-derived shortlist, not a claim to cover every build/item. Local
 // content suggests possibilities; observed prices, stock and options authorize actions.
-export function loadGearCatalog(upstream = resolve(import.meta.dir, '../../../tmp/clawscape/upstream')): GearCatalog {
+export function loadGearCatalog(upstream = upstreamRoot()): GearCatalog {
   const evidence: string[] = [], hash = createHash('sha256');
   const read = (p: string) => { const t = readFileSync(resolve(upstream, p), 'utf8'); evidence.push(p); hash.update(p).update(t); return t; };
   const pack = new Map(read('server/content/pack/obj.pack').split(/\r?\n/).filter(l => /^\d+=/.test(l)).map(l => [l.slice(l.indexOf('=') + 1), Number(l.slice(0, l.indexOf('=')))]));
