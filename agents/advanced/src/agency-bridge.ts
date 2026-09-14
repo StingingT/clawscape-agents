@@ -10,7 +10,7 @@ export function agencyState(o: Observation): Record<string, any> {
     level:e.position.plane,reachable:e.reachable,hp:e.hp,maxHp:e.max_hp,combatLevel:e.combat_level,inCombat:e.in_combat,
     distance:o.position?Math.max(Math.abs(o.position.x-e.position.x),Math.abs(o.position.z-e.position.z)):Infinity,
     optionsWithIndex:e.options.map(p=>({opIndex:p.index,text:p.text}))});
-  return {character:o.character,world:o.world,sessionId:o.session_id,profileId:o.profile_id,tick:o.tick,seq:o.seq,
+  return {character:o.character,world:o.world,worldEpoch:o.world_epoch,sessionId:o.session_id,profileId:o.profile_id,tick:o.tick,seq:o.seq,
     inGame:o.connected,capacity:o.capacity,player:{hp:o.hp,maxHp:o.max_hp,lifeId:o.life_id,respawnCount:o.respawns,
       worldX:o.position?.x,worldZ:o.position?.z,level:o.position?.plane,isDead:o.hp===0,animId:o.activity?.animation,
       combat:{inCombat:o.activity?.target_type==='npc'&&o.entities.some(e=>e.kind==='npc'&&e.index===o.activity?.target_index&&e.options.some(p=>/^attack$/i.test(p.text))),

@@ -9,7 +9,7 @@ const jobs=[
  {name:'stinger',cwd:root,args:['run','src/agent.ts','--character','stinger','--profile','stinger','--role','brawler','--build','ranged-magic','--forever']},
  {name:'coincrafter',cwd:root,args:['run','src/agent.ts','--character','coincrafter','--profile','coincrafter','--role','economy','--build','melee','--forever']},
  {name:'featherer',cwd:root,args:['run','src/agent.ts','--character','featherer','--profile','featherer','--role','resource','--build','melee','--forever']},
- {name:'astra',cwd:resolve(root,'agents/advanced'),args:['src/live-cli.ts','run','--seconds','900']},
+ {name:'astra',cwd:resolve(root,'agents/advanced'),args:['src/live-entry.ts','run','--seconds','900']},
 ];
 let stopping=false;
 const children=new Map<string,ReturnType<typeof Bun.spawn>>();
@@ -30,8 +30,11 @@ async function run(job:typeof jobs[number]){
    children.set(job.name,child);states[job.name]={status:'running',pid:child.pid,started:new Date(started).toISOString(),log:prefix+'.log'};publish('started',job.name);
    const code=await child.exited;children.delete(job.name);
    if(stopping)break;
-   let reason='process-exit';
-   if(job.name==='astra')try{reason=JSON.parse(readFileSync(resolve(job.cwd,'data/astra-live/status.json'),'utf8')).reason??reason;}catch{}
+   let reason='process-exit';let needsAttention=false;
+   if(job.name==='astra')try{
+     const result=JSON.parse(readFileSync(resolve(job.cwd,'data/astra-launcher-status.json'),'utf8'));
+     if(result.pid===child.pid && result.startedAt>=started){reason=result.reason??reason;needsAttention=result.retryable===false;}
+   }catch{}
    // CONTROL_REVOKED also occurs when the supervisor itself restarts or the
    // machine interrupts Astra. Treat only explicit manual takeover/disable
    // reasons as a durable pause; ordinary revocation must retry.
@@ -39,7 +42,7 @@ async function run(job:typeof jobs[number]){
    if(manual){writeFileSync(resolve(logs,job.name+'.paused'),reason);states[job.name]={status:'paused',reason};publish('manual-stop',job.name);continue;}
    failures=Date.now()-started>300000?0:Math.min(failures+1,4);
    const retryMs=Math.min(900000,60000*2**failures);
-   states[job.name]={status:'retry-backoff',exitCode:code,reason,retryAt:new Date(Date.now()+retryMs).toISOString(),log:prefix+'.log'};
+   states[job.name]={status:needsAttention?'needs-attention':'retry-backoff',exitCode:code,reason,retryAt:new Date(Date.now()+retryMs).toISOString(),log:prefix+'.log'};
    publish('exited',job.name,{code,reason,retryMs});await Bun.sleep(retryMs);
   }catch(error){states[job.name]={status:'launch-failed',reason:String(error)};publish('launch-failed',job.name);await Bun.sleep(60000);}
  }

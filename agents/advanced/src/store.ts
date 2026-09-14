@@ -29,10 +29,17 @@ export class Store {
       .get(id) as { command: string; result: string } | null;
     return row ? { command: JSON.parse(row.command), result: JSON.parse(row.result) } : null;
   }
-  pending(): { command: ActionCommand; result: ActionResult }[] {
+  allActions(): { command: ActionCommand; result: ActionResult }[] {
     return (this.db.query("SELECT command,result FROM actions").all() as { command: string; result: string }[])
       .map(r => ({ command: JSON.parse(r.command) as ActionCommand, result: JSON.parse(r.result) as ActionResult }))
-      .filter(r => ["QUEUED", "RUNNING"].includes(r.result.status));
+      ;
+  }
+  unsettled(): { command: ActionCommand; result: ActionResult }[] {
+    return this.allActions().filter(({result:r})=>!((r.status==='SUCCEEDED'&&r.evidence.length>0)||r.status==='REJECTED'||r.status==='EXPIRED'
+      ||r.status==='CANCELLED'&&!/MAY_STILL|OUTCOME_UNKNOWN|PREEMPTED/.test(r.reason)));
+  }
+  pending(): { command: ActionCommand; result: ActionResult }[] {
+    return this.allActions().filter(r => ["QUEUED", "RUNNING"].includes(r.result.status));
   }
   createAction(command: ActionCommand, result: ActionResult): void {
     if (this.pending().length) throw new Error("RECONCILE_PENDING");
@@ -62,9 +69,29 @@ export class Store {
       return lease;
     }).immediate();
   }
+  /** Reconciliation owns the same lease but does NOT authorize game actions. */
+  acquireRecovery(owner: string, now: number): string {
+    return this.db.transaction(() => {
+      const c = this.control();
+      if (c.disabled) throw new Error("HARD_DISABLED");
+      if (["MANUAL", "PAUSED"].includes(c.mode)) throw new Error("MANUAL_TAKEOVER");
+      if (c.lease && c.expires > now) throw new Error("CONTROL_OWNED");
+      const lease = crypto.randomUUID();
+      this.db.query("UPDATE control SET mode='RECONCILING',lease=?,owner=?,expires=?").run(lease,owner,now+5000);
+      return lease;
+    }).immediate();
+  }
+  promoteRecovery(lease: string, now: number): void {
+    this.db.transaction(() => {
+      const c = this.control();
+      if (c.disabled || c.mode !== 'RECONCILING' || c.lease !== lease || c.expires <= now) throw new Error('CONTROL_REVOKED');
+      if (this.unsettled().length) throw new Error('RECONCILE_PENDING_BEFORE_RESTART');
+      this.db.query("UPDATE control SET mode='RUNNING' WHERE lease=?").run(lease);
+    }).immediate();
+  }
   renew(lease: string, now: number): void {
     const c = this.control();
-    if (c.disabled || c.mode !== "RUNNING" || c.lease !== lease || c.expires <= now) throw new Error("CONTROL_REVOKED");
+    if (c.disabled || !["RUNNING","RECONCILING"].includes(c.mode) || c.lease !== lease || c.expires <= now) throw new Error("CONTROL_REVOKED");
     this.db.query("UPDATE control SET expires=? WHERE lease=?").run(now + 5000, lease);
   }
   setControl(mode: "PAUSED" | "STOPPED" | "MANUAL" | "DISABLED"): void {

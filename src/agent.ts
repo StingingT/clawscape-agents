@@ -41,6 +41,7 @@ import { emptyLifecycle, loadLifecycle, saveLifecycle, setGoal, ensureTask, star
 import { actionGoalKind, actionMatchesGoal, goalTitle, isPreparationAction, meaningfulGoalResult, type ActionGoalKind } from './goals/action-goal';
 import { proposalsFromGoals } from './learning-pipeline';
 import { observeWorld, recordRouteResult } from './shared-world';
+import { recoverLegacyJournals } from './agency/journal-recovery.ts';
 import { LiveAgency, isSelection, type Selection, type Verification } from './agency/live-adapter.ts';
 import type { Task, TaskKind, Route } from './agency/world-model.ts';
 import { randomUUID } from 'node:crypto';
@@ -311,13 +312,6 @@ if (bulkPickaxes && role === 'economy') {
   if (work.economy.metal.bulkPickaxeAudit !== 'complete') work.economy.metal.bulkPickaxeAudit = 'pending';
 }
 const saveWork = () => saveGoalJson(workPath,work);
-const recoveredIntent = loadActionIntent(actionIntentPath);
-if (recoveredIntent?.status === 'pending') {
-  // A restart cannot prove that a mutation was not accepted. Keep it unknown
-  // so transaction-capable callers reconcile before attempting a duplicate.
-  finishActionIntent(actionIntentPath, recoveredIntent, 'outcome-unknown', [], 'controller restarted before outcome verification');
-}
-
 // A controller restart must not resurrect a transient action that was already
 // stale when the previous process ended. Re-observe the world and let the
 // planner choose a real goal action instead.
@@ -2230,20 +2224,17 @@ async function runEpisode(): Promise<void> {
   if(!agency)throw new Error('AGENCY_NOT_INITIALIZED');
   await cliCall(['connect']);
   let state=stateFrom(await cliCall(['state']));
-  // The legacy ledger is never converted to "failed" merely to permit another mutation.
-  const legacy=loadActionIntent(actionIntentPath);
-  if(legacy && ['pending','outcome-unknown'].includes(legacy.status)) {
-    const check=legacy.beforeState?verifyActionOutcome(legacy.beforeState,state,legacy):undefined;
-    if(!check?.verified) {
-      // Old controllers can leave a navigation/read-only intent behind when
-      // the verifier schema changes. These actions cannot duplicate a purchase
-      // or transfer, so quarantine the stale record after one fresh read and
-      // resume planning. Mutating intents remain blocked until reconciled.
-      const readOnly = /^(walkTo|retreat|wait|scanNearbyLocs|closeModal)$/.test(legacy.type);
-      if (!readOnly) throw new Error('LEGACY_ACTION_RECONCILIATION_REQUIRED:'+legacy.commandId);
-      finishActionIntent(actionIntentPath,legacy,'failed',check?.evidence ?? [],'stale non-mutating intent quarantined after restart: '+(check?.reason ?? 'no verified movement/read result'));
-      console.error(JSON.stringify({actionIntent:'quarantined-stale-read-only',commandId:legacy.commandId,type:legacy.type}));
-    } else finishActionIntent(actionIntentPath,legacy,'verified',check.evidence);
+  if(existsSync(actionIntentPath)||existsSync(resolve(dataDir,'agency-memory.json'))) {
+    await cliCall(['wait','2']);
+    const stable=stateFrom(await cliCall(['state']));
+    const recovery=recoverLegacyJournals(dataDir,{agent:character,world:process.env.CLAWSCAPE_SERVER??'clawscape'},
+      {state,stable,apply:true});
+    if(!recovery.ready) {
+      console.error(JSON.stringify({agency:'legacy-reconciliation-required',report:resolve(dataDir,'legacy-recovery.json'),
+        unresolved:recovery.entries.filter(e=>e.disposition==='unresolved').map(e=>({commandId:e.commandId,reason:e.reason}))}));
+      return; // No uncertain purchase/transfer is replayed and no ordinary action is selected.
+    }
+    state=stable;
   }
   for(let step=0;step<steps;step++) {
     state=stateFrom(await cliCall(['state']));
@@ -2324,9 +2315,6 @@ async function main(): Promise<void> {
   if (['clawscout', 'stinger', 'coincrafter', 'astra', 'featherer'].includes(character)) {
     training = new TrainingDiscovery(resolve(dataDir, 'training-knowledge.json'), character, loadCatalog(), build === 'ranged-magic', false);
   }
-  const oldAgencyPath=resolve(dataDir,'agency-memory.json');
-  if(existsSync(oldAgencyPath)&&JSON.parse(readFileSync(oldAgencyPath,'utf8')).pending)
-    throw new Error('LEGACY_AGENCY_INTENT_REQUIRES_RECONCILIATION');
   const policyPath=resolve(dataDir,'agency-policy.json');
   const policy=existsSync(policyPath)?JSON.parse(readFileSync(policyPath,'utf8')):{};
   agency = new LiveAgency(resolve(dataDir,'agency-v2.json'), {agent:character,world:process.env.CLAWSCAPE_SERVER??'clawscape',revision:gearCatalog.namespace}, {

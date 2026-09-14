@@ -51,7 +51,7 @@ export function mapEntries(contents: string, mapName: string, section: 'NPC' | '
     id: Number(m[4]), shape: Number(m[5] ?? 0), angle: Number(m[6] ?? 0),
   }));
 }
-export function loadCatalog(upstream = resolve(import.meta.dir, '../../../tmp/clawscape/upstream')): Catalog {
+export function loadCatalog(upstream = process.env.CLAWSCAPE_UPSTREAM ?? resolve(import.meta.dir, '../../../tmp/clawscape/upstream')): Catalog {
   const evidence: string[] = [], hash = createHash('sha256');
   const read = (path: string) => { const data = readFileSync(resolve(upstream, path), 'utf8'); hash.update(path).update(data); evidence.push(path); return data; };
   const pack = read('server/content/pack/npc.pack');
