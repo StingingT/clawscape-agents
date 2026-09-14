@@ -1,0 +1,20 @@
+name: Ambition source snapshot
+on:
+  push:
+    branches: [codex/ambitions-dialogue-diagnostics]
+    paths: [.github/workflows/ambition-source.yml]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - run: git archive --format=zip HEAD -o /tmp/ambition-source.zip
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ambition-source
+          path: /tmp/ambition-source.zip
+          retention-days: 1
