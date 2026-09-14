@@ -43,7 +43,7 @@ export function reconcileAstraJournals(store:Store,directory:string,first:Observ
         } catch { /* Missing original entity/slot is uncertainty, never a guessed mapping. */ }
       }
       if(proof.length)resolved={...result,status:'SUCCEEDED',reason:'RECONCILED_DURABLE_EFFECT',evidence:proof,at:Date.now()};
-      else if(before&&['move','close_interface','style'].includes(command.intent.operation)) {
+      else if(before&&['move','close_interface','style','dialogue'].includes(command.intent.operation)) {
         const transient=settleAstraTransient(store,command,result,before,second);
         why=transient.reason;settling=transient.settling;
         // The shared helper writes its cancellation and immutable audit atomically.

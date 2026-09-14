@@ -122,7 +122,17 @@ test('activity and position changes reset the startup quiet window instead of pr
   expect(reconcileAstraJournals(store,dir,first,second).ready).toBe(false);
   expect(store.action('old-command')!.result.status).toBe('RUNNING');
 }));
-test('even an expired historical dialogue is not erased by a quiet movement recovery policy',()=>movementWindow((store,dir,lease,clock,snapshot)=>{
+test('a stale historical dialogue context can be retired as interrupted only after a closed-interface quiet window',()=>movementWindow((store,dir,lease,clock,snapshot)=>{
+  const c={...command(lease),intent:{operation:'dialogue' as const,option_index:0}};store.createAction(c,result());
+  const before=observation(1);before.session_id='old-local-client';before.dialog={open:true,waiting:false,text:'old page',options:[{index:0,text:'Continue'}]};
+  store.append('action_checkpoints',c.action_id,{action_id:c.action_id,before});
+  let report=reconcileAstraJournals(store,dir,snapshot(),snapshot());expect(report.ready).toBe(false);expect(report.unresolved[0]!.settling).toBe(true);
+  for(let n=0;n<30;n++){clock.advance();report=reconcileAstraJournals(store,dir,snapshot(),snapshot());}
+  expect(report.ready).toBe(true);expect(store.action(c.action_id)!.result.status).toBe('CANCELLED');
+  expect(store.action(c.action_id)!.result.reason).toBe('RECONCILED_DIALOGUE_CONTEXT_EXPIRED');
+  expect(store.records<any>('transient_reconciliation')[0].original.command.intent.operation).toBe('dialogue');
+}));
+test('dialogue recovery never retires a command whose original open context was not captured',()=>movementWindow((store,dir,lease,clock,snapshot)=>{
   const c={...command(lease),intent:{operation:'dialogue' as const,option_index:0}};store.createAction(c,result());
   const before=observation(1);before.session_id='old-local-client';store.append('action_checkpoints',c.action_id,{action_id:c.action_id,before});
   for(let n=0;n<35;n++){clock.advance();expect(reconcileAstraJournals(store,dir,snapshot(),snapshot()).ready).toBe(false);}

@@ -34,6 +34,26 @@ test('the same role chooses melee versus ranged from different observations, not
   a.combatStyle={weaponName:'Shortbow',currentStyle:0,styles:[{index:0,trainsSkills:['ranged']}]};a.equipment=[{name:'Shortbow'}];
   assert.equal(chooseDevelopment(a,memory(),1,'melee').id,'ranged-magic-pure');
 });
+
+test('crafting and resource priorities remain broad instead of drifting into a pure from one combat opportunity',()=>{
+  for(const preferences of [{crafting:2,gathering:1,combat:0},{gathering:2,combat:1}]) {
+    const m=createMemory(identity,preferences as any);
+    const d=chooseDevelopment(state(),m,1,'broad');
+    assert.equal(d.id,'open-development');assert.equal(d.name,'Broad mastery');
+    assert.ok(d.reason.includes('broad skill mastery'));
+    assert.ok(d.alternatives?.every(a=>a.eligible===false));
+  }
+});
+test('broad mastery does not silently specialize after a single combat success',()=>{
+  const s=state(),m=createMemory(identity,{combat:2});const d=chooseDevelopment(s,m,1,'broad');
+  m.reviews=[{at:2,result:'success',reason:'one fight',evidence:['verified'],goal:{domain:'combat'} as any}];
+  assert.equal(reviewDevelopment(d,s,m,3).id,'open-development');
+});
+test('broad mastery may reconsider specialization after sustained personal combat evidence',()=>{
+  const s=state(),m=createMemory(identity,{combat:2});const d=chooseDevelopment(s,m,1,'broad');
+  m.reviews=Array.from({length:5},(_,n)=>({at:n+2,result:'success',reason:'combat evidence',evidence:['verified'],goal:{domain:'combat'} as any}));
+  assert.notEqual(reviewDevelopment(d,s,m,10).id,'open-development');
+});
 test('a two-Defence character cannot acquire a one-Defence label or have XP reset',()=>{
   const s=state();set(s,'defence',2);const before=JSON.stringify(s);
   assert.equal(chooseDevelopment(s,memory(),1,'melee').id,'open-development');assert.equal(JSON.stringify(s),before);
