@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { Task } from "../../../src/agency/world-model.ts";
 import { Observation, Tile, Intent } from "./contracts.ts";
 
 export type LiveDecision = {
@@ -140,7 +141,7 @@ export class LivePolicy {
     this.state = candidate === undefined ? initial() : StateSchema.parse(candidate);
   }
 
-  next(o: Observation): LiveDecision {
+  next(o: Observation, task?: Task): LiveDecision {
     if (!o.connected) return block("observe", "DISCONNECTED", "A connected player observation is required.");
     if (o.fresh_at === null || o.observed_at < o.fresh_at || o.observed_at - o.fresh_at > 5000)
       return block("observe", "STALE_OBSERVATION", "Require a fresh advancing observation; the arbiter also checks wall-clock age.");
@@ -207,6 +208,27 @@ export class LivePolicy {
     const rawItem = o.inventory.find(i => i.count > 0 && raw(i));
     // Cook usable raw supplies even in a full inventory; converting them needs no new slot.
     if (freeSlots(o)! <= 0 && !(rawItem && !supplied(o))) return this.finish(o, this.startBank(o));
+    // Strategic ownership: the Director has chosen the outcome before this
+    // executor is asked for an action. No fallback to an unrelated activity.
+    if (task) {
+      switch (task.kind) {
+        case 'food': return this.finish(o, supplied(o)
+          ? {goal:task.id,reason:'Food reserve observed; Director will review the actual predicate.',wait:true}
+          : this.supply(o));
+        case 'bank': return this.finish(o, this.startBank(o));
+        case 'equipment': return this.finish(o, this.equip(o) ?? {goal:task.id,reason:'Owned kit is equipped.',wait:true});
+        case 'combat': {
+          if (!supplied(o)) return this.finish(o, this.supply(o));
+          const gear = this.equip(o);
+          return this.finish(o, gear ?? this.training(o, task.skill));
+        }
+        case 'exploration':
+          if (!task.route) return block(task.id, 'NO_SOURCED_ROUTE', 'No personal observation or documented lead supports this route.');
+          return this.finish(o, {goal:task.id,reason:task.route.evidence,
+            destination:{x:task.route.x,z:task.route.z,plane:task.route.level}});
+        default: return block(task.id, 'UNSUPPORTED_TASK_EXECUTOR', 'This controller does not implement the selected capability.');
+      }
+    }
     // Owner-approved local beginner trial: a healthy, equipped Astra can
     // learn from a nearby level-2 goblin before a full food-production chain.
     // Existing encounter tracking and early health interruption still apply.
@@ -638,16 +660,17 @@ export class LivePolicy {
     return undefined;
   }
 
-  private training(o: Observation): LiveDecision {
+  private training(o: Observation, requestedSkill?: string): LiveDecision {
     const names: Skill[] = ["attack", "strength", "defence"];
     const levels = names.map(n => skillLevel(o, n, true));
     if (levels.some(n => n === null)) return block("training", "MELEE_SKILLS_UNAVAILABLE", "All three base melee skills are required.");
     const goals = levels.every(n => n! >= 20) ? [40, 60, 40] : [20, 20, 20];
-    const lagging = names.map((name, i) => ({ name, ratio: levels[i]! / goals[i]!, remaining: goals[i]! - levels[i]! }))
+    if (requestedSkill && !names.includes(requestedSkill as Skill)) return block('training', 'UNSUPPORTED_TRAINING_SKILL', 'The executor supports only its observed melee styles.');
+    const lagging = requestedSkill ? {name:requestedSkill as Skill,ratio:0,remaining:1} : names.map((name, i) => ({ name, ratio: levels[i]! / goals[i]!, remaining: goals[i]! - levels[i]! }))
       .filter(s => s.remaining > 0).sort((a, b) => a.ratio - b.ratio || names.indexOf(a.name) - names.indexOf(b.name))[0];
     if (!lagging) return block("training", "PROPOSED_TARGETS_REACHED", "Observed 40 Attack/60 Strength/40 Defence reached; broader progression requires a new supported scope, not endless completion waits.");
     const styleSkills = (s: string) => s.split(",").map(n => normalize(n).replace("defense", "defence"));
-    const styles = o.activity!.styles.filter(s => styleSkills(s.skill).includes(lagging.name))
+    const styles = o.activity!.styles.filter(s => styleSkills(s.skill).includes(lagging.name) && (!requestedSkill || styleSkills(s.skill).length === 1))
       .sort((a, b) => styleSkills(a.skill).length - styleSkills(b.skill).length || a.index - b.index);
     const style = styles.find(s => s.index === o.activity!.style) ?? styles[0];
     if (!style) return block(`training:${lagging.name}`, "UNSUPPORTED_COMBAT_STYLE", "No actual observed style trains the selected lagging skill; never assume numeric style mappings.");

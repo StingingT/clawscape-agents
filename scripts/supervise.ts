@@ -9,7 +9,7 @@ const jobs=[
  {name:'stinger',cwd:root,args:['run','src/agent.ts','--character','stinger','--profile','stinger','--role','brawler','--build','ranged-magic','--forever']},
  {name:'coincrafter',cwd:root,args:['run','src/agent.ts','--character','coincrafter','--profile','coincrafter','--role','economy','--build','melee','--forever']},
  {name:'featherer',cwd:root,args:['run','src/agent.ts','--character','featherer','--profile','featherer','--role','resource','--build','melee','--forever']},
- {name:'astra',cwd:resolve(root,'../clawscape-autonomous-agent'),args:['src/live-cli.ts','run','--seconds','900']},
+ {name:'astra',cwd:resolve(root,'agents/advanced'),args:['src/live-cli.ts','run','--seconds','900']},
 ];
 let stopping=false;
 const children=new Map<string,ReturnType<typeof Bun.spawn>>();

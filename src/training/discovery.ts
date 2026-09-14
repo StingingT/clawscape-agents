@@ -186,16 +186,9 @@ export class TrainingDiscovery {
       const m = this.catalog.monsters.find(m => m.id === site.monsterId);
       return m && site.cooldownUntil <= now && !trainingReadiness(s, m, this.ranged) && site.points.some(p => p.level === origin.level);
     });
-    const requested=candidates.filter(site=>site.id==='black-knights-fortress');
-    if(this.character==='clawscout' && requested.length)candidates=requested;
-    const highestReadyTier = Math.max(0, ...candidates.map(site => site.combatLevel));
-    const higherTierReady = highestReadyTier >= 5;
-    const committedBefore = this.memory.commitment && this.memory.sites[this.memory.commitment.siteId];
-    if (higherTierReady && committedBefore && committedBefore.combatLevel < highestReadyTier) delete this.memory.commitment;
-    // Once a reviewed higher-tier source is viable, strongly prefer it over
-    // measured chicken/cow efficiency. Keep lower-tier sites as fallbacks if
-    // the stronger route is actually blocked or the source is empty.
-    const tierBias = (site: Site) => higherTierReady && site.combatLevel === highestReadyTier ? 10_000 : 0;
+    // Harder monsters are trials, not mandates. Sparse comparable evidence
+    // gets a small, decaying bonus; measured risk and throughput remain decisive.
+    const tierBias = (site: Site) => 1 / Math.sqrt(1 + (site.stats[context(s,this.ranged)]?.encounters ?? 0));
     const viable = candidates.sort((a, b) => tierBias(b) + this.score(b, s, Math.min(...b.points.map(p => distance(origin, p)))) - tierBias(a) - this.score(a, s, Math.min(...a.points.map(p => distance(origin, p)))));
     const commitment = this.memory.commitment;
     const committed = viable.find(site => site.id === commitment?.siteId);

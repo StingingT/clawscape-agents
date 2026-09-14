@@ -103,7 +103,7 @@ test('experienced agent can leave starter area for a reviewed higher-tier site',
   const action = (await d.next(s, route))[0];
   expect(action.fields?.trainingSite).toBe('barbarians');
 }));
-test('ranged Stinger replaces a stale goblin commitment with the strongest verified local tier', fixture(async (d, _file, _clock) => {
+test('ranged Stinger can replace a stale commitment without a mandatory highest-tier target', fixture(async (d, _file, _clock) => {
   const goblin: Monster = { ...barbarian, id: 101, name: 'Goblin', combatLevel: 5, minSkill: 5 };
   const guard: Monster = { ...barbarian, id: 9, name: 'Guard', combatLevel: 21, minSkill: 25 };
   const spider: Monster = { ...barbarian, id: 60, name: 'Giant spider', combatLevel: 27, minSkill: 35 };
@@ -122,8 +122,8 @@ test('ranged Stinger replaces a stale goblin commitment with the strongest verif
   expect(trainingReadiness(s, spider, true)).toBeUndefined();
   ranged.memory.commitment = { siteId: 'armed-goblins', since: 1, encounters: 20 };
   const action = (await ranged.next(s, route))[0];
-  expect(ranged.memory.commitment?.siteId).toBe('giant-spiders');
-  expect(action.fields?.trainingSite).toBe('giant-spiders');
+  expect(ranged.memory.commitment?.siteId).toBe('barbarians');
+  expect(action.fields?.trainingSite).toBe('barbarians');
 }));
 test('high-Strength melee can trial the next tier before an intermediate weapon buy', () => {
   const s = state();
@@ -131,13 +131,13 @@ test('high-Strength melee can trial the next tier before an intermediate weapon 
   s.combatStyle.weaponName = 'Bronze scimitar';
   expect(trainingReadiness(s, barbarian, false)).toBeUndefined();
 });
-test('measured starter efficiency cannot override a viable higher-tier trial', fixture(async d => {
+test('strong comparable measured performance can outweigh an untested higher-tier prior', fixture(async d => {
   const s = state();
   s.inventory = [{ name: 'Shrimps', count: 8, slot: 0, optionsWithIndex: [{ text: 'Eat', opIndex: 1 }] }];
   s.equipment = [{ name: 'Iron scimitar', count: 1, slot: 3 }];
   d.memory.sites.cows.stats['melee:Iron scimitar:def0:skill2'] = { encounters: 20, kills: 20, productive: 20, xp: 10000, ticks: 100, damage: 0, food: 0, ammo: 0, escapes: 0, deaths: 0 };
   const action = (await d.next(s, route))[0];
-  expect(action.fields?.trainingSite).toBe('barbarians');
+  expect(action.fields?.trainingSite).toBe('cows');
 }));
 test('loading collision map does not spend exploration budget or poison a site', fixture(async d => {
   expect((await d.next(state(), async () => ({ status: 'loading-map' })))[0].id).toContain('loading-map');
@@ -166,11 +166,11 @@ test('confirmed NPC zero HP is distinct from death and retreat penalties', fixtu
   expect(Object.values(d.memory.sites.chickens.stats)[0].deaths).toBe(1);
   expect(d.memory.sites.chickens.cooldownUntil).toBe(clock.now + 1_800_000);
 }));
-test('higher-tier guide trial supersedes starter efficiency after commitment', fixture(async d => {
+test('completed encounter evidence changes the preferred site rather than a hardcoded tier bonus', fixture(async d => {
   const s = state(); s.nearbyNpcs = [npc()];
   const a = { id: 'training-attack-chickens', type: 'interactNpc', fields: { trainingSite: 'chickens', npcIndex: 7 }, waitTicks: 6 };
   for (let i = 0; i < 3; i++) { d.beforeAction(s, a); const next = structuredClone(s); next.tick += 6; next.skills[0].experience += 60; next.nearbyNpcs = []; d.afterAction(s, next, a); s.tick += 10; }
-  expect((await d.next(s, route))[0].fields?.trainingSite).toBe('barbarians');
+  expect((await d.next(s, route))[0].fields?.trainingSite).toBe('chickens');
 }));
 test('higher-tier readiness clears a stale starter commitment', fixture(async d => {
   const s = state();
@@ -214,4 +214,11 @@ test('a fence detour cannot change the committed approach midway through travel'
   const first=(await d.next(s,route))[0];expect(first.fields?.x).toBe(100);
   s.player.worldX=85;s.tick+=2;
   expect((await d.next(s,route))[0].fields?.x).toBe(100);
+}));
+
+test('costly repeated higher-tier outcomes overcome its exploration bonus', fixture(async d => {
+  const s=state(),key='melee:Iron scimitar:def0:skill2';
+  d.memory.sites.cows.stats[key]={encounters:10,kills:10,productive:10,xp:500,ticks:100,damage:0,food:0,ammo:0,escapes:0,deaths:0};
+  d.memory.sites.barbarians.stats[key]={encounters:10,kills:0,productive:0,xp:10,ticks:1000,damage:500,food:100,ammo:0,escapes:5,deaths:2};
+  expect((await d.next(s,route))[0].fields?.trainingSite).toBe('cows');
 }));

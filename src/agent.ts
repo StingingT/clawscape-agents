@@ -18,7 +18,6 @@ import { actionReady } from './action-cooldown';
 import { advanceFoodBatch, loweDoor, rawFish, bankFood, type FoodBatch } from './food-batch';
 import { mustEscape } from './escape-policy';
 import {basicKit, canDefend} from './economy/defence';
-import {activeOpponent} from './progression-policy';
 import { loadGearCatalog } from './goals/catalog';
 import { EquipmentGoals, usable } from './goals/planner';
 import { PeerMarket } from './economy/market';
@@ -42,7 +41,9 @@ import { emptyLifecycle, loadLifecycle, saveLifecycle, setGoal, ensureTask, star
 import { actionGoalKind, actionMatchesGoal, goalTitle, isPreparationAction, meaningfulGoalResult, type ActionGoalKind } from './goals/action-goal';
 import { proposalsFromGoals } from './learning-pipeline';
 import { observeWorld, recordRouteResult } from './shared-world';
-import { LiveAgency } from './agency/live-adapter';
+import { LiveAgency, isSelection, type Selection, type Verification } from './agency/live-adapter.ts';
+import type { Task, TaskKind, Route } from './agency/world-model.ts';
+import { randomUUID } from 'node:crypto';
 
 type Json = Record<string, unknown>;
 type GameState = {
@@ -95,9 +96,8 @@ const profile = arg("profile", "default").replace(/[^a-z0-9_-]/gi, "");
 const role = arg("role", "brawler").replace(/[^a-z0-9_-]/gi, "");
 const build = arg("build", "melee").replace(/[^a-z0-9_-]/gi, "");
 const forever = process.argv.includes("--forever");
-// Social play is enabled by default.  --no-social is an emergency opt-out;
-// --forum remains accepted for backwards compatibility with older launchers.
-const forumEnabled = !process.argv.includes("--no-social");
+// Public forum posting is optional. Quiet local learning is the default.
+const forumEnabled = process.argv.includes('--forum') && !process.argv.includes('--no-social');
 const githubLearnings = process.argv.includes("--github-learnings");
 const bulkPickaxes = process.argv.includes("--bulk-pickaxes");
 const intervalMs = Number(arg("interval-ms", "5000"));
@@ -692,7 +692,6 @@ async function maybePublishGitHubLearning(state: GameState): Promise<void> {
 }
 
 function economyCandidates(state: GameState): Candidate[] {
-  if (role !== "economy") return [];
   if ((state.inventory?.length ?? 0) >= 28) return [];
   const result: Candidate[] = [];
   for (const loc of state.nearbyLocs ?? []) {
@@ -956,7 +955,7 @@ function bankingCandidates(state: GameState): Candidate[] {
   const equippedArrows = (state.equipment ?? []).filter(item => isFinishedArrow(text(item.name))).reduce((sum, item) => sum + Number(item.count ?? 1), 0);
   const surplusArrows = surplusArrowAmount(carriedArrows + equippedArrows);
   const foodMemory = work.learning?.food;
-  const tripFood = character==='clawscout'?Math.max(3,learnedFoodReserve(foodMemory)):learnedFoodReserve(foodMemory);
+  const tripFood = agency?.policy.foodTarget ?? (character==='clawscout'?Math.max(3,learnedFoodReserve(foodMemory)):learnedFoodReserve(foodMemory));
   const foodTotal = learnedFoodCount(inventory);
   const surplusFood = Math.max(0, foodTotal - tripFood);
   // Raw fish is an input and can always be stored. Cooked food is stored only
@@ -1066,7 +1065,7 @@ function bankingCandidates(state: GameState): Candidate[] {
 }
 
 function localEconomyDiscovery(state: GameState): Candidate[] {
-  if (role !== 'economy' || (state.inventory?.length ?? 0) >= 28) return [];
+  if ((state.inventory?.length ?? 0) >= 28) return [];
   const tree = (state.nearbyLocs ?? [])
     .filter((loc) => loc.reachable === true && /^(tree|oak|willow|maple|yew|magic)$/i.test(String(loc.name)) && level(state, 'woodcutting') >= harvestLevel(String(loc.name)))
     .filter((loc) => {
@@ -1329,7 +1328,7 @@ async function autonomousRecovery(state: GameState, blockedGoal: string): Promis
   return [{ id: 'autonomy-scan-current-area', type: 'scanNearbyLocs', fields: { radius: 32, reason: `No executable ${blockedGoal}; refresh local world evidence` }, waitTicks: 2 }];
 }
 
-function gearCandidates(state: GameState): Candidate[] {
+function gearCandidates(state: GameState, selectedSkill?: string): Candidate[] {
   const inventory = state.inventory ?? [];
   const equipment = state.equipment ?? [];
   const combatStyle = state.combatStyle;
@@ -1395,11 +1394,11 @@ function gearCandidates(state: GameState): Candidate[] {
   const strengthLevel = typeof strength?.level === "number" ? strength.level : 1;
   // Brawler progression: keep Defence and Prayer at 1, build Strength first,
   // briefly train Attack to 40 for rune-tier weapons, then return to Strength.
-  const desiredSkill = build === "ranged-magic" ? "ranged" : meleeTrainingSkill(attackLevel, strengthLevel);
+  const desiredSkill = selectedSkill ?? (build === "ranged-magic" ? "ranged" : meleeTrainingSkill(attackLevel, strengthLevel));
   const strengthStyle = styles.find((style) => {
     const trains = Array.isArray(style.trainsSkills) ? style.trainsSkills : [];
     const normalized = trains.map((skill) => text(skill).toLowerCase());
-    const forbidden = build === 'ranged-magic' ? ['defence', 'prayer', 'attack', 'strength'] : ['defence', 'prayer'];
+    const forbidden = selectedSkill ? ['prayer'] : build === 'ranged-magic' ? ['defence', 'prayer', 'attack', 'strength'] : ['defence', 'prayer'];
     return normalized.includes(desiredSkill) && !normalized.some(skill => forbidden.includes(skill));
   });
   if (typeof strengthStyle?.index === "number" && combatStyle?.currentStyle !== strengthStyle.index) {
@@ -1444,7 +1443,7 @@ function foodCandidates(state: GameState): Candidate[] {
   }).slice(0, 1);
 }
 
-function productionCandidates(state: GameState): Candidate[] {
+function productionCandidates(state: GameState, requestedFood = false): Candidate[] {
   // Economy work still needs a small learned food reserve for mine travel and
   // exploration. If that reserve is missing, allow the ordinary fish/cook
   // recovery route to take ownership temporarily, then resume production.
@@ -1453,10 +1452,10 @@ function productionCandidates(state: GameState): Candidate[] {
   // not let an old food-recovery checkpoint send him through Gerrant's shop
   // forever; food becomes relevant again when combat or a dangerous site is
   // actually observed.
-  if (role === 'economy' && !economyNeedsFood(state)) return [];
+  if (!requestedFood && role === 'economy' && !economyNeedsFood(state)) return [];
   const locs = state.nearbyLocs ?? [];
   const foodMemory = work.learning?.food;
-  const requiredFood = character==='clawscout'?Math.max(3,learnedFoodReserve(foodMemory)):learnedFoodReserve(foodMemory);
+  const requiredFood = agency?.policy.foodTarget ?? (character==='clawscout'?Math.max(3,learnedFoodReserve(foodMemory)):learnedFoodReserve(foodMemory));
   const carriedFood = learnedFoodCount(inv);
   if (!work.foodBatch && carriedFood < requiredFood) {
     // Cached stock is a lead; opening the bank refreshes quantities before withdrawal.
@@ -2142,358 +2141,197 @@ function learn(key: string, action: Candidate, value: number, nextKey: string, n
   q[key][action.id] = Number((old + alpha * (value + gamma * nextBest - old)).toFixed(6));
 }
 
-async function runEpisode(): Promise<void> {
-  console.log(JSON.stringify({ agent: "hybrid-q-learning", profile, character, steps, epsilon, forever }));
-  ensureLifecycleGoal();
-  await cliCall(["connect"]);
-  await customizeAppearance();
-  let state = stateFrom(await cliCall(["state"]));
-  observeWorld(state, character);
-  const unresolved = loadActionIntent(actionIntentPath);
-  if (unresolved && (unresolved.status === 'pending' || unresolved.status === 'outcome-unknown')) {
-    if (unresolved.beforeState) {
-      const reconciliation = verifyActionOutcome(unresolved.beforeState, state, unresolved);
-      if (reconciliation.verified) finishActionIntent(actionIntentPath, unresolved, 'verified', reconciliation.evidence);
-      else {
-        // A restart cannot safely replay a mutation whose server outcome is
-        // unknown. Quarantine it as failed after the one reconciliation read,
-        // so the controller can replan instead of throwing the same unresolved
-        // intent on every episode forever.
-        finishActionIntent(
-          actionIntentPath,
-          unresolved,
-          'failed',
-          reconciliation.evidence,
-          'restart reconciliation could not verify; quarantined without replay: ' + (reconciliation.reason ?? 'unknown outcome'),
-        );
-        console.error(JSON.stringify({ actionIntent: 'quarantined-after-restart', commandId: unresolved.commandId, reason: reconciliation.reason }));
-      }
-    } else {
-      // Older checkpoints did not retain a pre-action state. Do not replay
-      // them as mutations; quarantine the legacy record and require a fresh
-      // intent rather than risking a duplicate purchase or transfer.
-      finishActionIntent(actionIntentPath, unresolved, 'failed', [], 'legacy unknown intent lacks reconciliation state; no replay');
+/** Task-specific executors are asked for actions only AFTER the Director chooses a goal. */
+async function actionsForTask(state: GameState, task: Task): Promise<Candidate[]> {
+  if (state.player?.isDead === true) return [];
+  if (state.player?.combat?.inCombat === true) return [{id:'continue-combat',type:'wait',waitTicks:2}];
+  if (state.modalOpen === true && state.inventory?.length === 0) return [{id:'accept-design',type:'acceptCharacterDesign',waitTicks:2}];
+  if (state.dialog?.isOpen === true) {
+    if(task.kind==='production'&&work.economy){
+      const metal=metalDialog(state,work.economy);if(metal)return [metal];
+      const product=work.economy.product&&productionDialog(state.dialog.options??[],work.economy.product);
+      if(product&&Number.isInteger(product.index))return [{id:'select-planned-product',type:'clickDialogOption',fields:{optionIndex:product.index},waitTicks:4}];
+    }
+    return dialogCandidates(state);
+  }
+  if ((state.inventory?.length ?? 0) === 0) {
+    const guide=(state.nearbyNpcs??[]).find(n=>/runescape guide|tutorial guide/i.test(String(n.name))&&n.reachable===true);
+    if(guide)return [{id:'tutorial-guide',type:'talkToNpc',fields:{npcIndex:guide.index},waitTicks:3}];
+  }
+  if (state.bank?.isOpen === true) { const transaction=bankingCandidates(state);return transaction.length?transaction:[{id:'close-bank',type:'closeModal',waitTicks:1}]; }
+  switch(task.kind) {
+    case 'food': return productionCandidates(state,true);
+    case 'ammunition': return [...quiverRefill(state), ...ammoCandidates(state), ...arrowProductionCandidates(state), ...safeAmmoSupplyCandidates(state)];
+    case 'bank': return bankingCandidates(state);
+    case 'equipment': return gearCandidates(state);
+    case 'combat': {
+      if(!state.combatStyle?.styles?.some((s:any)=>s.trainsSkills?.some((k:string)=>k.toLowerCase()===task.skill)))return [];
+      const gear=gearCandidates(state,task.skill);
+      if(gear.length)return gear;
+      return training ? training.next(state,(from,to)=>navigator!.assess(from,to)) : [];
+    }
+    case 'production': {
+      work.economy ??= {bankItems:work.bankItems??[]};
+      selectWork(state,work.economy);
+      const result=economyNext(state,work.economy,id=>!actionReady(work.failures[id]));
+      saveWork(); return result;
+    }
+    case 'gathering': return [...economyCandidates(state),...localEconomyDiscovery(state)];
+    case 'exploration': {
+      if(!task.route)return [];
+      const route=await navigator!.assess(position(state),task.route);
+      if(route.status==='loading-map')return [{id:'observe-map-load',type:'wait',waitTicks:2}];
+      if(route.status!=='ready')return [];
+      return [{id:task.id,type:'walkTo',fields:{...task.route,running:true,reason:task.route.evidence},waitTicks:2}];
     }
   }
-  training?.observe(state);
-  let preparedOptions: Candidate[] | undefined;
-  // Social work is optional and must never terminate a gameplay episode.
-  try { await socialPulse(state); } catch (error) { console.error(JSON.stringify({ social: 'deferred', error: String(error).slice(0, 180) })); }
-  try { await syncForum(state); } catch (error) { console.error(JSON.stringify({ forum: 'deferred', error: String(error).slice(0, 180) })); }
-  await maybePublishGitHubLearning(state);
-  console.log(JSON.stringify({ plan: progression(state), attack: level(state, "attack"), strength: level(state, "strength") }));
-  for (let step = 1; step <= steps; step++) {
-    let key = stateKey(state);
-    appendFileSync(observationsPath, JSON.stringify({ time: new Date().toISOString(), tick: state.tick, position: { x: state.player?.worldX, z: state.player?.worldZ }, skills: Object.fromEntries((state.skills ?? []).map((s) => [String(s.name), s.level])), equipment: state.equipment ?? [], npcs: (state.nearbyNpcs ?? []).map((n) => ({ name: n.name, combatLevel: n.combatLevel, x: n.x, z: n.z, reachable: n.reachable })), locs: (state.nearbyLocs ?? []).map((l) => ({ name: l.name, x: l.x, z: l.z, reachable: l.reachable }))}) + "\n");
-    // A prepared candidate contains observed NPC/location indices and route
-    // assumptions. Reusing it after the world changes was a major source of
-    // bank/shop and recovery loops. Re-plan from the fresh verified state on
-    // every iteration; learning persists in the Q-table and lifecycle file.
-    const rawOptions = await candidates(state);
-    const options = goalCompatibleOptions(rawOptions);
-    if (options.length === 0) {
-      // An empty candidate set must never end a forever episode silently. It
-      // previously caused the controller to reconnect and print the same plan
-      // indefinitely while the character did nothing. Try the normal bounded
-      // recovery first, then make a small read-only world scan so the next
-      // planning pass has fresh information.
-      const recovery = available(await autonomousRecovery(state, 'no-candidates'));
-      if (recovery.length) {
-        preparedOptions = recovery;
-        continue;
+}
+
+function urgentAgencyAction(state:GameState):Candidate|undefined {
+  const heal=foodCandidates(state)[0];
+  if(heal) return state.bank?.isOpen||state.shop?.isOpen||state.dialog?.isOpen
+    ? {id:'close-interface-to-heal',type:'closeModal',waitTicks:1}:heal;
+  if(state.player?.combat?.targetType==='player' || combatDisposition(state,false,build==='ranged-magic')==='recover')
+    return {id:'emergency-retreat',type:'retreat',waitTicks:2};
+}
+function verification(value:ReturnType<typeof verifyActionOutcome>):Verification {
+  return {status:value.verified?'verified':value.uncertain?'unknown':'rejected',evidence:value.evidence,reason:value.reason};
+}
+async function executeAgencyAction(state:GameState,action:Candidate):Promise<{next:GameState;result:Json}> {
+  if(action.type==='walkTo'||action.type==='retreat') {
+    const trip=action.type==='retreat'?await navigator!.escape(state):await navigator!.step({x:Number(action.fields?.x),z:Number(action.fields?.z),level:Number(action.fields?.level??0)},state);
+    const next=trip.state.tick===state.tick?stateFrom(await cliCall(['wait','2'])):trip.state;
+    return {next,result:{navigation:trip.navigation}};
+  }
+  if(action.type==='wait') {
+    const result=await cliCall(['wait',String(action.waitTicks)]);return {next:stateFrom(result),result};
+  }
+  const fields:Json={...action.fields,reason:action.fields?.reason??action.id};
+  for(const key of ['trainingSite','goalMethod','defensiveGoal','expectedItemId','evidence','id'])delete fields[key];
+  if(action.type==='shopBuy'||action.type==='shopSell'){delete fields.itemId;delete fields.expectedPrice;}
+  const type=action.type==='closeModal'&&state.shop?.isOpen?'closeShop':action.type;
+  const result=await cliCall(['act',type,'--json',JSON.stringify(fields)]);
+  return {next:stateFrom(await cliCall(['wait',String(action.waitTicks)])),result};
+}
+function observeAgencyResult(before:GameState,after:GameState,action:Candidate):void {
+  work.learning??={};work.learning.food??={};
+  recordFoodExperience(work.learning.food,before,after,action.id);
+  recordObservedDrops(work.learning,before,after,action.id);
+  training?.afterAction(before,after,action);
+  if(action.fields?.defensiveGoal)defensiveGoals.after(before,after,action);
+  else equipmentGoals.after(before,after,action);
+  if(work.economy){observeWork(before,after,action,work.economy);observeBow(before,after,action,work.economy);}
+  if(after.bank?.isOpen===true)work.bankItems=after.bank.items as Json[];
+  if(before.bank?.isOpen===true && after.bank?.isOpen===false){delete work.foodWithdrawalPending;if(work.foodBatch?.phase==='bank')delete work.foodBatch;}
+  delete work.failures[action.id];saveWork();
+}
+
+async function runEpisode(): Promise<void> {
+  if(!agency)throw new Error('AGENCY_NOT_INITIALIZED');
+  await cliCall(['connect']);
+  let state=stateFrom(await cliCall(['state']));
+  // The legacy ledger is never converted to "failed" merely to permit another mutation.
+  const legacy=loadActionIntent(actionIntentPath);
+  if(legacy && ['pending','outcome-unknown'].includes(legacy.status)) {
+    const check=legacy.beforeState?verifyActionOutcome(legacy.beforeState,state,legacy):undefined;
+    if(!check?.verified)throw new Error('LEGACY_ACTION_RECONCILIATION_REQUIRED:'+legacy.commandId);
+    finishActionIntent(actionIntentPath,legacy,'verified',check.evidence);
+  }
+  for(let step=0;step<steps;step++) {
+    state=stateFrom(await cliCall(['state']));
+    training?.observe(state);
+    const safetyPending=agency.pending('safety');
+    if(safetyPending) {
+      const check=verifyActionOutcome(safetyPending.before,state,safetyPending.action);
+      agency.record(safetyPending.commandId,state,verification(check));
+      if(agency.pending('safety')){await cliCall(['wait','2']);continue;}
+    }
+    // Safety can preempt a goal but cannot overwrite its pending action or choose ordinary work.
+    const emergency=urgentAgencyAction(state);
+    if(emergency) {
+      const commandId=agency.beginSafety(emergency,state,randomUUID());
+      try {
+        const {next,result}=await executeAgencyAction(state,emergency);
+        agency.record(commandId,next,verification(verifyActionOutcome(state,next,emergency,result)));
+        state=next;
+      } catch(error) {
+        agency.record(commandId,state,{status:'unknown',evidence:[],reason:String(error)});
       }
-      const px = Number(state.player?.worldX ?? 0);
-      const pz = Number(state.player?.worldZ ?? 0);
-      const scanFailures = work.failures['autonomy-world-scan']?.count ?? 0;
-      const direction = [
-        { dx: 8, dz: 4 }, { dx: -8, dz: 4 }, { dx: 4, dz: -8 }, { dx: -4, dz: -8 },
-      ][scanFailures % 4]!;
-      preparedOptions = scanFailures >= 2
-        ? [{ id: `autonomy-explore-waypoint-${scanFailures % 4}`, type: 'walkTo', fields: { x: px + direction.dx, z: pz + direction.dz, level: Number(state.player?.level ?? 0), running: true, reason: 'leave an unproductive local state and discover a different area' }, waitTicks: 4 }]
-        : [{ id: 'autonomy-world-scan', type: 'scanNearbyLocs', fields: { radius: 24, reason: 'refresh world after planner returned no candidates' }, waitTicks: 2 }];
       continue;
     }
-    let action = choose(key, options);
-    // The agency planner selects only from already executable candidates; it
-    // cannot invent a CLI command. Existing safety, navigation and fresh
-    // observation gates remain authoritative in the executor below.
-    if (agency && options.length > 0) {
-      const planned = agency.choose(options, agencyFacts(state), `${character}:${progression(state).stage ?? 'live'}`, {
-        spendableGp: Math.max(0, coinsIn((state.inventory ?? []) as Json[]) + 1_000_000),
-        maxLossGp: 1,
-        maxDeaths: 1,
-        maxDurationMs: 300_000,
-      });
-      if (planned) action = planned as Candidate;
-    }
-    // A planner can alternate between two individually plausible routes while
-    // making no meaningful progress. Treat that as a cycle and force a fresh
-    // recovery route; this is especially important when a shop/bank target is
-    // technically reachable but its interaction never becomes executable.
-    work.autonomy ??= {};
-    const recent = (work.autonomy.recentActions ?? []).slice(-3);
-    const alternating = recent.length === 3 && new Set([...recent, action.id]).size <= 2;
-    const serviceAction = (id: string) => /bank|shop|trade|fishing-tool|ammo-replan|close-(finished|stalled)-shop/i.test(id);
-    const serviceCycle = recent.length >= 3 && [...recent, action.id].every(serviceAction)
-      && new Set([...recent, action.id]).size <= 3;
-    // A productive-looking label is not proof that the action is producing
-    // anything. Break A-B-A-B loops after four unchanged observations too;
-    // otherwise metal banking and resource actions can oscillate forever.
-    const recoveryCycle = recent.length >= 2
-      && recent.every(id => id === action.id)
-      && /^(autonomy-(force|explore|resume|world-scan)|.*recovery|.*route)/i.test(action.id);
-    const cycle = ((alternating || serviceCycle) && (progressTimedOut(work.autonomy) || work.autonomy.active?.lastProgress === 0 || serviceCycle)) || recoveryCycle;
-    if (cycle) {
-      noteFailure(action);
-      // One repeated recovery attempt is not a reason to retry the same edge.
-      // Cool the exact action immediately and let the goal planner select a
-      // different route, supply activity, or encounter.
-      if (recoveryCycle) noteFailure(action);
-      const previous = recent[recent.length - 1];
-      if (previous && previous !== action.id) noteFailure({ id: previous, type: 'recovery', waitTicks: 1 });
-      const recovery = available(await autonomousRecovery(state, 'action-cycle-recovery'))
-        .filter(candidate => candidate.id !== action.id);
-      if (recovery.length) {
-        action = recovery[0]!;
-        preparedOptions = undefined;
-      } else {
-        const alternate = rawOptions.filter(candidate => candidate.id !== action.id);
-        if (alternate.length) {
-          action = choose(key, alternate);
-          preparedOptions = undefined;
-        } else {
-          work.autonomy.active = undefined;
-          work.autonomy.recentActions = [];
-          preparedOptions = undefined;
-          saveWork();
-          // No candidate survived the cycle guard. Start a new planning pass
-          // rather than dispatching the same blocked action again.
-          continue;
-        }
+    const pending=agency.pending();
+    if(pending) {
+      const check=verifyActionOutcome(pending.before,state,pending.action);
+      agency.record(pending.commandId,state,verification(check));
+      if(agency.pending()) {
+        console.log(JSON.stringify({agency:'reconciling',commandId:pending.commandId,reason:check.reason}));
+        await cliCall(['wait','2']);continue;
       }
+      if(check.verified)observeAgencyResult(pending.before,state,pending.action as Candidate);
     }
-    work.autonomy.recentActions = [...recent, action.id].slice(-8);
-    saveWork();
-    if (action.id.startsWith('goal-') || action.id.startsWith('economy-metal-') || action.id.startsWith('economy-bow-') || action.id.startsWith('lobster-')) {
-      const fresh = stateFrom(await cliCall(['state']));
-      if (!equipmentGoals.validate(fresh, action) || !validateMetal(fresh,action,state) || !validateBow(fresh,action,state) || !validateFishing(fresh,action,state) || shouldHeal(fresh, build === 'ranged-magic') || combatDisposition(fresh, role === 'economy', build === 'ranged-magic') !== 'quiet') {
-        state = fresh; preparedOptions = undefined; continue;
-      }
-      state = fresh; key = stateKey(state);
+    // No legacy action candidates or synthetic per-click goals are constructed before this selection.
+    const planned=agency.plan(state);
+    if(!isSelection(planned)) {
+      console.log(JSON.stringify({agency:planned.type,detail:planned,goal:agency.summary().goal}));
+      await cliCall(['wait','3']);continue;
     }
-    if (action.fields?.trainingSite) {
-      // Route research is asynchronous. Resolve safety and ephemeral NPC indices
-      // against a fresh observation before dispatch through the sole owner.
-      const fresh = stateFrom(await cliCall(['state']));
-      training?.observe(fresh);
-      if (!training?.validateAction(fresh, action)) { state = fresh; preparedOptions = undefined; continue; }
-      state = fresh; key = stateKey(state);
-    }
-    training?.beforeAction(state, action);
-    peerMarket?.before(action);
-    ensureLifecycleGoal();
-    startConcreteGoal(action);
-    startTask(goalLifecycle);
-    advanceGoal(goalLifecycle, 'execute');
-    saveLifecycle(goalLifecyclePath, goalLifecycle);
-    const started = Date.now();
-    let agencyCommandId: string | undefined;
-    if (agency) {
-      try {
-        agencyCommandId = agency.begin(action, agencyFacts(state), `${character}:${progression(state).stage ?? 'live'}`, undefined, `${character}-${Date.now()}-${action.id}`);
-      } catch (error) {
-        console.log(JSON.stringify({ agency: 'planner-deferred', action: action.id, error: String(error).slice(0, 160) }));
-      }
-    }
-    const intent = beginActionIntent(actionIntentPath, {
-      commandId: `${character}-${Date.now()}-${action.id}`,
-      actionId: action.id,
-      type: action.type,
-      fields: { ...(action.fields ?? {}) },
-      taskId: goalLifecycle.active?.task?.id ?? goalLifecycle.active?.id ?? String(work.economy?.goal ?? 'unspecified'),
-      startedAt: new Date().toISOString(),
-      expectedEffect: action.fields?.reason ? String(action.fields.reason) : action.id,
-      beforeState: state,
-    });
-    let result: Json;
+    const options=available(await actionsForTask(state,planned.task));
+    if(!options.length){agency.blocked('Selected task has no feasible current executor step: '+planned.task.id);continue;}
+    const action=choose(stateKey(state),options);
+    // One-item purchases use the current quoted price; no unbounded bulk purchase estimate.
+    if(action.type==='shopBuy')action.fields={...action.fields,amount:1};
+    const fresh=stateFrom(await cliCall(['state']));
+    if(urgentAgencyAction(fresh)){state=fresh;continue;}
+    if(action.fields?.trainingSite&&!training?.validateAction(fresh,action)){state=fresh;continue;}
+    if(action.id.startsWith('goal-')&&!equipmentGoals.validate(fresh,action)){state=fresh;continue;}
+    if(!validateMetal(fresh,action,state)||!validateBow(fresh,action,state)||!validateFishing(fresh,action,state)){state=fresh;continue;}
+    state=fresh;
+    const commandId=randomUUID();
+    try { agency.begin(planned,action,state,commandId); }
+    catch(error) { if(!agency.pending())agency.blocked('Pre-dispatch validation refused '+action.id+': '+String(error));else throw error;continue; }
+    training?.beforeAction(state,action);
     try {
-      const dispatchedFields: Json = { ...(action.fields ?? {}), reason: action.fields?.reason ?? action.id };
-      delete dispatchedFields.trainingSite;
-      delete dispatchedFields.goalMethod;
-      delete dispatchedFields.defensiveGoal;
-      delete dispatchedFields.expectedItemId;
-      if (action.type === 'shopBuy' || action.type === 'shopSell') { delete dispatchedFields.itemId; delete dispatchedFields.expectedPrice; }
-      let waited: Json;
-      if (action.type === 'retreat') {
-        const trip = await navigator!.escape(state); waited = { state: trip.state }; result = { navigation: trip.navigation }; travelAction = null;
-        if (trip.state.tick === state.tick) waited = await cliCall(['wait', '2']);
-      } else if (action.type === "walkTo") {
-        if (role === 'economy' && action.id === 'walk-to-varrock-west-bank' && !work.bankReturn) { work.bankReturn = position(state); work.bankReturnReady = false; saveWork(); }
-        const trip = await navigator!.step({ x: Number(dispatchedFields.x), z: Number(dispatchedFields.z), level: Number(dispatchedFields.level ?? 0) }, state);
-        waited = { state: trip.state };
-        // A rejected/interrupted leg may have dispatched nothing. Advance the
-        // observation clock rather than spinning through cached state 40 times.
-        if (trip.state.tick === state.tick && trip.navigation.status !== 'arrived') waited = await cliCall(['wait', '2']);
-        result = { navigation: trip.navigation };
-        travelAction = ['progress', 'loading-map', 'replanning'].includes(trip.navigation.status) ? action : null;
-        if (trip.navigation.status === 'blocked') noteFailure(action);
-        console.log(JSON.stringify({ action: action.id, navigation: trip.navigation }));
-      } else {
-        const dispatchType = action.type === 'closeModal' && state.shop?.isOpen ? 'closeShop' : action.type;
-        result = await cliCall(action.type === "wait" ? ["wait", String(action.waitTicks)] : ["act", dispatchType, "--json", JSON.stringify(dispatchedFields)]);
-        waited = action.type === 'wait' ? result : await cliCall(['wait', String(action.waitTicks)]);
-        // Gathering may take multiple server rolls. Keep the same operation
-        // alive while it animates, checking safety and inventory between waits.
-        if (/^(economy-|gather-safe|chop-)/.test(action.id) && action.type === 'interactLoc') {
-          for (let poll = 0; poll < 6; poll++) {
-            const observed = stateFrom(waited);
-            if (Number(observed.player?.hp) < Number(state.player?.hp) || isThreatened(observed) || observed.inventory?.length !== state.inventory?.length || observed.player?.animId === -1 || observed.dialog?.isOpen) break;
-            waited = await cliCall(['wait', '2']);
-          }
-        }
-      }
-      const next = stateFrom(waited);
-      const outcome = verifyActionOutcome(state, next, action, result);
-      if (agency && agencyCommandId) {
-        agency.record(agencyCommandId, action, agencyFacts(state), outcome.verified, outcome.evidence, Date.now() - started, 0, 0, next.player?.lifeId !== state.player?.lifeId ? 1 : 0);
-      }
-      const intentEvidence: string[] = [...outcome.evidence];
-      if (next.tick !== state.tick) intentEvidence.push(`tick:${state.tick}->${next.tick}`);
-      finishActionIntent(actionIntentPath, intent, outcome.verified ? 'verified' : (outcome.uncertain ? 'outcome-unknown' : 'rejected'), intentEvidence, outcome.verified ? undefined : outcome.reason ?? 'action-specific outcome not verified');
-      work.learning ??= {};
-      work.learning.food ??= {};
-      recordFoodExperience(work.learning.food, state, next, action.id);
-      recordObservedDrops(work.learning, state, next, action.id);
-      if(action.id.startsWith('learn-drop-target-'))work.learning.dropProbeAt=Date.now()+600_000;
-      if (action.id.startsWith('rune-learning-')) {
-        work.learning.runeProbeAt = Date.now() + (action.id === 'rune-learning-scan' ? 15_000 : 600_000);
-      }
-      saveWork();
-      peerMarket?.after(next,action);
-      if(action.fields?.defensiveGoal) defensiveGoals.after(state,next,action);
-      else equipmentGoals.after(state, next, action);
-      training?.afterAction(state, next, action);
-      if (next.player?.lifeId !== state.player?.lifeId) { travelAction = null; delete work.bankReturn; delete work.bankReturnReady; saveWork(); }
-      if (/^bank(Deposit|Withdraw)$/.test(action.type)) {
-        if (!verifyBankTransfer(state, next, action)) throw new Error('Bank transfer did not change inventory and bank counts');
-        work.bankItems = next.bank?.items as Json[]; saveWork();
-        console.log(JSON.stringify({ bankTransfer: action.type, slot: action.fields?.slot, verified: true }));
-      }
-      if (action.type === 'closeModal' && next.bank?.isOpen === true) throw new Error('Bank did not close');
-      if (action.type === 'closeModal' && state.bank?.isOpen === true && next.bank?.isOpen === false) {
-        if (work.bankReturn) work.bankReturnReady = true;
-        if (work.foodWithdrawalPending) delete work.foodWithdrawalPending;
-        saveWork();
-      }
-      const freshMessages = ((next as any).gameMessages ?? []).filter((m: any) => m.tick > Number(state.tick ?? 0));
-      if (action.id.startsWith('cautious-pickpocket-')) {
-        work.pickpocketStreak = (work.pickpocketStreak ?? 0) + 1;
-        saveWork();
-      }
-      if (action.id.startsWith('buy-arrows-') || /^bank-(surplus-coins|deposit)/.test(action.id)) {
-        delete work.pickpocketStreak;
-        saveWork();
-      }
-      if(role==='economy'&&work.economy){observeWork(state,next,action,work.economy);observeBow(state,next,action,work.economy);saveWork();}
-      if (freshMessages.some((m: any) => /you need|can't reach|cannot reach|can't light a fire here|cannot light a fire here|inventory.*full|don't have|do not have|not enough/i.test(m.text))) noteFailure(action);
-      const value = reward(state, next, action);
-      work.autonomy ??= {};
-      // Combat is server-tick driven. A wait while an active target exchanges
-      // hits is not a failed task merely because inventory and coordinates did
-      // not change during that one short observation window.
-      const transientNavigation = action.id === 'continue-combat' || action.id === 'autonomy-map-loading' || result.navigation?.status === 'loading-map' || result.navigation?.status === 'replanning';
-      const autonomy = recordAutonomy(work.autonomy, state, next, action, Date.now(), transientNavigation);
-      const timedOut = progressTimedOut(work.autonomy);
-      const verifiedProgress = autonomy.progress || value > 0;
-      const completedGoal = meaningfulGoalResult(state, next, action, value);
-      // Preparation advances the current goal but does not finish it. Only a
-      // verified productive result enters review/learn, so bank and shop
-      // actions cannot become an accidental permanent objective.
-      if (completedGoal) {
-        recordGoalOutcome(goalLifecycle, {
-          at: Date.now(),
-          status: 'success',
-          evidence: [`verified productive result: ${action.id}`, ...intentEvidence],
-        });
-        learnGoal(goalLifecycle, `method ${action.id} produced a verified result`, `retain-or-refine:${action.id}`, 'confirmed');
-      } else if (timedOut) {
-        recordGoalOutcome(goalLifecycle, {
-          at: Date.now(),
-          status: 'failure',
-          evidence: [`bounded attempt produced no meaningful result: ${action.id}`],
-          reason: 'progress timeout',
-        });
-        blockGoal(goalLifecycle, `no measurable progress from ${action.id}`);
-      }
-      saveLifecycle(goalLifecyclePath, goalLifecycle);
-      if (!autonomy.stalled && (autonomy.progress || value > 0)) delete work.failures[action.id];
-      if (autonomy.stalled) {
-        // Store the failure so the next planning pass must select another
-        // route, supply task, encounter or production objective.
-        noteFailure(action);
-        console.log(JSON.stringify({ autonomy: 'blocked-no-progress', intent: autonomy.intent, action: action.id }));
-      } else saveWork();
-      if (timedOut) {
-        noteFailure(action);
-        work.autonomy.active = undefined;
-        work.autonomy.recentActions = [];
-        const timeoutRecovery = available(await autonomousRecovery(next, 'five-minute-no-progress'));
-        preparedOptions = timeoutRecovery.length ? timeoutRecovery : undefined;
-        saveWork();
-        console.log(JSON.stringify({ autonomy: 'action-timeout', timeoutMinutes: 5, action: action.id, replacement: timeoutRecovery[0]?.id ?? null }));
-      } else {
-        preparedOptions = await candidates(next);
-      }
-      learn(key, action, value, stateKey(next), preparedOptions ?? []);
-      appendFileSync(experiencePath, `${JSON.stringify({ time: new Date().toISOString(), step, key, action, result, reward: value, nextKey: stateKey(next), elapsedMs: Date.now() - started })}\n`);
-      console.log(JSON.stringify({ step, action: action.id, reward: value, tick: next.tick, inventory: next.inventory?.length ?? 0, plan: progression(next) }));
-      const previousState = state;
-      state = next;
-      observeWorld(state, character);
-      recordRouteResult(previousState, next, action, result, character);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if(action.fields?.defensiveGoal) defensiveGoals.failed(action,message);
-      else equipmentGoals.failed(action, message);
-      noteFailure(action); travelAction = null;
-      recordGoalOutcome(goalLifecycle, {
-        at: Date.now(),
-        status: 'failure',
-        evidence: [`action failed: ${action.id}`],
-        reason: error instanceof Error ? error.message : String(error),
-      });
-      blockGoal(goalLifecycle, `${action.id}: ${error instanceof Error ? error.message : String(error)}`);
-      saveLifecycle(goalLifecyclePath, goalLifecycle);
-      training?.actionFailed();
-      preparedOptions = undefined;
-      q[key] ??= {};
-      q[key][action.id] = (q[key][action.id] ?? 0) - 1;
-      console.error(JSON.stringify({ step, action: action.id, error: message }));
-      await discussForumProblem(message);
-      if (/another action is in progress/i.test(message)) {
-        // Allow an in-flight server action to finish before the next episode.
-        await Bun.sleep(5000);
-      }
-      state = stateFrom(await cliCall(['state']));
+      const {next,result}=await executeAgencyAction(state,action);
+      const check=verifyActionOutcome(state,next,action,result);
+      agency.record(commandId,next,verification(check));
+      if(check.verified)observeAgencyResult(state,next,action);
+      appendFileSync(experiencePath,JSON.stringify({at:new Date().toISOString(),commandId,goal:planned.decision.goal.id,
+        method:planned.method.id,action,outcome:verification(check)})+'\n');
+      console.log(JSON.stringify({agency:'step',commandId,goal:agency.summary().goal,outcome:verification(check)}));
+      state=next;
+    } catch(error) {
+      // A transport exception does not prove the server rejected the command.
+      agency.record(commandId,state,{status:'unknown',evidence:[],reason:String(error)});
+      console.error(JSON.stringify({agency:'outcome-unknown',commandId,error:String(error).slice(0,240)}));
     }
   }
-  writeFileSync(qPath, `${JSON.stringify(q, null, 2)}\n`);
-  console.log(JSON.stringify({ complete: true, qTable: qPath, experience: experiencePath, observations: observationsPath }));
+  // Optional public conversation is explicitly enabled, quiet by default, and independent of goal ownership.
+  if(forumEnabled&&!agency.pending()&&!agency.pending('safety')&&!urgentAgencyAction(state)){try{await syncForum(state);}catch(error){console.error(JSON.stringify({forum:'deferred',error:String(error).slice(0,160)}));}}
 }
 
 async function main(): Promise<void> {
   const releaseController = acquireController(resolve(dataDir, 'controller.lock'));
+  try {
   peerMarket = new PeerMarket(resolve(root,'data/shared/market.sqlite'),character,gearCatalog,()=>Date.now(),process.env.CLAWSCAPE_SERVER??'https://clawscape.xyz');
   if (['clawscout', 'stinger', 'coincrafter', 'astra', 'featherer'].includes(character)) {
-    training = new TrainingDiscovery(resolve(dataDir, 'training-knowledge.json'), character, loadCatalog(), build === 'ranged-magic', role === 'economy');
+    training = new TrainingDiscovery(resolve(dataDir, 'training-knowledge.json'), character, loadCatalog(), build === 'ranged-magic', false);
   }
-  agency = new LiveAgency(resolve(dataDir, 'agency-memory.json'), character, process.env.CLAWSCAPE_SERVER ?? 'clawscape', 'live');
+  const oldAgencyPath=resolve(dataDir,'agency-memory.json');
+  if(existsSync(oldAgencyPath)&&JSON.parse(readFileSync(oldAgencyPath,'utf8')).pending)
+    throw new Error('LEGACY_AGENCY_INTENT_REQUIRES_RECONCILIATION');
+  const policyPath=resolve(dataDir,'agency-policy.json');
+  const policy=existsSync(policyPath)?JSON.parse(readFileSync(policyPath,'utf8')):{};
+  agency = new LiveAgency(resolve(dataDir,'agency-v2.json'), {agent:character,world:process.env.CLAWSCAPE_SERVER??'clawscape',revision:gearCatalog.namespace}, {
+    policy:{foodTarget:Math.max(3,learnedFoodReserve(work.learning?.food)),...policy},
+    supported:['food','ammunition','equipment','bank','combat','production','gathering','exploration'],
+    preferences:role==='economy'?{crafting:2,gathering:1}:role==='resource'?{gathering:2}:{combat:2},
+    routes:Object.entries(WORLD_ROUTES).map(([id,p])=>({id,...p,level:0,evidence:'bundled route lead; arrival not yet personally verified'})),
+  });
   navigator = new Navigator({
     state: async () => stateFrom(await cliCall(['state'])),
     act: async (type, fields) => cliCall(['act', type, '--json', JSON.stringify({ ...fields, reason: 'collision-route navigation' })]),
     wait: async ticks => stateFrom(await cliCall(['wait', String(ticks)])),
   }, resolve(dataDir, 'navigation.json'));
-  try {
   do {
     try {
       await runEpisode();
@@ -2506,7 +2344,7 @@ async function main(): Promise<void> {
     }
     if (forever) await Bun.sleep(Math.max(1000, intervalMs));
   } while (forever);
-  } finally { navigator.close(); peerMarket?.close(); releaseController(); }
+  } finally { navigator?.close(); peerMarket?.close(); releaseController(); }
 }
 
 main().catch((error: unknown) => {
