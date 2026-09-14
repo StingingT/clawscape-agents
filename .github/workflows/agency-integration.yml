@@ -1,25 +1,41 @@
-name: Validate goal-first integration
+name: Apply tested agency integration
 on:
   push:
     branches: [codex/authoritative-goal-integration]
 permissions:
   contents: read
 jobs:
-  prepare:
-    if: github.repository == 'StingingT/clawscape-agents'
+  apply:
+    if: github.repository == 'StingingT/clawscape-agents' && contains(github.event.head_commit.message, '[apply-agency]')
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22.16.0'
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: '1.3.10'
-      - name: Package pinned offline test runtime only
+      - name: Apply exact reviewed source versions
+        run: python3 .ci/apply.py
+      - name: Install pinned test dependencies
+        working-directory: agents/advanced
+        run: bun install --frozen-lockfile
+      - run: npm run test:agency
+      - run: npm run test:integration
+      - run: npm run check:agency
+      - name: Native outcome, training and Astra tests
+        run: bun test src/action-outcome.test.ts src/training/discovery.test.ts agents/advanced/tests/agency-policy.test.ts
+      - name: Commit validated readable source on this branch only
         run: |
-          mkdir -p review-runtime
-          cp "$(command -v bun)" review-runtime/bun
-          npm install --prefix review-runtime --ignore-scripts zod@4.1.5
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: agency-offline-runtime
-          path: review-runtime/
-          retention-days: 1
+          test "$GITHUB_REF" = 'refs/heads/codex/authoritative-goal-integration'
+          rm .ci/apply.py .ci/shared-edits.py .ci/other-edits.py .github/workflows/agency-integration.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/agent.ts src/agency/director.ts src/agency/types.ts src/action-outcome.test.ts src/training/discovery.ts src/training/discovery.test.ts agents/advanced/src/live-cli.ts agents/advanced/src/live-policy.ts docs/AGENCY_REQUIREMENTS.md package.json scripts/supervise.ts .ci/apply.py .ci/shared-edits.py .ci/other-edits.py .github/workflows/agency-integration.yml
+          git diff --cached --check
+          git commit -m 'Apply and validate authoritative goal-first controller integration'
+          git push origin HEAD:refs/heads/codex/authoritative-goal-integration
