@@ -1,0 +1,22 @@
+name: Recovery source snapshot
+on:
+  push:
+    branches: [codex/astra-startup-journal-recovery]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    if: github.event.head_commit.message == 'Prepare read-only source snapshot for startup recovery tests'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Archive tracked source only
+        run: git archive --format=zip -o "$RUNNER_TEMP/recovery-source.zip" HEAD
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: recovery-source
+          path: ${{ runner.temp }}/recovery-source.zip
+          retention-days: 1
