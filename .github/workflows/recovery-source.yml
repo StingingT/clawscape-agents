@@ -1,0 +1,22 @@
+name: Capture concurrent recovery source
+on:
+  push:
+    branches: [codex/movement-startup-recovery]
+permissions:
+  contents: read
+jobs:
+  source:
+    if: contains(github.event.head_commit.message, 'Capture concurrent main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: f2c7c8d2b752f888bd43b672ae2f22837abfb104
+          persist-credentials: false
+      - run: git archive --format=zip HEAD -o /tmp/main.zip
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: concurrent-main
+          path: /tmp/main.zip
+          retention-days: 1
