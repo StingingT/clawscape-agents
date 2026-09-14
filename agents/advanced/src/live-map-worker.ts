@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { Tile } from './contracts.ts';
 import { LIVE_HAZARDS,liveHazardAt } from './live-hazards.ts';
-const upstream=resolve(import.meta.dir,'../../tmp/clawscape/upstream');
+const upstream=resolve(process.env.CLAWSCAPE_UPSTREAM??resolve(import.meta.dir,'../../tmp/clawscape/upstream'));
 const map=await import(pathToFileURL(resolve(upstream,'sdk/pathfinding.ts')).href);
 const rs=await import(pathToFileURL(resolve(upstream,'server/vendor/rsmod-pathfinder/rsmod-pathfinder.js')).href);
 map.initPathfinding();

@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { distance, samples, splitRoute, validTile } from './geometry';
 import { QUEST_DANGER_ZONES } from './quest-hazards';
-const upstream = resolve(import.meta.dir, '../../../tmp/clawscape/upstream');
+const upstream = resolve(process.env.CLAWSCAPE_UPSTREAM ?? resolve(import.meta.dir, '../../../tmp/clawscape/upstream'));
 const map = await import(pathToFileURL(resolve(upstream, 'sdk/pathfinding.ts')).href);
 const rsmod = await import(pathToFileURL(resolve(upstream, 'server/vendor/rsmod-pathfinder/rsmod-pathfinder.js')).href);
 map.initPathfinding();
