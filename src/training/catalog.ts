@@ -1,5 +1,6 @@
 // Reviewed guide memory. Guides propose families; local content supplies every
 // type ID, level, HP and spawn. No guide coordinate or XP rate is executable.
+import { TRAINING_LEADS } from './guide-leads.ts';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -74,7 +75,7 @@ export function loadCatalog(upstream = process.env.CLAWSCAPE_UPSTREAM ?? resolve
       .map(({ x, z, level }) => ({ x, z, level }));
     if (!spawns.length) throw new Error(`Missing source spawns: ${id}`);
     const points = approaches[id] ?? spawns;
-    return { id, name, monster, points, source, guideIds: symbol === 'barbarian' || symbol === 'guard1' || symbol === 'giantspider2' ? ['ranged'] : ['melee', 'ranged'] };
+    return { id, name, monster, points, source, guideIds: [...(symbol === 'barbarian' || symbol === 'guard1' || symbol === 'giantspider2' ? ['ranged'] : ['melee', 'ranged']),...TRAINING_LEADS.filter(l=>l.siteIds.includes(id)).map(l=>'build-guide:'+l.id)] };
   });
   // Map and reviewed contracts scope persisted knowledge; changed content cannot
   // inherit old route/encounter confidence silently.

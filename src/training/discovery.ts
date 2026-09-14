@@ -1,3 +1,4 @@
+import { guidePrior, inspectTrainingLeads } from './guide-leads.ts';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { distance, validTile, type Tile } from '../navigation/geometry';
 import { foodCount, skillLevel, type Action } from '../progression-policy';
@@ -7,9 +8,11 @@ import type { Catalog, Monster } from './catalog';
 type Route = { status: string; cost?: number; conditionalDoors?: number; reason?: string };
 export type RouteProbe = (from: Tile, to: Tile) => Promise<Route>;
 type Outcomes = { encounters: number; kills: number; productive: number; xp: number; ticks: number; damage: number; food: number; ammo: number; escapes: number; deaths: number };
-type Site = { id: string; name: string; monsterId: number; combatLevel: number; points: Tile[]; source: 'guide' | 'observed'; evidence: string; guideIds: string[]; firstSeen?: string; lastSeen?: string; sightings: number; cooldownUntil: number; failures: number; stats: Record<string, Outcomes>; observationPasses: number; lastObservationTick?: number; emptySinceTick?: number };
+type TripStats={trips:number;xp:number;ticks:number;food:number;ammo:number;spentGp:number};
+type Trip={goalKey:string;skill:string;life:number;startTick:number;lastTick:number;startedAt:number;siteId?:string;context?:string;xp:number;food:number;ammo:number;spentGp:number;mixed:boolean;checkpoint?:string};
+type Site = { id: string; name: string; monsterId: number; combatLevel: number; points: Tile[]; source: 'guide' | 'observed'; evidence: string; guideIds: string[]; firstSeen?: string; lastSeen?: string; sightings: number; cooldownUntil: number; failures: number; stats: Record<string, Outcomes>; tripStats?:Record<string,TripStats>; observationPasses: number; lastObservationTick?: number; emptySinceTick?: number };
 type Encounter = { siteId: string; index: number; monsterId: number; life: number; tick: number; context: string; xp: number; ticks: number; damage: number; food: number; ammo: number; confirmedKill: boolean };
-type Knowledge = { sites: Record<string, Site>; observations: Record<string, any>; commitment?: { siteId: string; since: number; encounters: number; approaches?: Tile[] }; exploration: { window: number; trips: number }; pending?: Encounter; status?: any; lastObserved?: string; retryAt?: number };
+type Knowledge = { trip?:Trip; completedTrips?:Array<Trip & {endTick:number;result:'returned-to-bank'|'interrupted'}>; sites: Record<string, Site>; observations: Record<string, any>; commitment?: { siteId: string; since: number; encounters: number; approaches?: Tile[] }; exploration: { window: number; trips: number }; pending?: Encounter; status?: any; lastObserved?: string; retryAt?: number };
 const fresh = (): Knowledge => ({ sites: {}, observations: {}, exploration: { window: 0, trips: 0 } });
 const outcomes = (): Outcomes => ({ encounters: 0, kills: 0, productive: 0, xp: 0, ticks: 0, damage: 0, food: 0, ammo: 0, escapes: 0, deaths: 0 });
 const at = (s: any): Tile => ({ x: s.player.worldX, z: s.player.worldZ, level: s.player.level });
@@ -46,6 +49,8 @@ export function trainingReadiness(s: any, m: Monster, ranged: boolean): string |
 export class TrainingDiscovery {
   readonly memory: Knowledge;
   private document: { version: number; character: string; worlds: Record<string, Knowledge> };
+  private preferredLeadIds:readonly string[]=[];
+  private selectedSkill?:string;
   private routeCache = new Map<string, { until: number; route: Route }>();
   constructor(private file: string, readonly character: string, readonly catalog: Catalog, private ranged = false, private economy = false, private now = Date.now) {
     this.document = { version: 1, character, worlds: {} };
@@ -60,6 +65,54 @@ export class TrainingDiscovery {
       points: h.points, source: 'guide', evidence: h.source, guideIds: h.guideIds,
       sightings: 0, failures: 0, cooldownUntil: 0, stats: {}, observationPasses: 0,
     };
+  }
+  /** Start before support preparation; only a verified return to bank closes a measured trip. */
+  beginTrial(s:any,goal:{key:string;domain:string;target:{fact:string}}):void {
+    if(this.memory.trip || goal.domain!=='combat' || !/^xp:(attack|strength|defence|ranged|magic)$/.test(goal.target.fact)
+      || !Number.isFinite(s.tick) || !Number.isFinite(s.player?.lifeId))return;
+    this.memory.trip={goalKey:goal.key,skill:goal.target.fact.slice(3),life:s.player.lifeId,startTick:s.tick,lastTick:s.tick,
+      startedAt:this.now(),xp:0,food:0,ammo:0,spentGp:0,mixed:false,checkpoint:this.tripCheckpoint(s)};this.save();
+  }
+  private tripCheckpoint(s:any):string {
+    return JSON.stringify([s.skills,s.equipment,(s.inventory??[]).map((i:any)=>[i.id,i.name,i.count??1]).sort()]);
+  }
+  private recordTrip(before:any,after:any,action:Action):void {
+    const t=this.memory.trip;if(!t)return;
+    if(t.life!==after.player?.lifeId || !Number.isFinite(after.tick) || after.tick<t.lastTick || this.now()-t.startedAt>24*60*60_000) {
+      this.memory.completedTrips=[...(this.memory.completedTrips??[]),{...t,endTick:after.tick,result:'interrupted' as const}].slice(-64);
+      delete this.memory.trip;return;
+    }
+    if(after.tick<=t.lastTick)return;
+    if(before.tick<t.lastTick){t.mixed=true;t.lastTick=after.tick;return;}
+    // Unobserved XP/accounting changes are not attributed to this method. Idle gaps
+    // still count toward travel/downtime without inventing rewards or spending.
+    if(t.checkpoint!==this.tripCheckpoint(before))t.mixed=true;
+    const key=context(before,t.skill==='ranged')+':target-'+t.skill;
+    if(action.fields?.trainingSite) {
+      if(t.siteId&&t.siteId!==action.fields.trainingSite)t.mixed=true;
+      t.siteId??=action.fields.trainingSite;t.context??=key;
+    }
+    const amount=(s:any)=>Number(s.skills?.find((v:any)=>String(v.name).toLowerCase()===t.skill)?.experience??0);
+    const gain=Math.max(0,amount(after)-amount(before));
+    if(gain && (t.context!==key || !t.siteId))t.mixed=true;
+    t.xp+=gain;
+    if(action.type==='useInventoryItem') {
+      const item=before.inventory?.find((i:any)=>i.slot===action.fields?.slot);
+      if(item?.optionsWithIndex?.some((o:any)=>o.opIndex===action.fields?.optionIndex&&/^eat$/i.test(o.text)))t.food+=Math.max(0,foodCount(before)-foodCount(after));
+    }
+    if(before.player?.combat?.inCombat===true)t.ammo+=Math.max(0,ammo(before)-ammo(after));
+    const coins=(s:any)=>(s.inventory??[]).filter((i:any)=>Number(i.id)===995).reduce((n:number,i:any)=>n+Number(i.count??0),0);
+    if(action.type==='shopBuy')t.spentGp+=Math.max(0,coins(before)-coins(after));
+    t.lastTick=after.tick;t.checkpoint=this.tripCheckpoint(after);
+    if(t.xp>0 && t.siteId && t.context && after.bank?.isOpen===true && before.bank?.isOpen!==true) {
+      this.memory.completedTrips=[...(this.memory.completedTrips??[]),{...t,endTick:after.tick,result:'returned-to-bank' as const}].slice(-64);
+      const site=this.memory.sites[t.siteId];
+      if(site && !t.mixed) {
+        site.tripStats??={};const stats=site.tripStats[t.context]??={trips:0,xp:0,ticks:0,food:0,ammo:0,spentGp:0};
+        stats.trips++;stats.xp+=t.xp;stats.ticks+=after.tick-t.startTick;stats.food+=t.food;stats.ammo+=t.ammo;stats.spentGp+=t.spentGp;
+      }
+      delete this.memory.trip;
+    }
   }
   save() { writeFileSync(this.file, JSON.stringify(this.document, null, 2) + '\n'); }
   timedOut(s: any) { return !!this.memory.pending && s.player?.lifeId === this.memory.pending.life && s.tick > this.memory.pending.tick + 180; }
@@ -122,6 +175,7 @@ export class TrainingDiscovery {
     this.memory.pending = { siteId, index: n.index, monsterId: n.id, life: s.player.lifeId, tick: s.tick, context: context(s, this.ranged), xp: 0, ticks: 0, damage: 0, food: 0, ammo: 0, confirmedKill: false };
   }
   afterAction(before: any, after: any, action: Action) {
+    this.recordTrip(before,after,action);
     const e = this.memory.pending;
     if (e) {
       const dead = after.player?.isDead || after.player?.lifeId !== e.life || Number(after.player?.respawnCount ?? 0) > Number(before.player?.respawnCount ?? 0);
@@ -159,15 +213,26 @@ export class TrainingDiscovery {
   private score(site: Site, s: any, cost: number) {
     const m = this.catalog.monsters.find(m => m.id === site.monsterId)!;
     const stats = site.stats[context(s, this.ranged)];
+    const trip=site.tripStats?.[context(s,this.ranged)+':target-'+(this.selectedSkill??(this.ranged?'ranged':'strength'))];
+    if(trip?.trips && trip.ticks>0) {
+      // Whole-trip throughput includes preparation/travel/return, not just attacking.
+      return trip.xp/trip.ticks*4-trip.food/trip.trips-trip.ammo/trip.trips*.05-trip.spentGp/trip.trips*.01-cost/80
+        - (stats?.escapes??0)*4 - (stats?.deaths??0)*20 +guidePrior(this.preferredLeadIds,site.id,trip.trips);
+    }
+    const guideBonus=guidePrior(this.preferredLeadIds,site.id,stats?.encounters??0);
     const prior = m.minSkill >= 20 ? 7 : m.hp >= 8 ? 4 : m.hp >= 5 ? 3 : 2;
-    if (!stats?.ticks) return prior + (site.sightings ? .5 : 0) - cost / 80;
+    if (!stats?.ticks) return guideBonus + prior + (site.sightings ? .5 : 0) - cost / 80;
     // Shrink sparse observations towards a local prior. No guide XP/hour is
     // treated as a measurement, and a disappearing NPC is never called a kill.
     const weight = Math.min(1, stats.encounters / 3);
     const measured = stats.xp / stats.ticks * 4 - stats.damage / Math.max(1, stats.encounters) * .2 - stats.food / Math.max(1, stats.encounters) - stats.ammo / Math.max(1, stats.encounters) * .05 - stats.escapes * 4 - stats.deaths * 20;
-    return prior * (1 - weight) + measured * weight - cost / 80;
+    return guideBonus + prior * (1 - weight) + measured * weight - cost / 80;
   }
-  async next(s: any, probe: RouteProbe): Promise<Action[]> {
+  async next(s: any, probe: RouteProbe, leadIds:readonly string[]=[], skill?:string): Promise<Action[]> {
+    this.preferredLeadIds=leadIds;this.selectedSkill=skill;
+    if(skill==='ranged')this.ranged=true;
+    else if(skill&&['attack','strength','defence'].includes(skill))this.ranged=false;
+    else if(skill==='magic')return [{id:'training-spell-executor-required',type:'wait',waitTicks:5}];
     this.observe(s);
     if (this.economy) return [];
     if (!s.player || !validTile(at(s))) return [{ id: 'training-await-valid-state', type: 'wait', waitTicks: 5 }];
@@ -219,7 +284,7 @@ export class TrainingDiscovery {
       if (!choices.some(c => c.site === site)) this.block(site.id, 'no-feasible-approach', 60_000);
     }
     if (loading) return wait('loading-map');
-    if (!choices.length && hold && !this.memory.commitment) return this.next(s, probe);
+    if (!choices.length && hold && !this.memory.commitment) return this.next(s, probe, leadIds, skill);
     choices.sort((a, b) => b.score - a.score);
     let chosen = choices[0];
     const current = choices.find(c => c.site.id === commitment?.siteId);
@@ -232,7 +297,7 @@ export class TrainingDiscovery {
       this.memory.commitment = { siteId: site.id, since: now, encounters: 0 };
     }
     this.memory.commitment!.approaches ??= [point, ...[...site.points].sort((a,b) => distance(origin,a) - distance(origin,b)).filter(p => distance(p,point) !== 0).slice(0,2)];
-    this.memory.status = { selectedSite: site.id, source: site.source, guideIds: site.guideIds, routeCost: chosen.cost, score: chosen.score, predictedReachable: true, liveVerified: false };
+    this.memory.status = { selectedSite: site.id, source: site.source, guideIds: site.guideIds, routeCost: chosen.cost, score: chosen.score, predictedReachable: true, liveVerified: false, guideLeads:inspectTrainingLeads(leadIds,this.catalog.sites.map(s=>s.id)) };
     const target = (s.nearbyNpcs ?? []).filter((n: any) => this.monster(n)?.id === site.monsterId && n.hp !== 0 && n.reachable === true && n.inCombat !== true && Number(n.distance) <= 8 && n.optionsWithIndex?.some((o: any) => /^attack$/i.test(o.text)) && site.points.some(p => distance(p, { x: n.tileX ?? n.x, z: n.tileZ ?? n.z, level: s.player.level }) <= 20)).sort((a: any, b: any) => a.distance - b.distance)[0];
     if (target) {
       site.observationPasses = 0; delete site.emptySinceTick; this.save();

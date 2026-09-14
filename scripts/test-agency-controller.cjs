@@ -12,7 +12,7 @@ const wanted=['runEpisode','actionsForTask','executeAgencyAction','verification'
 const extracted=parsed.statements.filter(s=>ts.isFunctionDeclaration(s)&&wanted.includes(s.name?.text)).map(s=>s.getText(parsed)).join('\n');
 assert.equal(parsed.statements.filter(s=>ts.isFunctionDeclaration(s)&&wanted.includes(s.name?.text)).length,wanted.length);
 const js=ts.transpileModule(extracted,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText;
-async function runScenario({blocked=false,unknown=false,deny=false,movement=false,mapWait=false,legacyNavigation=false}={}){
+async function runScenario({blocked=false,unknown=false,deny=false,movement=false,mapWait=false,legacyNavigation=false,combatGoal=false,badStyle=false,meleeGoal=false}={}){
   const {LiveAgency,isSelection}=await import('../src/agency/live-adapter.ts');
   const {verifyActionOutcome}=await import('../src/action-outcome.ts');
   const {recoverLegacyJournals}=await import('../src/agency/journal-recovery.ts');
@@ -21,9 +21,20 @@ async function runScenario({blocked=false,unknown=false,deny=false,movement=fals
     let now=1000,ids=0,mutationCalls=0,planned=false,legs=0,assessments=0,mapWaited=false;
     class TestDate extends Date { static now(){return now;} }
     const identity={agent:'test',world:'test',revision:'test'};
-    const agency=new LiveAgency(join(dir,'journal.json'),identity,{supported:movement?['exploration']:['food'],routes:movement?[{id:'bank-route',x:50,z:1,level:0,evidence:'observed lead'}]:[],policy:{foodTarget:3},now:()=>now});
+    const goalSkill=meleeGoal?'strength':'ranged';
+    const agency=new LiveAgency(join(dir,'journal.json'),identity,{supported:combatGoal?['food','combat']:movement?['exploration']:['food'],developmentHint:combatGoal?(meleeGoal?'melee':'ranged-magic'):undefined,preferences:combatGoal?{combat:2}:{},routes:movement?[{id:'bank-route',x:50,z:1,level:0,evidence:'observed lead'}]:[],policy:{foodTarget:3,combatLossBoundGp:5},now:()=>now});
     const state={inGame:true,tick:1,player:{hp:30,maxHp:30,lifeId:1,level:0,worldX:1,worldZ:1,animId:-1,combat:{inCombat:false,targetType:'none',targetIndex:-1}},
       inventory:[],equipment:[],skills:[],bank:{isOpen:!movement,items:[{id:315,name:'Shrimps',count:10,slot:7}]}};
+    if(combatGoal) {
+      state.skills=['attack','strength','defence','ranged','magic','prayer'].map(name=>({name,experience:0,baseLevel:1}));
+      state.equipment=[{id:841,name:'Shortbow',slot:3,count:1},{id:882,name:'Bronze arrow',slot:13,count:50}];
+      state.combatStyle={weaponName:'Shortbow',currentStyle:0,styles:[{index:0,trainsSkills:['ranged']},{index:1,trainsSkills:['ranged','defence']}]};
+      if(meleeGoal) {
+        state.equipment=[{id:1323,name:'Iron scimitar',slot:3,count:1}];
+        state.combatStyle={weaponName:'Iron scimitar',currentStyle:0,styles:[{index:0,trainsSkills:['strength']},{index:1,trainsSkills:['strength','defence']},{index:2,trainsSkills:['attack']}]};
+      }
+      state.nearbyNpcs=[{id:1,index:7,name:'Goblin',reachable:true,optionsWithIndex:[{opIndex:2,text:'Attack'}]}];
+    }
     const legacyPath=join(dir,'action-intent.json');
     if(legacyNavigation)writeFileSync(legacyPath,JSON.stringify({commandId:'test-old-bank-for-fishing-tool-funds',
       actionId:'bank-for-fishing-tool-funds',type:'walkTo',fields:{x:50,z:1,level:0},status:'failed',beforeState:structuredClone(state)}));
@@ -33,7 +44,14 @@ async function runScenario({blocked=false,unknown=false,deny=false,movement=fals
       agency.document.receipt.action={id:'buy-arrows',type:'shopBuy',fields:{slot:0,amount:1}};}
     if(deny)agency.begin=()=>{throw new Error('TEST_PRE_DISPATCH_REFUSAL');};
     const environment={
-      agency,steps:8,character:'test',role:'brawler',build:'melee',forumEnabled:false,training:undefined,
+      agency,steps:8,character:'test',role:'brawler',build:'melee',forumEnabled:false,training:combatGoal?{
+        observe(){},beforeAction(){},next(s,probe,leadIds,skill){
+          assert.ok(leadIds.includes('lumbridge-chickens'),'guide leads were not forwarded to training');
+          assert.equal(skill,goalSkill,'task skill was not forwarded to training');
+          assert.equal(agency.director.memory.active.id,'train-'+goalSkill,'parent lost during food preparation');
+          return [{id:'trial-target',type:'interactNpc',fields:{npcIndex:7,optionIndex:2},waitTicks:1}];
+        },
+      }:undefined,gearCandidates:()=>[],
       console:{log(){},error(){}},Date:TestDate,JSON,Number,Math,Set,Array,String,
       loadActionIntent:()=>undefined,actionIntentPath:legacyPath,finishActionIntent:()=>{},
       dataDir:dir,existsSync:require('node:fs').existsSync,resolve:require('node:path').resolve,
@@ -56,12 +74,26 @@ async function runScenario({blocked=false,unknown=false,deny=false,movement=fals
       equipmentGoals:{validate:()=>true},observeAgencyResult:()=>{},appendFileSync:()=>{},experiencePath:'unused',
       randomUUID:()=>`command-${++ids}`,dialogCandidates:()=>[],bankingCandidates:()=>{
         assert.ok(planned,'Legacy executor was called BEFORE the Director');
+        if(combatGoal&&state.inventory.length>=3)return [{id:'close-bank',type:'closeModal',waitTicks:1}];
         return [{id:'withdraw-food',type:'bankWithdraw',fields:{slot:7,amount:1},waitTicks:1}];
       },
       cliCall:async args=>{
         now+=100;state.tick++;
         if(args[0]==='act'){
-          mutationCalls++;assert.equal(args[1],'bankWithdraw');
+          mutationCalls++;
+          if(combatGoal) {
+            assert.equal(agency.director.memory.active.id,'train-'+goalSkill);
+            if(args[1]==='closeModal'){state.bank.isOpen=false;if(badStyle)state.combatStyle.currentStyle=1;return {state:structuredClone(state)};}
+            if(args[1]==='interactNpc'){
+              assert.equal(state.inventory.length,3,'combat started before support reserve');
+              assert.equal(agency.summary().development.id,meleeGoal?'rune-melee-pure':'ranged-magic-pure');
+              assert.ok(agency.director.memory.active.supportGoals.some(s=>s.target.fact==='food'&&s.status==='satisfied'));
+              state.skills.find(s=>s.name===goalSkill).experience+=100;
+              state.player.combat={inCombat:true,targetType:'npc',targetIndex:7};
+              return {state:structuredClone(state)};
+            }
+          }
+          assert.equal(args[1],'bankWithdraw');
           const receipt=agency.pending();assert.ok(receipt,'Action dispatched without durable intent');
           assert.match(receipt.commandId,/^command-/);
           state.bank.items[0].count--;
@@ -83,12 +115,12 @@ async function runScenario({blocked=false,unknown=false,deny=false,movement=fals
       assert.equal(JSON.parse(readFileSync(legacyPath,'utf8')).status,'failed','original record is preserved');
     }
     if(blocked||unknown||deny)assert.equal(mutationCalls,0,'A planner refusal/unknown intent fell through to real execution');
-    else{assert.equal(mutationCalls,3);if(movement){assert.equal(legs,3);assert.equal(assessments,1);assert.equal(agency.pending(),undefined);}assert.equal(agency.director.memory.reviews.length,1);assert.equal(agency.director.memory.reviews[0].result,'success');}
+    else{assert.equal(mutationCalls,combatGoal?(badStyle?4:5):3);if(movement){assert.equal(legs,3);assert.equal(assessments,1);assert.equal(agency.pending(),undefined);}assert.equal(agency.director.memory.reviews.length,badStyle?0:1);if(!badStyle)assert.equal(agency.director.memory.reviews[0].result,'success');}
     return {mutationCalls,reviews:agency.director.memory.reviews.length};
   }finally{rmSync(dir,{recursive:true,force:true});}
 }
 (async()=>{
   const results=[];
-  for(const scenario of [{},{blocked:true},{unknown:true},{deny:true},{movement:true},{movement:true,mapWait:true},{movement:true,legacyNavigation:true}])results.push({scenario,...await runScenario(scenario)});
+  for(const scenario of [{},{blocked:true},{unknown:true},{deny:true},{movement:true},{movement:true,mapWait:true},{movement:true,legacyNavigation:true},{combatGoal:true},{combatGoal:true,badStyle:true},{combatGoal:true,meleeGoal:true},{combatGoal:true,meleeGoal:true,badStyle:true}])results.push({scenario,...await runScenario(scenario)});
   console.log(JSON.stringify({controllerChecks:results.length,passed:results.length,results},null,2));
 })().catch(e=>{console.error(e);process.exitCode=1;});

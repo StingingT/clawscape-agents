@@ -1,9 +1,11 @@
+import { allowedTraining, guideTrainingTarget, strategyView, type Development } from './development.ts';
+import type { BuildRules } from './build-rules.ts';
 import type { Domain, Facts, Identity, Memory, Method, Observation, Opportunity } from './types.ts';
 
 export type LiveState = Record<string, any>;
-export type TaskKind = 'food' | 'ammunition' | 'equipment' | 'bank' | 'combat' | 'production' | 'gathering' | 'exploration';
+export type TaskKind = 'food' | 'ammunition' | 'equipment' | 'bank' | 'combat' | 'production' | 'gathering' | 'exploration' | 'funds' | 'prayer';
 export type Route = { id: string; x: number; z: number; level: number; evidence: string };
-export type Task = { id: string; kind: TaskKind; skill?: string; route?: Route };
+export type Task = { id: string; kind: TaskKind; skill?: string; guideLeadIds?: string[]; route?: Route; target?: { fact: string; minimum: number } };
 export type Policy = {
   reserveCoins: number; maxLossGp: number; maxDeaths: number; maxDurationMs: number;
   foodTarget: number; ammoTarget: number;
@@ -17,7 +19,7 @@ export const defaultPolicy: Policy = {
 export type Catalogue = { view: Observation; opportunities: Opportunity[]; methods: Method[]; tasks: Map<string, Task> };
 export type Knowledge = { bank: any[]; bankCheckedAt: number; routes: Record<string, Route>; visited: Record<string, string> };
 export const emptyKnowledge = (): Knowledge => ({ bank: [], bankCheckedAt: 0, routes: {}, visited: {} });
-const quantity = (i: any) => Number(i.count ?? 1);
+const quantity = (i: any) => { const n = Number(i.count ?? 1); return Number.isSafeInteger(n) && n >= 0 ? n : NaN; };
 const edible = (i: any) => (i.optionsWithIndex ?? []).some((o: any) => /^eat$/i.test(String(o.text)));
 export const cash = (items: any[]) => items.filter(i => Number(i.id) === 995 || /^coins$/i.test(String(i.name)))
   .reduce((n, i) => n + quantity(i), 0);
@@ -75,7 +77,7 @@ export function observeKnowledge(state: LiveState, k: Knowledge, now: number, se
 
 /** Goals are built from needs and observations BEFORE a low-level candidate is requested. */
 export function buildCatalogue(identity: Identity, state: LiveState, k: Knowledge, policy: Policy,
-  supported: TaskKind[], memory: Memory, now = Date.now()): Catalogue {
+  supported: TaskKind[], memory: Memory, now = Date.now(), development?: Development, buildRules?: BuildRules): Catalogue {
   const facts = observeFacts(state, k), tasks = new Map<string, Task>(), methods: Method[] = [], opportunities: Opportunity[] = [];
   const evidence = [`own-state:${state.player?.lifeId}:${state.tick}`];
   const add = (task: Task, domain: Domain, fact: string, target: number, delta: number,
@@ -89,8 +91,9 @@ export function buildCatalogue(identity: Identity, state: LiveState, k: Knowledg
     methods.push({ id:task.id, capability:task.kind, domain, effects:{[fact]:delta}, prerequisites,
       costGp:measuredSpend, lossBoundGp:risk === 'bounded' ? policy.combatLossBoundGp ?? 0 : 0,
       durationMs:task.kind === 'exploration' && task.route ? Math.max(2_000,(Math.abs(Number(state.player?.worldX)-task.route.x)+Math.abs(Number(state.player?.worldZ)-task.route.z))*600) : 30_000, risk });
-    if ((facts[fact] ?? 0) < target) opportunities.push({ id:task.id, domain, target:{fact,minimum:target}, reason,
-      evidence:task.route ? [task.route.evidence] : evidence, source });
+    if (task.kind!=='funds' && (facts[fact] ?? 0) < target) opportunities.push({ id:task.id, domain, target:{fact,minimum:target}, reason,
+      evidence:task.route ? [task.route.evidence] : evidence, source,
+      priority: ['food','ammunition','equipment','bank','funds'].includes(task.kind) ? 'maintenance' : 'strategic' });
   };
   add({id:'supply-food',kind:'food'}, 'gathering', 'food', policy.foodTarget, policy.foodTarget,
     'Replenish cooked food for sustainable trips; bank and cooking actions are preparation, not the goal.', 'need');
@@ -104,15 +107,29 @@ export function buildCatalogue(identity: Identity, state: LiveState, k: Knowledg
   // Different skills are intentional opportunities with reasons. No permanent role-based level cap.
   const observedStyles=(state.combatStyle?.styles??[]).flatMap((s:any)=>s.trainsSkills??[]).map((n:any)=>String(n).toLowerCase());
   const skills = [...new Set<string>(observedStyles.filter((n:string)=>['attack','strength','defence','ranged','magic'].includes(n)))];
-  for (const skill of skills) if (base(state,skill) < 99) {
+  for (const skill of skills) if (base(state,skill) < 99 && allowedTraining(development, [skill], state)) {
     const current = facts['xp:'+skill] ?? 0;
+    const target = guideTrainingTarget(development,state,skill,buildRules);
+    if(target===undefined || target<=current)continue;
     const reason = skill === 'defence'
       ? 'Develop Defence to support longer, safer encounters rather than remain permanently locked to the initial role.'
       : `Improve ${skill} through a bounded encounter trial and compare its observed costs.`;
-    add({id:'train-'+skill,kind:'combat',skill},'combat','xp:'+skill,Math.floor(current/100)*100+100,100,reason,'collection',
+    add({id:'train-'+skill,kind:'combat',skill,guideLeadIds:development?.trainingLeadIds},'combat','xp:'+skill,target,target-current,reason+ (development?.sourceUrls?.length?' Guide hypothesis: '+development.sourceUrls.join(', '):'')+(development?.history.length&&development.focus.includes(skill)?' '+development.reason:''),
+      development?.history.length&&development.focus.includes(skill)?'unlock':'collection',
       [{fact:'food',minimum:Math.min(3,policy.foodTarget)},{fact:'weapon',minimum:1},
        ...(/bow/i.test(String(state.combatStyle?.weaponName)) ? [{fact:'arrows',minimum:15}] : [])],
       policy.combatLossBoundGp === undefined ? 'unknown' : 'bounded');
+  }
+  const prayerTarget=guideTrainingTarget(development,state,'prayer',buildRules);
+  if (prayerTarget!==undefined && (state.inventory ?? []).some((i: any) => (i.optionsWithIndex ?? []).some((o: any) => /^bury$/i.test(String(o.text)))))
+    add({id:'train-prayer',kind:'prayer',skill:'prayer'},'combat','xp:prayer',Math.min(prayerTarget,Math.floor(facts['xp:prayer'] ?? 0)+1),1,
+      'Investigate Prayer progression using personally held bones and the observed Bury option.', 'collection');
+  const bankCoins = state.bank?.isOpen === true && Array.isArray(state.bank.items) ? cash(state.bank.items) : 0;
+  const knownBankCoins = state.bank?.isOpen === true ? bankCoins : cash(k.bank);
+  if (knownBankCoins > 0) {
+    const needed = Math.max(1, (memory.active?.requestedSupport?.target.minimum ?? policy.reserveCoins + 1) - facts.coins!);
+    if (knownBankCoins >= needed) add({id:'access-verified-funds',kind:'funds'},'gathering','coins',facts.coins!+needed,needed,
+      'Withdraw verified own bank coins for the selected preparation step, rather than spending imaginary funds.', 'need');
   }
   add({id:'production-batch',kind:'production'},'crafting','xp:production',Math.floor(facts['xp:production']!/100)*100+100,100,
     'Complete a bounded production batch, obtaining the inputs through the supported production routine.', 'collection');
@@ -128,8 +145,10 @@ export function buildCatalogue(identity: Identity, state: LiveState, k: Knowledg
     for(const g of opportunities)if(g.source==='frontier')g.source='unlock';
   }
   const view: Observation = { ...identity, at:now, facts, context:capabilityContext(state),
-    budget:{spendableGp:Math.max(0,cash(state.inventory??[])-policy.reserveCoins),maxLossGp:policy.maxLossGp,
-      maxDeaths:policy.maxDeaths,maxDurationMs:policy.maxDurationMs}, capabilities:[...new Set(methods.map(m=>m.capability))] };
+    budget:{spendableGp:Math.max(0,cash(state.inventory??[])+bankCoins-policy.reserveCoins),maxLossGp:policy.maxLossGp,
+      maxDeaths:policy.maxDeaths,maxDurationMs:policy.maxDurationMs}, capabilities:[...new Set(methods.map(m=>m.capability))],
+    knowledgeRevision: memory.learningRevision ?? 0, strategy: strategyView(development),
+    funding:{carriedGp:cash(state.inventory??[]),bankGp:bankCoins,reserveGp:policy.reserveCoins,evidence} };
   // Completed/poor trials affect later choices through the Director's method memory and cooldowns.
   return {view,opportunities,methods,tasks};
 }

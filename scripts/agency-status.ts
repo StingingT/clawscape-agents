@@ -1,0 +1,46 @@
+#!/usr/bin/env bun
+/** Read-only diagnostics. Never reads CLI authentication, full inventory, or historical lessons. */
+import { existsSync, lstatSync, readFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const safe = (v: unknown) => typeof v === 'string'
+  ? (/token|password|secret|authorization|api[_-]?key/i.test(v) ? '[redacted]' : v.slice(0, 400)) : v;
+function read(file: string): any {
+  if (!existsSync(file)) return undefined;
+  const stat = lstatSync(file);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 16_000_000) throw new Error('Unsupported diagnostic file: ' + file);
+  try { return JSON.parse(readFileSync(file, 'utf8')); } catch { throw new Error('Invalid JSON in diagnostic file: ' + file); }
+}
+export function inspectAgency(root: string, now = Date.now()): unknown[] {
+  const supervisor = read(join(root, 'data/supervisor/status.json'));
+  return [['clawscout','online'],['stinger','stinger'],['coincrafter','coincrafter'],['featherer','featherer']].map(([agent,profile]) => {
+    const directory = join(root,'data',profile!);
+    const file = join(directory,'agency-v2.json'), current = read(file), recovery = read(join(directory,'legacy-recovery.json'));
+    const known = current?.version === 2;
+    const goal = known ? current.memory?.active : undefined;
+    return { agent, profile, source: file, process: supervisor?.agents?.[agent!]?.status ?? 'unknown',
+      currentState: !current ? 'not-written' : known ? 'version-2' : 'unexpected-version',
+      observationAgeSeconds: known && current.lastObservation?.at ? Math.max(0,Math.floor((now-current.lastObservation.at)/1000)) : null,
+      lastObservation: known ? current.lastObservation : undefined,
+      strategy: known && current.development ? {id:current.development.id,name:current.development.name,reason:safe(current.development.reason),sourceUrls:current.development.sourceUrls,levelCaps:current.development.levelCaps,protectedXp:current.development.protectedXp,trainingLeadIds:current.development.trainingLeadIds,alternatives:current.development.alternatives,review:current.development.review} : undefined,
+      buildReadiness: known ? current.buildReadiness : undefined,
+      goal: goal ? {id:goal.id,target:goal.target,reason:safe(goal.reason),support:goal.supportGoals,
+        method:goal.plan?.steps?.[0]?.methodId,budget:goal.budget,
+        lastObjectiveProgressAt:goal.lastObjectiveProgressAt,lastSupportProgressAt:goal.lastSupportProgressAt} : null,
+      blocked: known ? safe(current.blocked) : undefined,
+      pending: known && current.receipt ? {commandId:current.receipt.commandId,type:current.receipt.action?.type,startedAt:current.receipt.startedAt} : null,
+      lastOutcome: known && current.lastOutcome ? {...current.lastOutcome,reason:safe(current.lastOutcome.reason),evidence:current.lastOutcome.evidence?.map(safe)} : undefined,
+      legacy: {historicalOnly:true,ready:recovery?.ready??null,
+        unresolved:recovery?.entries?.filter((e:any)=>e.disposition==='unresolved').map((e:any)=>({commandId:e.commandId,reason:safe(e.reason)}))},
+    };
+  });
+}
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  try {
+    const args=process.argv.slice(2);
+    if(args.length && (args.length!==2||args[0]!=='--root'||!args[1]?.trim()))throw new Error('Usage: bun scripts/agency-status.ts [--root DIRECTORY]');
+    const root=args.length?resolve(args[1]!):resolve(dirname(fileURLToPath(import.meta.url)),'..');
+    console.log(JSON.stringify({at:new Date().toISOString(),agents:inspectAgency(root)},null,2));
+  } catch(error) { console.error(error instanceof Error?error.message:'Unable to inspect state');process.exitCode=1; }
+}

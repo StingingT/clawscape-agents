@@ -18,6 +18,8 @@ export type Opportunity = {
   evidence: string[];
   /** A supported, observed unlock can justify changing specialization. */
   source: 'need' | 'collection' | 'unlock' | 'frontier' | 'investigation';
+  /** Reserve maintenance competes only when substantive work has no executable plan. */
+  priority?: 'strategic' | 'maintenance';
 };
 export type Observation = Identity & {
   at: number;
@@ -27,6 +29,11 @@ export type Observation = Identity & {
   budget: Budget;
   /** Registered executable capabilities, not prose supplied by another player. */
   capabilities: string[];
+  /** Incremented by verified learning, not ticks, movement or untested messages. */
+  knowledgeRevision?: number;
+  strategy?: { id: string; protectedSkills: string[] };
+  /** Fresh own balances; bank funds are not spendable at a shop until withdrawn. */
+  funding?: { carriedGp: number; bankGp: number; reserveGp: number; evidence: string[] };
 };
 export type Method = {
   id: string;
@@ -42,7 +49,19 @@ export type Method = {
   durationMs: number;
   risk: 'safe' | 'bounded' | 'unknown' | 'pvp';
 };
-export type Step = { methodId: string; capability: string; prerequisites: Requirement[] };
+export type Step = {
+  methodId: string; capability: string; prerequisites: Requirement[];
+  /** Root objective followed by the dependency this method is intended to satisfy. */
+  lineage?: Requirement[];
+  goalKey?: string;
+  supportGoalId?: string;
+};
+export type SupportGoal = {
+  id: string; parentId: string; target: Requirement;
+  purpose: 'prerequisite' | 'investigate-blocker';
+  reason: string; status: 'pending' | 'active' | 'satisfied';
+  evidence: string[];
+};
 export type Plan = { steps: Step[]; costGp: number; lossBoundGp: number; durationMs: number };
 export type Goal = Opportunity & {
   key: string;
@@ -56,6 +75,17 @@ export type Goal = Opportunity & {
   elapsedMs: number;
   attempts: number;
   noProgress: number;
+  strategyId?: string;
+  workingReserveGp?: number;
+  plan?: Plan;
+  planContext?: string;
+  lastObjectiveProgressAt?: number;
+  lastSupportProgressAt?: number;
+  supportGoals?: SupportGoal[];
+  investigation?: Opportunity;
+  requestedSupport?: { target: Requirement; reason: string; evidence: string[] };
+  blocker?: { at: number; reason: string; recheckAt: number };
+  fundingGrants?: Array<{ at: number; ceilingGp: number; evidence: string[] }>;
 };
 export type MethodStats = {
   attempts: number;
@@ -66,6 +96,9 @@ export type MethodStats = {
   elapsedMs: number;
   cooldownUntil: number;
   preparationMs?: number;
+  interrupted?: number;
+  viability?: 'viable' | 'uncertain' | 'temporarily-poor' | 'disproven';
+  knowledgeRevision?: number;
 };
 export type Review = {
   goal: Goal;
@@ -81,6 +114,8 @@ export type Pending = {
   method: Method;
   before: Facts;
   status: 'pending' | 'unknown';
+  supportGoalId?: string;
+  knowledgeRevision?: number;
 };
 export type Memory = Identity & {
   schema: 1;
@@ -89,6 +124,7 @@ export type Memory = Identity & {
   active?: Goal;
   pending?: Pending;
   sequence: number;
+  learningRevision?: number;
   methods: Record<string, MethodStats>;
   goalCooldowns: Record<string, number>;
   reviews: Review[];
