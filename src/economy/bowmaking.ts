@@ -28,7 +28,7 @@ export function bowBlocked(m:EconomyMemory,reason:string,now=Date.now()) {
   if(m.objectives?.intent?.mode==='finish')m.objectives.blocked[m.objectives.intent.id]=b.cooldownUntil;
   m.goal='bowmaking-blocked';m.reason=reason;
 }
-export function bowNext(s:any,m:EconomyMemory,blocked:(id:string)=>boolean=()=>false,now=Date.now()):Action[]{
+export function bowNext(s:any,m:EconomyMemory,blocked:(id:string)=>boolean=()=>false,now=Date.now(),foodTarget=0):Action[]{
   const intent=m.objectives?.intent;if(intent?.mode!=='finish')return [];
   const b=m.bowmaking??={},inv=s.inventory??[],bank=s.bank?.isOpen?s.bank.items??[]:m.bankItems??[];
   const count=(id:number)=>total(inv,id),all=(id:number)=>count(id)+total(bank,id),remaining=()=>Math.max(0,b.target!-b.made!);
@@ -94,7 +94,7 @@ export function bowNext(s:any,m:EconomyMemory,blocked:(id:string)=>boolean=()=>f
     const money=bank.find((i:any)=>i.id===995);
     if(count(995)<10&&!count(1735)&&money)return [a('tool-cash','bankWithdraw',{slot:money.slot,amount:Math.min(10-count(995),money.count)})];
     const food=bank.find((i:any)=>/^(cabbage|shrimps|anchovies|trout|salmon|bread|lobster|swordfish)$/i.test(i.name));
-    if(foodCount(s)<3&&food&&inv.length<25)return [a('withdraw-food','bankWithdraw',{slot:food.slot,amount:Math.min(3-foodCount(s),food.count)})];
+    if(foodCount(s)<foodTarget&&food&&inv.length<28)return [a('withdraw-food','bankWithdraw',{slot:food.slot,amount:Math.min(foodTarget-foodCount(s),food.count,28-inv.length)})];
     const tool=bank.find((i:any)=>i.id===1735);
     if(needWool&&needsStrings&&!count(1735)&&tool&&inv.length<28)return [a('withdraw-shears','bankWithdraw',{slot:tool.slot,amount:1})];
     let desired:number|undefined,quantity=0;

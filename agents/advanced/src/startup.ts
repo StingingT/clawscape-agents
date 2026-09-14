@@ -74,9 +74,9 @@ export function readRequiredJson(file: string, missing: string, invalid: string)
   if (!existsSync(file)) throw new Error(missing);
   try { return json(file); } catch { throw new Error(invalid); }
 }
-export function checkedUpstream(root: string, gameRoot: string, explicit = process.env.CLAWSCAPE_UPSTREAM): string {
+export function checkedUpstream(root: string, gameRoot: string, explicit?: string, env: NodeJS.ProcessEnv = process.env): string {
   // Startup and standalone workers validate the same selected checkout. Never
   // silently substitute a different map if an explicit or configured path is bad.
   return resolveUpstream({ runtimeRoot: root, gameRoot,
-    env: explicit === undefined ? {} : { CLAWSCAPE_UPSTREAM: explicit } }).upstream;
+    env: (explicit ?? env.CLAWSCAPE_UPSTREAM) === undefined ? {} : { CLAWSCAPE_UPSTREAM: explicit ?? env.CLAWSCAPE_UPSTREAM } }).upstream;
 }

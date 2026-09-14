@@ -8,6 +8,7 @@ type Port = { state(): Promise<any>; act(type: string, fields: any): Promise<any
 export class Navigator {
   private worker?: Worker;
   private ready = false;
+  private readonly startupAt=Date.now();
   private fatal?: string;
   private sequence = 0;
   private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
@@ -26,7 +27,7 @@ export class Navigator {
   constructor(private port: Port, private file: string, private planner?: (from: Tile, to: Tile, blocked: any[]) => Promise<any>, private questTravel=false) {
     if (existsSync(file)) { try { const old = JSON.parse(readFileSync(file, 'utf8')); this.blocked = old.blocked ?? {}; this.routes = old.routes ?? {}; this.doors = old.doors ?? []; this.escapeTarget = old.escapeTarget; this.escapeLife = old.escapeLife; this.destination = old.destination ?? ''; this.recoveries = old.recoveries ?? 0; } catch {} }
     if (planner) { this.ready = true; return; }
-    this.worker = new Worker(new URL('./map-worker.ts', import.meta.url).href);
+    this.worker = new Worker(new URL('./map-worker.ts', import.meta.url).href,{env:{...process.env}} as any);
     this.worker.onmessage = ({ data }) => {
       if (data.ready) { this.ready = true; return; }
       const p = this.pending.get(data.id); if (!p) return;
@@ -76,7 +77,7 @@ export class Navigator {
   // arrival, mutates the active trip, or sends a game command.
   async assess(from: Tile, to: Tile) {
     if (this.fatal) return { status: 'blocked', reason: this.fatal };
-    if (!this.ready) return { status: 'loading-map' };
+    if (!this.ready) return Date.now()-this.startupAt>60_000?{status:'blocked',reason:'map-initialization-timeout'}:{ status: 'loading-map' };
     if (this.blockedUntil(to) > Date.now()) return { status: 'blocked', reason: 'route-cooldown' };
     try {
       const plan = await this.plan(from, to);

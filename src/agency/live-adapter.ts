@@ -5,6 +5,7 @@ import { chooseDevelopment, reviewDevelopment, developmentReadiness, guardDevelo
 import { observeQuietStep, recordViability, retryAllowed, stepKey, type QuietWindow, type Viability } from './step-retry.ts';
 import { meaningfulFrontierRoute, reconcileDeathLoss } from './reconciliation.ts';
 import { randomUUID } from 'node:crypto';
+import { emptyTrips, preparation, observeTrip, recordTripEffect, type TripLearning, type TripPreparation } from './trip-logistics.ts';
 import { Director, createMemory } from './director.ts';
 import type { Decision, Identity, Memory, Method, Observation, Outcome } from './types.ts';
 import { buildCatalogue, capabilityContext, cash, defaultPolicy, emptyKnowledge, observeFacts, observeKnowledge,
@@ -13,7 +14,7 @@ import { buildCatalogue, capabilityContext, cash, defaultPolicy, emptyKnowledge,
 export type LiveCandidate = { id: string; type: string; fields?: Record<string, any>; waitTicks?: number };
 export type Selection = { decision: Extract<Decision,{type:'execute'}>; method: Method; task: Task; view: Observation };
 export type Receipt = { commandId:string; action:LiveCandidate; before:LiveState; startedAt:number; scope:'task'|'safety'; methodId?:string; execution?:{accepted?:boolean;phase?:string;navigation?:{status:string;reason?:string;movementDispatched?:boolean}}; stationary?:QuietWindow };
-type Document = { version:2; memory:Memory; knowledge:Knowledge; receipt?:Receipt; safetyReceipt?:Receipt;
+type Document = { trips?:TripLearning; preparation?:TripPreparation; version:2; memory:Memory; knowledge:Knowledge; receipt?:Receipt; safetyReceipt?:Receipt;
   buildReadiness?:ReturnType<typeof developmentReadiness>; lastCommands:string[]; route?:{goalKey:string;methodId:string;action:LiveCandidate}; blocked?:string; development?:Development; updatedAt?:number;
   retries?:Record<string,Viability>; lastOutcome?:{at:number;commandId:string;type:string;status:string;reason?:string;evidence:string[]};
   losses?:Array<{at:number;commandId:string;lifeFrom:any;lifeTo:any;lostGp:number;items:Array<{id:number|string;count:number;name?:string}>}>;
@@ -45,7 +46,7 @@ export class LiveAgency {
     this.policy={...defaultPolicy,...options.policy};this.clock=options.now??Date.now;this.developmentHint=options.developmentHint;
     this.buildRules=options.buildRules?validateBuildRules(options.buildRules,identity):undefined;
     if (!Object.entries(this.policy).every(([_,v])=>v===undefined||Number.isFinite(v)&&Number(v)>=0)
-      || !Number.isInteger(this.policy.maxDeaths) || this.policy.foodTarget<1 || this.policy.maxDurationMs<=0)
+      || !Number.isInteger(this.policy.maxDeaths) || this.policy.foodTarget<0 || this.policy.maxDurationMs<=0)
       throw new Error('INVALID_AGENCY_POLICY');
     if(existsSync(file)) {
       const saved=JSON.parse(readFileSync(file,'utf8'));
@@ -59,11 +60,26 @@ export class LiveAgency {
     this.director=new Director(memory);
   }
   private save() { this.document.updatedAt=this.clock();atomic(this.file,this.document); }
+  tripPreparation(state:LiveState,kind?:TaskKind):TripPreparation {
+    this.document.trips??=emptyTrips();
+    return preparation(state,kind,this.document.trips);
+  }
+  private activity():TaskKind|undefined {
+    const id=this.director.memory.active?.id??'';
+    if(!id)return;
+    if(id.startsWith('train-')&&id!=='train-prayer')return 'combat';
+    if(id.startsWith('supply-food')||id.startsWith('gathering'))return 'gathering';
+    if(id.startsWith('production')||id==='supply-ammunition')return 'production';
+    return 'exploration';
+  }
   catalogue(state:LiveState):Catalogue {
     if(state.character && String(state.character).toLowerCase()!==this.identity.agent.toLowerCase())throw new Error('OBSERVATION_AGENT_MISMATCH');
     if(state.world && state.world!==this.identity.world)throw new Error('OBSERVATION_WORLD_MISMATCH');
     this.document.lastObservation={at:this.clock(),tick:state.tick,connected:state.inGame,position:state.player && {x:state.player.worldX,z:state.player.worldZ,level:state.player.level}};
     observeKnowledge(state,this.document.knowledge,this.clock(),this.routes);
+    this.document.trips??=emptyTrips();
+    observeTrip(this.document.trips,state,this.activity(),this.clock());
+    this.document.preparation=this.tripPreparation(state,this.activity());
     // Keep collision observations local, but do not promote incidental scenery into
     // strategic/support exploration goals. Existing bundled/source routes remain.
     for (const [id, route] of Object.entries(this.document.knowledge.routes)) {
@@ -73,7 +89,7 @@ export class LiveAgency {
       }
     }
     this.document.buildReadiness=developmentReadiness(this.document.development,state,this.buildRules);
-    return buildCatalogue(this.identity,state,this.document.knowledge,this.policy,this.supported,this.director.memory,this.clock(),this.document.development,this.buildRules);
+    return buildCatalogue(this.identity,state,this.document.knowledge,{...this.policy,foodTarget:this.document.preparation.foodTarget},this.supported,this.director.memory,this.clock(),this.document.development,this.buildRules,this.document.trips);
   }
   plan(state:LiveState):Selection|Decision {
     if(state.character && String(state.character).toLowerCase()!==this.identity.agent.toLowerCase())throw new Error('OBSERVATION_AGENT_MISMATCH');
@@ -91,14 +107,18 @@ export class LiveAgency {
       catalogue.opportunities=catalogue.opportunities.filter(g=>g.domain!=='combat');
       catalogue.methods=catalogue.methods.filter(m=>m.domain!=='combat');
     }
+    if(!this.document.receipt) {
+      this.director.retireObsoleteSurveys(new Set(Object.keys(this.document.knowledge.routes)),this.clock());
+      this.director.reviseFoodNeed(this.document.preparation!.foodTarget,this.clock());
+    }
     const decision=this.director.next(catalogue.view,catalogue.opportunities,catalogue.methods);
-    if(decision.type==='blocked'&&catalogue.methods.some(m=>m.risk==='unknown'))
+    if(decision.type==='blocked'&&this.director.memory.active?.domain==='combat'&&catalogue.methods.some(m=>m.risk==='unknown'))
       decision.reason+=' Combat loss valuation is unknown: provide an audited carried-kit replacement-loss ceiling in agency-policy.json.';
     this.document.blocked=decision.type==='blocked'?decision.reason:undefined;this.save();
     if(decision.type!=='execute')return decision;
     const method=catalogue.methods.find(m=>m.id===decision.step.methodId),task=catalogue.tasks.get(decision.step.methodId);
     if(!method||!task)throw new Error('UNREGISTERED_PLANNED_METHOD');
-    return {decision,method,task:{...task,target:decision.step.lineage?.at(-1)},view:catalogue.view};
+    return {decision,method,task:{...task,foodTarget:this.tripPreparation(state,task.kind==='food'?this.activity():task.kind).foodTarget,target:decision.step.lineage?.at(-1)},view:catalogue.view};
   }
   pending(scope:'task'|'safety'='task'):Receipt|undefined {
     const receipt=scope==='safety'?this.document.safetyReceipt:this.document.receipt;
@@ -109,7 +129,7 @@ export class LiveAgency {
     const r=this.document.receipt?.commandId===commandId?this.document.receipt:this.document.safetyReceipt;
     if(!r||r.commandId!==commandId)throw new Error('EXECUTION_WITHOUT_MATCHING_INTENT');
     r.execution ??= {};
-    if(result?.accepted===false)r.execution.accepted=false;
+    if(result?.accepted===false||result?.success===false&&result?.reason==='action_in_progress')r.execution.accepted=false;
     if(result?.phase==='rejected')r.execution.phase='rejected';
     if(result?.navigation)r.execution={...r.execution,navigation:{status:String(result.navigation.status),
       reason:result.navigation.reason,movementDispatched:result.navigation.movementDispatched}};
@@ -158,7 +178,7 @@ export class LiveAgency {
     this.director.blocked(this.clock(),reason);this.document.blocked=reason;this.save();
   }
   /** No re-selection here. A refused begin MUST prevent normal execution. */
-  begin(selection:Selection,action:LiveCandidate,state:LiveState,commandId=randomUUID()):string {
+  begin(selection:Selection,action:LiveCandidate,state:LiveState,commandId:string=randomUUID()):string {
     if(this.document.receipt||this.document.safetyReceipt)throw new Error('RECONCILE_PENDING_ACTION_FIRST');
     const view=this.catalogue(state).view;
     if(view.context!==selection.view.context)throw new Error('CAPABILITY_CONTEXT_CHANGED');
@@ -173,7 +193,7 @@ export class LiveAgency {
     this.save();return commandId;
   }
   /** Urgent survival is independent of the goal; it cannot overwrite an unresolved ordinary intent. */
-  beginSafety(action:LiveCandidate,state:LiveState,commandId=randomUUID()):string {
+  beginSafety(action:LiveCandidate,state:LiveState,commandId:string=randomUUID()):string {
     if(this.document.safetyReceipt)throw new Error('RECONCILE_SAFETY_ACTION_FIRST');
     if(!safetyAction(state,action))throw new Error('NOT_AN_URGENT_SAFETY_ACTION');
     this.document.safetyReceipt={commandId,action:structuredClone(action),before:structuredClone(state),startedAt:this.clock(),scope:'safety'};
@@ -185,11 +205,13 @@ export class LiveAgency {
     const receipt=safety?this.document.safetyReceipt:this.document.receipt;
     if(!receipt && this.document.lastCommands.includes(commandId))return;
     if(!receipt||receipt.commandId!==commandId)throw new Error('OUTCOME_WITHOUT_MATCHING_INTENT');
+    this.document.trips??=emptyTrips();
+    recordTripEffect(this.document.trips,commandId,receipt.before,after,receipt.action,verification.status==='verified');
     const state=this.catalogue(after).view;
     if(verification.status==='interrupted' && verification.evidence.length)delete this.document.route;
     const deaths=Number(after.player?.lifeId!==receipt.before.player?.lifeId);
     let reconciledMetrics=metrics;
-    if(deaths && !metrics) {
+    if(deaths && !metrics && !['shopBuy','shopSell','bankDeposit','bankWithdraw','clickDialogOption'].includes(receipt.action.type)) {
       const loss=reconcileDeathLoss(receipt.before,after);
       if(loss.settled) {
         verification={status:'interrupted',evidence:loss.evidence,reason:loss.reason};
@@ -198,6 +220,7 @@ export class LiveAgency {
           lifeTo:after.player?.lifeId,lostGp:loss.lostGp,items:loss.itemLosses}].slice(-64);
       } else verification={status:'unknown',evidence:[],reason:loss.reason};
     }
+    if(deaths&&!reconciledMetrics)verification={status:'unknown',evidence:[],reason:'Life changed: transaction attribution or complete loss observations are still required.'};
     const deltas=reconciledMetrics??{
       spentGp:receipt.action.type==='shopBuy'&&verification.status==='verified'?Math.max(0,cash(receipt.before.inventory??[])-cash(after.inventory??[])):0,
       lostGp:0,deaths,elapsedMs:Math.max(0,this.clock()-receipt.startedAt),
@@ -214,7 +237,7 @@ export class LiveAgency {
       const productive=Object.keys(pending.method.effects).some(k=>(state.facts[k]??0)>(pending.before[k]??0));
       const status:Outcome['status']=verification.status==='verified'&&!productive?'progress':verification.status;
       this.director.record({commandId,sequence:this.director.memory.sequence+1,status,at:state.at,facts:state.facts,
-        ...deltas,evidence:verification.evidence});
+        ...deltas,evidence:verification.evidence,observationOnly:['wait','scanNearbyLocs'].includes(receipt.action.type)});
       if(!this.director.memory.pending)delete this.document.receipt;
     }
     if(!this.document.receipt || this.document.receipt.commandId!==commandId)
@@ -230,7 +253,7 @@ export class LiveAgency {
   }
   summary() {
     const brief=(r:Receipt|undefined)=>r?{commandId:r.commandId,action:r.action,startedAt:r.startedAt}:undefined;
-    return {source:'agency-v2.json',updatedAt:this.document.updatedAt,buildReadiness:this.document.buildReadiness,development:this.document.development,
+    return {source:'agency-v2.json',preparation:this.document.preparation,updatedAt:this.document.updatedAt,buildReadiness:this.document.buildReadiness,development:this.document.development,
       lastObservation:this.document.lastObservation,lastOutcome:this.document.lastOutcome,losses:(this.document.losses??[]).slice(-8),
       goal:this.director.memory.active,pending:brief(this.pending()),safetyPending:brief(this.pending('safety')),blocked:this.document.blocked};
   }

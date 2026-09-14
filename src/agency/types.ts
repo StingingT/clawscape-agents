@@ -11,6 +11,7 @@ export type Budget = {
 };
 export type Identity = { agent: string; world: string; revision: string };
 export type Opportunity = {
+  investigates?:string[];
   id: string;
   domain: Domain;
   target: Requirement;
@@ -96,6 +97,7 @@ export type MethodStats = {
   elapsedMs: number;
   cooldownUntil: number;
   preparationMs?: number;
+  idleObservationMs?: number;
   interrupted?: number;
   viability?: 'viable' | 'uncertain' | 'temporarily-poor' | 'disproven';
   knowledgeRevision?: number;
@@ -147,4 +149,5 @@ export type Outcome = {
   deaths: number;
   elapsedMs: number;
   evidence: string[];
+  observationOnly?: boolean;
 };

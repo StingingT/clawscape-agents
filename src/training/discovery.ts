@@ -20,7 +20,7 @@ const xp = (s: any) => (s.skills ?? []).filter((v: any) => /^(attack|strength|de
 const ammo = (s: any) => [...(s.inventory ?? []), ...(s.equipment ?? [])].filter(i => hasUsableArrows(s.combatStyle?.weaponName ?? '', [i])).reduce((n, i) => n + Number(i.count), 0);
 const metal = (name: string) => ['bronze', 'iron', 'steel', 'black', 'mithril', 'adamant', 'rune'].findIndex(m => name.toLowerCase().includes(m)) + 1;
 const context = (s: any, ranged: boolean) => `${ranged ? 'ranged' : 'melee'}:${s.combatStyle?.weaponName ?? 'unknown'}:def${Math.floor(skillLevel(s, 'defence') / 10)}:skill${Math.floor(skillLevel(s, ranged ? 'ranged' : 'strength') / 10)}`;
-export function trainingReadiness(s: any, m: Monster, ranged: boolean): string | undefined {
+export function trainingReadiness(s: any, m: Monster, ranged: boolean, foodTarget = 0): string | undefined {
   if (!s.player || s.player.isDead || isThreatened(s) || s.bank?.isOpen || s.shop?.isOpen || s.dialog?.isOpen) return 'safety-or-interface';
   if ((s.inventory?.length ?? 28) >= 28) return 'inventory-full';
   // Food is a learned trip requirement owned by the agent controller. Do not
@@ -29,7 +29,8 @@ export function trainingReadiness(s: any, m: Monster, ranged: boolean): string |
   if (!(Number(s.player.hp) > Number(s.player.maxHp) * .6)) return 'health-or-food';
   // Higher-tier trials, including Black Knights, need a real retreat buffer;
   // do not start one merely because the weapon and level technically qualify.
-  if (m.combatLevel >= 30 && (Number(s.player.hp) <= Number(s.player.maxHp) * .8 || foodCount(s) < 3)) return 'high-tier-food-or-health';
+  if (foodCount(s)<foodTarget)return 'learned-trip-food';
+  if (m.combatLevel >= 30 && Number(s.player.hp) <= Number(s.player.maxHp) * .8) return 'high-tier-food-or-health';
   if (skillLevel(s, ranged ? 'ranged' : 'strength') < m.minSkill) return 'skill-prerequisite';
   const weapon = String(s.combatStyle?.weaponName ?? '');
   if (ranged) {
@@ -51,6 +52,7 @@ export class TrainingDiscovery {
   private document: { version: number; character: string; worlds: Record<string, Knowledge> };
   private preferredLeadIds:readonly string[]=[];
   private selectedSkill?:string;
+  private foodTarget=0;
   private routeCache = new Map<string, { until: number; route: Route }>();
   constructor(private file: string, readonly character: string, readonly catalog: Catalog, private ranged = false, private economy = false, private now = Date.now) {
     this.document = { version: 1, character, worlds: {} };
@@ -119,7 +121,7 @@ export class TrainingDiscovery {
   validateAction(s: any, action: Action) {
     const site = this.memory.sites[action.fields?.trainingSite];
     const monster = this.catalog.monsters.find(m => m.id === site?.monsterId);
-    if (!site || !monster || site.cooldownUntil > this.now() || trainingReadiness(s, monster, this.ranged)) return false;
+    if (!site || !monster || site.cooldownUntil > this.now() || trainingReadiness(s, monster, this.ranged, this.foodTarget)) return false;
     if (action.type === 'walkTo') return site.points.some(p => p.x === action.fields?.x && p.z === action.fields?.z && p.level === action.fields?.level);
     const target = s.nearbyNpcs?.find((n: any) => n.index === action.fields?.npcIndex);
     return !!target && target.hp !== 0 && this.monster(target)?.id === monster.id && target.reachable === true && target.inCombat !== true && target.distance <= 8 && target.optionsWithIndex?.some((o: any) => o.opIndex === action.fields?.optionIndex && /^attack$/i.test(o.text));
@@ -228,7 +230,8 @@ export class TrainingDiscovery {
     const measured = stats.xp / stats.ticks * 4 - stats.damage / Math.max(1, stats.encounters) * .2 - stats.food / Math.max(1, stats.encounters) - stats.ammo / Math.max(1, stats.encounters) * .05 - stats.escapes * 4 - stats.deaths * 20;
     return guideBonus + prior * (1 - weight) + measured * weight - cost / 80;
   }
-  async next(s: any, probe: RouteProbe, leadIds:readonly string[]=[], skill?:string): Promise<Action[]> {
+  async next(s: any, probe: RouteProbe, leadIds:readonly string[]=[], skill?:string, foodTarget=0): Promise<Action[]> {
+    this.foodTarget=foodTarget;
     this.preferredLeadIds=leadIds;this.selectedSkill=skill;
     if(skill==='ranged')this.ranged=true;
     else if(skill&&['attack','strength','defence'].includes(skill))this.ranged=false;
@@ -249,7 +252,7 @@ export class TrainingDiscovery {
     if (now - this.memory.exploration.window >= 10 * 60_000) this.memory.exploration = { window: now, trips: 0 };
     let candidates = Object.values(this.memory.sites).filter(site => {
       const m = this.catalog.monsters.find(m => m.id === site.monsterId);
-      return m && site.cooldownUntil <= now && !trainingReadiness(s, m, this.ranged) && site.points.some(p => p.level === origin.level);
+      return m && site.cooldownUntil <= now && !trainingReadiness(s, m, this.ranged, this.foodTarget) && site.points.some(p => p.level === origin.level);
     });
     // Harder monsters are trials, not mandates. Sparse comparable evidence
     // gets a small, decaying bonus; measured risk and throughput remain decisive.
@@ -284,7 +287,7 @@ export class TrainingDiscovery {
       if (!choices.some(c => c.site === site)) this.block(site.id, 'no-feasible-approach', 60_000);
     }
     if (loading) return wait('loading-map');
-    if (!choices.length && hold && !this.memory.commitment) return this.next(s, probe, leadIds, skill);
+    if (!choices.length && hold && !this.memory.commitment) return this.next(s, probe, leadIds, skill, foodTarget);
     choices.sort((a, b) => b.score - a.score);
     let chosen = choices[0];
     const current = choices.find(c => c.site.id === commitment?.siteId);

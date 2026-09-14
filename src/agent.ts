@@ -278,7 +278,7 @@ function loadGitHubLearningState(): GitHubLearningState {
 
 async function cliCall(args: string[]): Promise<Json> {
   const result = await callSkill(character, args, clawscapeHome);
-  if (result.error || result.success === false) throw new Error(`CLI rejected ${args[1] ?? args[0]}: ${result.reason ?? ''} ${result.message ?? result.error ?? ''}`);
+  if (result.error || (result.success === false && args[0]!=='act')) throw new Error(`CLI rejected ${args[1] ?? args[0]}: ${result.reason ?? ''} ${result.message ?? result.error ?? ''}`);
   return result;
 }
 
@@ -727,7 +727,7 @@ function bankingCandidates(state: GameState, task?: Task): Candidate[] {
   const equippedArrows = (state.equipment ?? []).filter(item => isFinishedArrow(text(item.name))).reduce((sum, item) => sum + Number(item.count ?? 1), 0);
   const surplusArrows = surplusArrowAmount(carriedArrows + equippedArrows);
   const foodMemory = work.learning?.food;
-  const tripFood = (task?.target?.fact==='food'?task.target.minimum:undefined) ?? agency?.policy.foodTarget ?? (character==='clawscout'?Math.max(3,learnedFoodReserve(foodMemory)):learnedFoodReserve(foodMemory));
+  const tripFood = (task?.target?.fact==='food'?task.target.minimum:undefined) ?? agency?.tripPreparation(state,task?.kind).foodTarget ?? learnedFoodReserve(foodMemory);
   const foodTotal = learnedFoodCount(inventory);
   const surplusFood = Math.max(0, foodTotal - tripFood);
   // Raw fish is an input and can always be stored. Cooked food is stored only
@@ -762,7 +762,7 @@ function bankingCandidates(state: GameState, task?: Task): Candidate[] {
       work.foodBatch = {phase: 'cook', startedAt: Date.now()}; saveWork();
       return [{ id: 'close-bank-to-cook-withdrawn-fish', type: 'closeModal', fields: { reason: 'cook the raw fish batch withdrawn from the bank' }, waitTicks: 1 }];
     }
-    if (shouldCloseAfterFoodWithdrawal(work.foodWithdrawalPending === true, inventory.some(isFood))) {
+    if (shouldCloseAfterFoodWithdrawal(work.foodWithdrawalPending === true, foodTotal>=tripFood)) {
       return [{ id: 'close-bank-with-food-trip', type: 'closeModal', fields: { reason: 'keep deliberately withdrawn food for the next trip' }, waitTicks: 1 }];
     }
     // Finish the transaction even after the first deposit frees inventory slots.
@@ -798,8 +798,8 @@ function bankingCandidates(state: GameState, task?: Task): Candidate[] {
   // One free slot is not enough for a safe ranged resupply or a dropped tool.
   // Bank a near-full bag of materials before processing it, while still
   // retaining a deliberate food trip until the bag is genuinely full.
-  const nearFullMaterials = inventory.length >= 27 && bankableItems.length > 0;
-  if ((!inventoryFull || bankableItems.length === 0) && !nearFullMaterials && !urgentClutter && !excessArrowInputs && surplusFood === 0 && surplusCoins === 0 && !recoveryCash) return [];
+  const nearFullMaterials = inventory.length >= (task?.kind==='gathering'?Number(state.capacity??28):Number(state.capacity??28)-1) && bankableItems.length > 0;
+  if ((!inventoryFull || bankableItems.length === 0) && !nearFullMaterials && !urgentClutter && !excessArrowInputs && (surplusFood === 0||task?.kind==='gathering') && surplusCoins === 0 && !recoveryCash) return [];
   const banker = (state.nearbyNpcs ?? []).find((npc) => npc.reachable === true && /banker/i.test(text(npc.name)) && typeof npc.index === "number");
   if (banker) {
     const option = (banker.optionsWithIndex as Json[] | undefined)?.find((item) => /bank|use/i.test(text(item.text)));
@@ -1040,7 +1040,7 @@ function productionCandidates(state: GameState, requestedFood = false, targetFoo
   if (!requestedFood && role === 'economy' && !economyNeedsFood(state)) return [];
   const locs = state.nearbyLocs ?? [];
   const foodMemory = work.learning?.food;
-  const requiredFood = targetFood ?? agency?.policy.foodTarget ?? (character==='clawscout'?Math.max(3,learnedFoodReserve(foodMemory)):learnedFoodReserve(foodMemory));
+  const requiredFood = targetFood ?? agency?.tripPreparation(state,'gathering').foodTarget ?? learnedFoodReserve(foodMemory);
   const carriedFood = learnedFoodCount(inv);
   if (!work.foodBatch && carriedFood < requiredFood) {
     // Cached stock is a lead; opening the bank refreshes quantities before withdrawal.
@@ -1146,7 +1146,7 @@ function productionCandidates(state: GameState, requestedFood = false, targetFoo
     const option = (fish.optionsWithIndex as Json[] | undefined)?.find((candidate) => /^net$/i.test(text(candidate.text)));
     if (typeof option?.opIndex === "number") return [{ id: `fish-${fish.index}`, type: "interactNpc", fields: { npcIndex: fish.index, optionIndex: option.opIndex, reason: "fish safe starter food" }, waitTicks: 5 }];
   }
-  // Food is a hard survival requirement. Search a wider area instead of
+  // A measured food dependency stays linked to its trip. Search a wider area instead of
   // falling back to combat or idle waiting when the reserve is exhausted.
   if (work.foodBatch?.phase === 'gather' || carriedFood < requiredFood) {
     const player = state.player ?? {};
@@ -1212,7 +1212,7 @@ async function actionsForTask(state: GameState, task: Task): Promise<Candidate[]
       if(!state.combatStyle?.styles?.some((s:any)=>s.trainsSkills?.some((k:string)=>k.toLowerCase()===task.skill)))return [];
       const gear=gearCandidates(state,task.skill);
       if(gear.length)return gear;
-      return training ? training.next(state,(from,to)=>navigator!.assess(from,to),task.guideLeadIds,task.skill) : [];
+      return training ? training.next(state,(from,to)=>navigator!.assess(from,to),task.guideLeadIds,task.skill,task.foodTarget??0) : [];
     }
     case 'prayer': {
       const bone=(state.inventory??[]).find((i:any)=>i.optionsWithIndex?.some((o:any)=>/^bury$/i.test(String(o.text))));
@@ -1221,11 +1221,15 @@ async function actionsForTask(state: GameState, task: Task): Promise<Candidate[]
     }
     case 'production': {
       work.economy ??= {bankItems:work.bankItems??[]};
+      work.economy.tripFoodTarget=task.foodTarget??0;
       selectWork(state,work.economy);
       const result=economyNext(state,work.economy,id=>!actionReady(work.failures[id]));
       saveWork(); return result;
     }
-    case 'gathering': return [...economyCandidates(state),...localEconomyDiscovery(state)];
+    case 'gathering': {
+      if((state.inventory?.length??0)>=Number(state.capacity??28))return bankAt(state);
+      return [...economyCandidates(state),...localEconomyDiscovery(state)];
+    }
     case 'exploration': {
       if(!task.route)return [];
       const route=await navigator!.assess(position(state),task.route);
@@ -1260,6 +1264,7 @@ async function executeAgencyAction(state:GameState,action:Candidate):Promise<{ne
   if(action.type==='shopBuy'||action.type==='shopSell'){delete fields.itemId;delete fields.expectedPrice;}
   const type=action.type==='closeModal'&&state.shop?.isOpen?'closeShop':action.type;
   const result=await cliCall(['act',type,'--json',JSON.stringify(fields)]);
+  if(result.accepted===false||result.phase==='rejected'||result.success===false&&result.reason==='action_in_progress')return {next:state,result};
   return {next:stateFrom(await cliCall(['wait',String(action.waitTicks)])),result};
 }
 function observeAgencyResult(before:GameState,after:GameState,action:Candidate):void {
@@ -1294,6 +1299,7 @@ async function runEpisode(): Promise<void> {
   for(let step=0;step<steps;step++) {
     state=stateFrom(await cliCall(['state']));
     training?.observe(state);
+    agency.catalogue(state);
     const safetyPending=agency.pending('safety');
     if(safetyPending) {
       const check=verifyActionOutcome(safetyPending.before,state,safetyPending.action,safetyPending.execution);
@@ -1378,7 +1384,7 @@ async function main(): Promise<void> {
   const policyPath=resolve(dataDir,'agency-policy.json');
   const policy=existsSync(policyPath)?JSON.parse(readFileSync(policyPath,'utf8')):{};
   agency = new LiveAgency(resolve(dataDir,'agency-v2.json'), {agent:character,world:process.env.CLAWSCAPE_SERVER??'clawscape',revision:gearCatalog.namespace}, {
-    policy:{foodTarget:Math.max(3,learnedFoodReserve(work.learning?.food)),...policy},
+    policy,
     supported:['food','ammunition','equipment','bank','combat','production','gathering','exploration','funds','prayer'],
     developmentHint:build,
     buildRules:loadBuildRules(resolve(dataDir,'build-rules.json'),{world:process.env.CLAWSCAPE_SERVER??'clawscape',revision:gearCatalog.namespace}),

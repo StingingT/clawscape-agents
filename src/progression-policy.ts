@@ -113,6 +113,7 @@ const near = (s: any,p: any,r=2) => Number(s.player?.level) === (p.level ?? 0)
   && Math.max(Math.abs(s.player.worldX-p.x),Math.abs(s.player.worldZ-p.z)) <= r;
 const coins = (items: any[]) => items.filter(i => /^coins$/i.test(i.name)).reduce((n,i)=>n+Number(i.count),0);
 export type EconomyMemory = {
+  tripFoodTarget?: number;
   objectives?: ObjectiveMemory;
   metal?: MetalMemory;
   bowmaking?: BowMemory;
@@ -158,7 +159,7 @@ export function shopAt(s: any, name: RegExp, destination: any): Action[] {
 export function economyNext(s: any,m: EconomyMemory, blocked: (id: string) => boolean = () => false): Action[] {
   if(m.objectives&&!m.objectives.intent){m.goal='review-profit-prerequisites';m.reason=m.objectives.decision?.blocker??'No supported positive or unmeasured production option; preserve assets until an alternative is available';return [{id:'economy-review-profit-prerequisites',type:'wait',waitTicks:5}];}
   if(economyTrack(s,m)==='metalworking')return metalNext(s,m,blocked);
-  if(m.objectives?.intent?.mode==='finish')return bowNext(s,m,blocked);
+  if(m.objectives?.intent?.mode==='finish')return bowNext(s,m,blocked,Date.now(),m.tripFoodTarget??0);
   const intent=m.objectives?.intent,processLogs=intent?.mode!=='logs';
   const inv = s.inventory ?? [], eq = s.equipment ?? [], all = [...inv,...eq];
   const cash = coins(inv), bestAxe = Math.max(0,...all.map((i:any)=>axeRank(i.name)));

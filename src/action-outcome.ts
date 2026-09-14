@@ -10,12 +10,22 @@ const interrupted=(reason:string):ActionVerification=>({verified:false,uncertain
 const menu=(e:any,index:any)=>(e?.optionsWithIndex??[]).find((o:any)=>o.opIndex===index)?.text??'';
 const opened=(s:any)=>s.bank?.isOpen===true||s.shop?.isOpen===true||s.dialog?.isOpen===true||s.modalOpen===true;
 
+function requestedProductionPanel(before:any,after:any,action:ActionLike):boolean {
+  if(before.interface?.isOpen===true || after.interface?.isOpen!==true)return false;
+  const f=action.fields??{},names=[f.sourceSlot??f.itemSlot,f.targetSlot].map(slot=>String(before.inventory?.find((i:any)=>i.slot===slot)?.name??''));
+  const labels=(after.interface.options??[]).map((o:any)=>String(o.text??o.label??'')).join(' ');
+  if(names.some(n=>/^knife$/i.test(n))&&names.some(n=>/^(logs|oak logs|willow logs|maple logs|yew logs|magic logs)$/i.test(n)))
+    return /arrow shafts?|shortbow|longbow/i.test(labels);
+  if(names.some(n=>/^raw /i.test(n)))return /cook/i.test(labels);
+  return false;
+}
+
 /** Action-specific verification. Missing evidence is UNKNOWN, not a rejected mutation. */
 export function verifyActionOutcome(before:any,after:any,action:ActionLike,result?:any):ActionVerification {
   const f=action.fields??{}, type=action.type;
   if(!before?.player||!after?.player)return no('complete player observation required');
   if(before.player.lifeId!==after.player.lifeId)return no('life changed; losses and intent must be reconciled');
-  if(result?.accepted===false || result?.phase==='rejected')return no('explicit server rejection',false);
+  if(result?.accepted===false || result?.success===false&&result?.reason==='action_in_progress' || result?.phase==='rejected')return no('explicit server rejection',false);
   if(type==='wait')return Number(after.tick)>Number(before.tick)?yes('read-only wait completed'):no('observation has not advanced',false);
   if(type==='scanNearbyLocs')return Number(after.tick)>=Number(before.tick)&&Array.isArray(after.nearbyLocs)?yes('read-only scan completed'):no('scan unavailable',false);
   if(type==='walkTo'||type==='retreat') {
@@ -109,6 +119,7 @@ export function verifyActionOutcome(before:any,after:any,action:ActionLike,resul
   const skill=/net|bait|lure|fish/i.test(option)?'fishing':/chop/i.test(option)?'woodcutting':/mine/i.test(option)?'mining':'';
   if(skill&&xp(after,skill)>xp(before,skill)&&!same(before.inventory,after.inventory))return yes(`${skill} output and XP observed`);
   if(type==='useItemOnItem'||type==='useItemOnLoc') {
+    if(requestedProductionPanel(before,after,action))return yes('requested production interface opened; output still unverified');
     if(!same(before.dialog,after.dialog))return yes('production dialogue observed');
     const slot=f.sourceSlot??f.itemSlot, item=(before.inventory??[]).find((i:any)=>i.slot===slot);
     const target=before.inventory?.find((i:any)=>i.slot===f.targetSlot);

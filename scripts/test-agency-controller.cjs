@@ -16,13 +16,14 @@ async function runScenario({blocked=false,unknown=false,deny=false,movement=fals
   const {LiveAgency,isSelection}=await import('../src/agency/live-adapter.ts');
   const {verifyActionOutcome}=await import('../src/action-outcome.ts');
   const {recoverLegacyJournals}=await import('../src/agency/journal-recovery.ts');
+  const {seedProvisionHistory}=await import('../tests/agency/provision-fixture.ts');
   const dir=mkdtempSync(join(tmpdir(),'agency-controller-'));
   try{
     let now=1000,ids=0,mutationCalls=0,planned=false,legs=0,assessments=0,mapWaited=false;
     class TestDate extends Date { static now(){return now;} }
     const identity={agent:'test',world:'test',revision:'test'};
     const goalSkill=meleeGoal?'strength':'ranged';
-    const agency=new LiveAgency(join(dir,'journal.json'),identity,{supported:combatGoal?['food','combat']:movement?['exploration']:['food'],developmentHint:combatGoal?(meleeGoal?'melee':'ranged-magic'):undefined,preferences:combatGoal?{combat:2}:{},routes:movement?[{id:'bank-route',x:50,z:1,level:0,evidence:'observed lead'}]:[],policy:{foodTarget:3,combatLossBoundGp:5},now:()=>now});
+
     const state={inGame:true,tick:1,player:{hp:30,maxHp:30,lifeId:1,level:0,worldX:1,worldZ:1,animId:-1,combat:{inCombat:false,targetType:'none',targetIndex:-1}},
       inventory:[],equipment:[],skills:[],bank:{isOpen:!movement,items:[{id:315,name:'Shrimps',count:10,slot:7}]}};
     if(combatGoal) {
@@ -35,6 +36,9 @@ async function runScenario({blocked=false,unknown=false,deny=false,movement=fals
       }
       state.nearbyNpcs=[{id:1,index:7,name:'Goblin',reachable:true,optionsWithIndex:[{opIndex:2,text:'Attack'}]}];
     }
+    // This scenario explicitly learned a three-meal requirement; there is no global minimum.
+    if(!movement)seedProvisionHistory(join(dir,'journal.json'),identity,state,3,combatGoal?{combat:2}:{});
+    const agency=new LiveAgency(join(dir,'journal.json'),identity,{supported:combatGoal?['food','combat']:movement?['exploration']:['food'],developmentHint:combatGoal?(meleeGoal?'melee':'ranged-magic'):undefined,preferences:combatGoal?{combat:2}:{},routes:movement?[{id:'bank-route',x:50,z:1,level:0,evidence:'observed lead'}]:[],policy:{foodTarget:3,combatLossBoundGp:5},now:()=>now});
     const legacyPath=join(dir,'action-intent.json');
     if(legacyNavigation)writeFileSync(legacyPath,JSON.stringify({commandId:'test-old-bank-for-fishing-tool-funds',
       actionId:'bank-for-fishing-tool-funds',type:'walkTo',fields:{x:50,z:1,level:0},status:'failed',beforeState:structuredClone(state)}));
@@ -119,8 +123,56 @@ async function runScenario({blocked=false,unknown=false,deny=false,movement=fals
     return {mutationCalls,reviews:agency.director.memory.reviews.length};
   }finally{rmSync(dir,{recursive:true,force:true});}
 }
+async function runGatherScenario(){
+  const {LiveAgency,isSelection}=await import('../src/agency/live-adapter.ts');
+  const {verifyActionOutcome}=await import('../src/action-outcome.ts');
+  const {recoverLegacyJournals}=await import('../src/agency/journal-recovery.ts');
+  const dir=mkdtempSync(join(tmpdir(),'gather-controller-'));
+  try {
+    let now=1000,ids=0,harvests=0,deposits=0,bankOpens=0;
+    class TestDate extends Date {static now(){return now;}}
+    const state={character:'test',world:'test',worldEpoch:'epoch',sessionId:'one',inGame:true,tick:1,capacity:6,
+      player:{hp:30,maxHp:30,lifeId:1,level:0,worldX:1,worldZ:1,animId:-1,combat:{inCombat:false,targetType:'none'}},
+      inventory:[{id:1351,name:'Bronze axe',slot:0,count:1}],equipment:[],skills:[{name:'woodcutting',baseLevel:1,experience:0}],
+      bank:{isOpen:false,items:[]},nearbyLocs:[{id:1276,name:'Tree',x:2,z:1,reachable:true,optionsWithIndex:[{opIndex:1,text:'Chop down'}]}],
+      nearbyNpcs:[{id:1,index:5,name:'Banker',reachable:true,optionsWithIndex:[{opIndex:1,text:'Bank'}]}]};
+    const agency=new LiveAgency(join(dir,'agency-v2.json'),{agent:'test',world:'test',revision:'test'},
+      {supported:['gathering','food','bank'],now:()=>now});
+    const env={agency,steps:11,character:'test',role:'resource',build:'melee',forumEnabled:false,console:{log(){},error(){}},Date:TestDate,
+      loadActionIntent:()=>undefined,actionIntentPath:join(dir,'action-intent.json'),finishActionIntent(){},
+      dataDir:dir,existsSync:require('node:fs').existsSync,resolve:require('node:path').resolve,
+      recoverLegacyJournals,process:{env:{CLAWSCAPE_SERVER:'test'}},stateFrom:v=>v.state,isSelection,verifyActionOutcome,
+      available:v=>v,choose:(_,v)=>v[0],stateKey:()=>'',training:undefined,
+      urgentAgencyAction:()=>undefined,validateMetal:()=>true,validateBow:()=>true,validateFishing:()=>true,
+      equipmentGoals:{validate:()=>true},observeAgencyResult(){},appendFileSync(){},experiencePath:'unused',randomUUID:()=>`gather-${++ids}`,
+      economyCandidates:()=>[{id:'chop-tree',type:'interactLoc',fields:{locId:1276,x:2,z:1,optionIndex:1},waitTicks:1}],localEconomyDiscovery:()=>[],
+      bankAt:()=>{assert.equal(state.inventory.length,6,'do not bank a half-empty resource bag');return [{id:'open-bank',type:'interactNpc',fields:{npcIndex:5,optionIndex:1},waitTicks:1}];},
+      bankingCandidates:()=>{const log=state.inventory.find(i=>i.id===1511);return log?[{id:'deposit-log',type:'bankDeposit',fields:{slot:log.slot,amount:1},waitTicks:1}]:[{id:'close-bank',type:'closeModal',waitTicks:1}];},
+      cliCall:async args=>{
+        now+=100;state.tick++;
+        if(args[0]==='act'){
+          const action=agency.pending().action;
+          assert.ok(agency.pending(),'intent must be durable before dispatch');
+          if(args[1]==='interactLoc'){harvests++;state.inventory.push({id:1511,name:'Logs',slot:state.inventory.length,count:1});state.skills[0].experience+=25;}
+          else if(args[1]==='interactNpc'){assert.equal(harvests,5);bankOpens++;state.bank.isOpen=true;}
+          else if(args[1]==='bankDeposit'){deposits++;state.inventory=state.inventory.filter(i=>i.slot!==action.fields.slot);state.bank.items=[{id:1511,name:'Logs',count:deposits,slot:0}];}
+          else if(args[1]==='closeModal')state.bank.isOpen=false;
+          else throw new Error('Unexpected gathering command: '+args[1]);
+        }
+        return {state:structuredClone(state)};
+      },
+    };
+    const context=vm.createContext(env);vm.runInContext(js,context);await context.runEpisode();
+    assert.equal(harvests,5);assert.equal(bankOpens,1);assert.equal(deposits,5);
+    assert.equal(agency.director.memory.reviews[0].result,'success');
+    assert.equal(agency.director.memory.reviews[0].goal.target.fact,'gathering:banked');
+    assert.ok(!agency.director.memory.reviews[0].goal.supportGoals.some(s=>s.target.fact==='food'));
+    return {scenario:{learnedGathering:true},harvests,deposits,bankOpens};
+  }finally{rmSync(dir,{recursive:true,force:true});}
+}
 (async()=>{
   const results=[];
   for(const scenario of [{},{blocked:true},{unknown:true},{deny:true},{movement:true},{movement:true,mapWait:true},{movement:true,legacyNavigation:true},{combatGoal:true},{combatGoal:true,badStyle:true},{combatGoal:true,meleeGoal:true},{combatGoal:true,meleeGoal:true,badStyle:true}])results.push({scenario,...await runScenario(scenario)});
+  results.push(await runGatherScenario());
   console.log(JSON.stringify({controllerChecks:results.length,passed:results.length,results},null,2));
 })().catch(e=>{console.error(e);process.exitCode=1;});

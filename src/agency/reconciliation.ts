@@ -32,14 +32,16 @@ export type DeathReconciliation = {
  */
 export function reconcileDeathLoss(before: LiveState, after: LiveState): DeathReconciliation {
   const fail = (reason: string): DeathReconciliation => ({ settled: false, evidence: [], lostGp: 0, itemLosses: [], reason });
-  if (!before?.player || !after?.player || before.player.lifeId === after.player.lifeId) return fail('No life change to reconcile.');
+  if (!before?.player || !after?.player || before.player.lifeId == null || after.player.lifeId == null || before.player.lifeId === after.player.lifeId) return fail('No life change to reconcile.');
   if (!Array.isArray(before.inventory) || !Array.isArray(before.equipment)
     || !Array.isArray(after.inventory) || !Array.isArray(after.equipment)) return fail('Complete pre/post inventory and equipment observations required.');
   if (after.inGame !== true || after.player.isDead === true || !(Number(after.player.hp) > 0)) return fail('Wait for a live post-respawn observation before reconciling losses.');
-  for (const field of ['character', 'world', 'profileId'])
+  for (const field of ['character', 'world', 'worldEpoch', 'profileId'])
     if (before[field] !== undefined && after[field] !== before[field]) return fail('Actor or world identity changed during death reconciliation.');
 
   const beforeItems = carried(before), afterItems = carried(after);
+  if([...beforeItems,...afterItems].some(i=>i.id==null||!Number.isSafeInteger(Number(i.count??1))||Number(i.count??1)<0))return fail('Invalid accounting quantities.');
+  if(!Number.isFinite(before.tick)||!Number.isFinite(after.tick)||after.tick<=before.tick)return fail('Fresh post-respawn state required.');
   const ids = new Set(beforeItems.map((i: any) => i.id));
   const itemLosses: DeathReconciliation['itemLosses'] = [];
   for (const id of ids) {
