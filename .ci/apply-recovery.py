@@ -43,7 +43,6 @@ for entry in entries:
         end = start
     data = ''.join(lines).encode('utf-8')
     if blob(data) != entry['after']:
-        # Restore nested-JSON transport escaping; never change the expected source hash.
         restored = data.replace(bytes([39,10,39]), bytes([39,92,110,39]))
         if blob(restored) != entry['after']:
             raise SystemExit('Published source differs from tested source: ' + name)
@@ -56,8 +55,17 @@ if '--commit' not in sys.argv:
         path.write_bytes(data)
     print('Verified and applied all 27 tested source files; no live state accessed.')
 else:
-    subprocess.run(['git', 'add', '--', *[e['path'] for e in entries]], check=True)
-    delivery = [str(p.relative_to(root)) for p in parts] + ['.ci/apply-recovery.py', '.github/workflows/recovery-apply.yml', '.github/workflows/recovery-source.yml']
+    # This token has contents permission, not workflow-write permission.
+    # Publish only source/tests/docs. Do not add, modify, or remove any workflows.
+    workflow_paths = [e['path'] for e in entries if e['path'].startswith('.github/workflows/')]
+    if workflow_paths:
+        subprocess.run(['git', 'restore', '--source=HEAD', '--', *workflow_paths], check=True)
+    source_paths = [e['path'] for e in entries if not e['path'].startswith('.github/workflows/')]
+    subprocess.run(['git', 'add', '--', *source_paths], check=True)
+    delivery = [str(p.relative_to(root)) for p in parts] + ['.ci/apply-recovery.py']
     subprocess.run(['git', 'rm', '-f', '--', *delivery], check=True)
+    changed = subprocess.check_output(['git', 'diff', '--cached', '--name-only'], text=True).splitlines()
+    if any(p.startswith('.github/workflows/') for p in changed):
+        raise SystemExit('Refusing workflow changes with contents-only permission')
     subprocess.run(['git', 'commit', '-m', 'Fix Astra startup diagnostics and reconcile legacy journals without replay'], check=True)
     subprocess.run(['git', 'push', 'origin', 'HEAD:refs/heads/codex/astra-startup-journal-recovery'], check=True)
