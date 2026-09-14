@@ -2234,8 +2234,16 @@ async function runEpisode(): Promise<void> {
   const legacy=loadActionIntent(actionIntentPath);
   if(legacy && ['pending','outcome-unknown'].includes(legacy.status)) {
     const check=legacy.beforeState?verifyActionOutcome(legacy.beforeState,state,legacy):undefined;
-    if(!check?.verified)throw new Error('LEGACY_ACTION_RECONCILIATION_REQUIRED:'+legacy.commandId);
-    finishActionIntent(actionIntentPath,legacy,'verified',check.evidence);
+    if(!check?.verified) {
+      // Old controllers can leave a navigation/read-only intent behind when
+      // the verifier schema changes. These actions cannot duplicate a purchase
+      // or transfer, so quarantine the stale record after one fresh read and
+      // resume planning. Mutating intents remain blocked until reconciled.
+      const readOnly = /^(walkTo|retreat|wait|scanNearbyLocs|closeModal)$/.test(legacy.type);
+      if (!readOnly) throw new Error('LEGACY_ACTION_RECONCILIATION_REQUIRED:'+legacy.commandId);
+      finishActionIntent(actionIntentPath,legacy,'failed',check?.evidence ?? [],'stale non-mutating intent quarantined after restart: '+(check?.reason ?? 'no verified movement/read result'));
+      console.error(JSON.stringify({actionIntent:'quarantined-stale-read-only',commandId:legacy.commandId,type:legacy.type}));
+    } else finishActionIntent(actionIntentPath,legacy,'verified',check.evidence);
   }
   for(let step=0;step<steps;step++) {
     state=stateFrom(await cliCall(['state']));
