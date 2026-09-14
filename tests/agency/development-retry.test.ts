@@ -19,7 +19,7 @@ const attack={type:'interactNpc',fields:{npcIndex:4,optionIndex:2}};
 
 test('a low-Defence ranged character chooses a reasoned pure experiment, not an immutable role',()=>{
   const d=chooseDevelopment(state(),createMemory(identity,{combat:2}),1000,'ranged-magic');
-  assert.equal(d.id,'ranged-magic-pure');assert.deepEqual(Object.keys(d.protectedXp),['attack','strength','defence']);
+  assert.equal(d.id,'ranged-magic-pure');assert.deepEqual(Object.keys(d.protectedXp),['attack','strength','defence','prayer']);
   assert.ok(d.reason.includes('observed'));assert.ok(d.evidence.length);
   const s=state();s.skills.find((k:any)=>k.name==='defence').baseLevel=40;
   assert.equal(chooseDevelopment(s,createMemory(identity,{combat:2}),1000,'ranged-magic').id,'open-development');
@@ -39,10 +39,10 @@ test('unknown style XP cannot silently authorize an attack',()=>{
   s.combatStyle.styles=[];assert.throws(()=>guardDevelopment(d,s,attack,'ranged'),/CANNOT_VERIFY/);
 });
 
-test('a Strength/Prayer strategy protects low Attack and Defence but permits observed Prayer',()=>{
+test('a rune melee strategy permits planned Attack preparation and deliberately freezes default Prayer',()=>{
   const s=state();s.combatStyle.styles=[{index:0,trainsSkills:['strength']}];
   const d=chooseDevelopment(s,createMemory(identity,{combat:2}),1000,'melee');
-  assert.equal(d.id,'strength-prayer-pure');assert.ok(Object.hasOwn(d.protectedXp,'attack'));assert.ok(!Object.hasOwn(d.protectedXp,'prayer'));
+  assert.equal(d.id,'rune-melee-pure');assert.equal(d.levelCaps?.attack,40);assert.ok(!Object.hasOwn(d.protectedXp,'attack'));assert.ok(Object.hasOwn(d.protectedXp,'prayer'));
   const before=state(),after=state(2);before.inventory=[{id:526,name:'Bones',slot:0,count:1,optionsWithIndex:[{text:'Bury',opIndex:1}]}];after.inventory=[];
   after.skills.find((k:any)=>k.name==='prayer').experience=4.5;
   assert.equal(verifyActionOutcome(before,after,{type:'useInventoryItem',fields:{slot:0,optionIndex:1}}).verified,true);
@@ -55,13 +55,13 @@ test('missing supplies, route failures and time alone cannot erase a pure experi
   assert.equal(reviewDevelopment(d,s,m,100_000),d);
 });
 
-test('three attributed costly combat trials can justify ending a pure strategy for Defence support',()=>{
+test('three costly trials request alternatives without automatically removing a pure boundary',()=>{
   const m=createMemory(identity,{combat:2}),s=state(),d=chooseDevelopment(s,m,1000,'ranged-magic');
   s.combatStyle.styles.push({index:2,trainsSkills:['defence']});
   m.reviews=Array.from({length:3},(_,i)=>({at:2000+i,goal:{id:'train-ranged',strategyId:d.id,domain:'combat',deaths:1,lostGp:5} as any,
     result:'failure',reason:'Verified loss',evidence:['death-event']}));
-  const changed=reviewDevelopment(d,s,m,5000);assert.equal(changed.id,'open-development');assert.deepEqual(changed.focus,['defence']);
-  assert.equal(changed.history.length,1);assert.equal(changed.evidence.length,3);assert.deepEqual(changed.protectedXp,{});
+  const changed=reviewDevelopment(d,s,m,5000);assert.equal(changed.id,d.id);assert.deepEqual(changed.protectedXp,d.protectedXp);
+  assert.equal(changed.history.length,0);assert.equal(changed.review?.evidence.length,3);assert.ok(changed.review?.alternatives.length);
 });
 
 test('pure strategy and parent-linked food preparation survive a restart and changed role suggestion',t=>{

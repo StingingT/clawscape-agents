@@ -11,6 +11,7 @@ import { Navigator, position } from './navigation/controller';
 import { dialogueOption, bankOption, bowArrowCap, hasUsableArrows, isFood, isThreatened, harvestLevel, verifyBankTransfer } from './runtime-policy';
 import { bankAt, economyNext, productionDialog, shouldHeal, combatDisposition, meleeTrainingSkill, nearbyAmmoRecovery, quiverRefill, activeOpponent, isApprovedNpcTarget, foodCount, type EconomyMemory } from './progression-policy';
 import { loadCatalog } from './training/catalog';
+import { loadBuildRules } from './agency/build-rules.ts';
 import { TrainingDiscovery } from './training/discovery';
 import { acquireController } from './controller-lease';
 import { callSkill } from './skill-cli';
@@ -1211,7 +1212,7 @@ async function actionsForTask(state: GameState, task: Task): Promise<Candidate[]
       if(!state.combatStyle?.styles?.some((s:any)=>s.trainsSkills?.some((k:string)=>k.toLowerCase()===task.skill)))return [];
       const gear=gearCandidates(state,task.skill);
       if(gear.length)return gear;
-      return training ? training.next(state,(from,to)=>navigator!.assess(from,to)) : [];
+      return training ? training.next(state,(from,to)=>navigator!.assess(from,to),task.guideLeadIds,task.skill) : [];
     }
     case 'prayer': {
       const bone=(state.inventory??[]).find((i:any)=>i.optionsWithIndex?.some((o:any)=>/^bury$/i.test(String(o.text))));
@@ -1329,6 +1330,7 @@ async function runEpisode(): Promise<void> {
       console.log(JSON.stringify({agency:planned.type,detail:planned,goal:agency.summary().goal}));
       await cliCall(['wait','3']);continue;
     }
+    training?.beginTrial?.(state,planned.decision.goal);
     const committedRoute=agency.routeStep(planned,state);
     const options=available(committedRoute?[committedRoute as Candidate]:await actionsForTask(state,planned.task)).filter(a=>agency!.eligible(a,state));
     if(!options.length){agency.blocked('Selected task has no feasible current executor step: '+planned.task.id);continue;}
@@ -1379,6 +1381,7 @@ async function main(): Promise<void> {
     policy:{foodTarget:Math.max(3,learnedFoodReserve(work.learning?.food)),...policy},
     supported:['food','ammunition','equipment','bank','combat','production','gathering','exploration','funds','prayer'],
     developmentHint:build,
+    buildRules:loadBuildRules(resolve(dataDir,'build-rules.json'),{world:process.env.CLAWSCAPE_SERVER??'clawscape',revision:gearCatalog.namespace}),
     preferences:role==='economy'?{crafting:2,gathering:1}:role==='resource'?{gathering:2}:{combat:2},
     routes:Object.entries(WORLD_ROUTES).map(([id,p])=>({id,...p,level:0,evidence:'bundled route lead; arrival not yet personally verified'})),
   });

@@ -49,13 +49,13 @@ Newly verified funds may expand the objective's total funding ceiling with a rec
 
 ## Self-selected development strategies
 
-The role and existing build option are hints. On a suitable own observation, a combat-interested agent can test a Ranged/Magic or Strength/Prayer pure when its low base Defence and available styles support it. Known XP in every protected skill is required; an incompatible already-active objective is not overwritten by adopting a pure.
+The role and build option are hints. `build-guides.ts` now contains sourced Ranged/Magic, rune-melee, ranged/melee and conditional dragon-weapon one-Defence variants. The selector uses observed base levels, exact XP, styles, equipment and access capabilities. A 2+ Defence character is not labelled a one-Defence pure. Existing v1 restrictions are retained during migration, never silently relaxed.
 
-A pure protects **XP**, not just displayed levels. Immediately before a style change or NPC attack, the guard checks all skills that the current/selected style trains. Mixed Defence training, unknown training effects, a changed XP boundary or a style incompatible with the selected skill prevents ordinary dispatch. Emergency survival remains above the strategic planner.
+Prayer is a separately capped choice (1/13/31/43 are guide leads). Attack milestones for rune/dragon variants are 40/60. Guide thresholds are not a verified server XP formula. Capped training and XP-bearing rewards require matching local rules/effect bounds; without them an affected action is blocked, while known uncapped methods remain candidates. Consult `docs/BUILD_GUIDES.md` before enabling capped or reward-bearing experimentation.
 
-Personally held bones with an observed Bury option enable a small Prayer experiment. Burying is verified through consumption of the requested bone and actual Prayer XP, not a hard-coded XP formula.
+All observed style components and protected XP are checked at dispatch. Reaching a cap stops further training in that skill. Three costly encounters no longer abandon a pure automatically: they trigger a review of reversible alternatives. Automatic irreversible cap expansion or respecialization from loss count alone is not supported.
 
-A pure is not permanent. The initial review policy can end that experiment after three attributed costly combat trials and an observed Defence training option, with the trial evidence and reason saved. Route failures, shortages, time passage and advice alone cannot trigger that irreversible change. This threshold is a starting heuristic, not a tuned combat-level optimizer. Guards cover supported observed combat styles, not arbitrary future quest/dialogue XP rewards. Unknown losses remain subject to reconciliation.
+Training leads feed the existing source-resolved catalogue. They never supply invented NPC IDs, coordinates or guaranteed XP/hour. Personally unverified dungeon/safespot/rock-crab leads remain investigations until content and executor gates can be established.
 
 ## Current-state diagnostics
 
@@ -79,7 +79,7 @@ After the PR is merged, stop the existing sole supervisor, preserve local config
 
 ## Verification
 
-The delivered patch was tested offline with Node 22.16.0 and Bun 1.3.10:
+The original hierarchy patch (before the researched-build revision) was tested offline with Node 22.16.0 and Bun 1.3.10:
 
 - 136 Node policy/integration tests passed (25 more than the baseline).
 - Nine executions of the actual shared episode with simulated game I/O passed. Added cases select a Ranged objective before preparation, retain linked food support, and either execute a permitted style or refuse mixed Defence XP without completing the goal.
@@ -88,3 +88,5 @@ The delivered patch was tested offline with Node 22.16.0 and Bun 1.3.10:
 - Full local native comparison: baseline 409 passes / 14 failures / two module-load errors; patch 434 passes / the same 14 failures / two errors. Those unavailable upstream/map fixture failures are not new successes and the full local suite is not green.
 
 These are not live-server, endurance or full-game learning tests. Existing private runtime data and the currently unresolved live receipts were not available for independent validation.
+
+The researched-build additions and their separate verification scope are documented in `BUILD_GUIDES.md`.

@@ -1,10 +1,11 @@
-import { allowedTraining, strategyView, type Development } from './development.ts';
+import { allowedTraining, guideTrainingTarget, strategyView, type Development } from './development.ts';
+import type { BuildRules } from './build-rules.ts';
 import type { Domain, Facts, Identity, Memory, Method, Observation, Opportunity } from './types.ts';
 
 export type LiveState = Record<string, any>;
 export type TaskKind = 'food' | 'ammunition' | 'equipment' | 'bank' | 'combat' | 'production' | 'gathering' | 'exploration' | 'funds' | 'prayer';
 export type Route = { id: string; x: number; z: number; level: number; evidence: string };
-export type Task = { id: string; kind: TaskKind; skill?: string; route?: Route; target?: { fact: string; minimum: number } };
+export type Task = { id: string; kind: TaskKind; skill?: string; guideLeadIds?: string[]; route?: Route; target?: { fact: string; minimum: number } };
 export type Policy = {
   reserveCoins: number; maxLossGp: number; maxDeaths: number; maxDurationMs: number;
   foodTarget: number; ammoTarget: number;
@@ -76,7 +77,7 @@ export function observeKnowledge(state: LiveState, k: Knowledge, now: number, se
 
 /** Goals are built from needs and observations BEFORE a low-level candidate is requested. */
 export function buildCatalogue(identity: Identity, state: LiveState, k: Knowledge, policy: Policy,
-  supported: TaskKind[], memory: Memory, now = Date.now(), development?: Development): Catalogue {
+  supported: TaskKind[], memory: Memory, now = Date.now(), development?: Development, buildRules?: BuildRules): Catalogue {
   const facts = observeFacts(state, k), tasks = new Map<string, Task>(), methods: Method[] = [], opportunities: Opportunity[] = [];
   const evidence = [`own-state:${state.player?.lifeId}:${state.tick}`];
   const add = (task: Task, domain: Domain, fact: string, target: number, delta: number,
@@ -106,19 +107,22 @@ export function buildCatalogue(identity: Identity, state: LiveState, k: Knowledg
   // Different skills are intentional opportunities with reasons. No permanent role-based level cap.
   const observedStyles=(state.combatStyle?.styles??[]).flatMap((s:any)=>s.trainsSkills??[]).map((n:any)=>String(n).toLowerCase());
   const skills = [...new Set<string>(observedStyles.filter((n:string)=>['attack','strength','defence','ranged','magic'].includes(n)))];
-  for (const skill of skills) if (base(state,skill) < 99 && allowedTraining(development, [skill])) {
+  for (const skill of skills) if (base(state,skill) < 99 && allowedTraining(development, [skill], state)) {
     const current = facts['xp:'+skill] ?? 0;
+    const target = guideTrainingTarget(development,state,skill,buildRules);
+    if(target===undefined || target<=current)continue;
     const reason = skill === 'defence'
       ? 'Develop Defence to support longer, safer encounters rather than remain permanently locked to the initial role.'
       : `Improve ${skill} through a bounded encounter trial and compare its observed costs.`;
-    add({id:'train-'+skill,kind:'combat',skill},'combat','xp:'+skill,Math.floor(current/100)*100+100,100,reason+(development?.history.length&&development.focus.includes(skill)?' '+development.reason:''),
+    add({id:'train-'+skill,kind:'combat',skill,guideLeadIds:development?.trainingLeadIds},'combat','xp:'+skill,target,target-current,reason+ (development?.sourceUrls?.length?' Guide hypothesis: '+development.sourceUrls.join(', '):'')+(development?.history.length&&development.focus.includes(skill)?' '+development.reason:''),
       development?.history.length&&development.focus.includes(skill)?'unlock':'collection',
       [{fact:'food',minimum:Math.min(3,policy.foodTarget)},{fact:'weapon',minimum:1},
        ...(/bow/i.test(String(state.combatStyle?.weaponName)) ? [{fact:'arrows',minimum:15}] : [])],
       policy.combatLossBoundGp === undefined ? 'unknown' : 'bounded');
   }
-  if ((state.inventory ?? []).some((i: any) => (i.optionsWithIndex ?? []).some((o: any) => /^bury$/i.test(String(o.text)))))
-    add({id:'train-prayer',kind:'prayer',skill:'prayer'},'combat','xp:prayer',Math.floor(facts['xp:prayer'] ?? 0)+1,1,
+  const prayerTarget=guideTrainingTarget(development,state,'prayer',buildRules);
+  if (prayerTarget!==undefined && (state.inventory ?? []).some((i: any) => (i.optionsWithIndex ?? []).some((o: any) => /^bury$/i.test(String(o.text)))))
+    add({id:'train-prayer',kind:'prayer',skill:'prayer'},'combat','xp:prayer',Math.min(prayerTarget,Math.floor(facts['xp:prayer'] ?? 0)+1),1,
       'Investigate Prayer progression using personally held bones and the observed Bury option.', 'collection');
   const bankCoins = state.bank?.isOpen === true && Array.isArray(state.bank.items) ? cash(state.bank.items) : 0;
   const knownBankCoins = state.bank?.isOpen === true ? bankCoins : cash(k.bank);

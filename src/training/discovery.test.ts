@@ -222,3 +222,60 @@ test('costly repeated higher-tier outcomes overcome its exploration bonus', fixt
   d.memory.sites.barbarians.stats[key]={encounters:10,kills:0,productive:0,xp:10,ticks:1000,damage:500,food:100,ammo:0,escapes:5,deaths:2};
   expect((await d.next(s,route))[0].fields?.trainingSite).toBe('cows');
 }));
+
+test('whole-trip measurements include support, outward travel and return; restart does not erase the trip', fixture((d,file,clock)=>{
+  let s=state();d.beginTrial(s,{key:'test-trip',domain:'combat',target:{fact:'xp:strength'}});
+  const step=(ticks:number,action:any,change:(v:any)=>void=()=>{})=>{const a=structuredClone(s);a.tick+=ticks;change(a);d.afterAction(s,a,action);s=a;};
+  step(20,{id:'prep',type:'wait'});
+  step(20,{id:'walk-out',type:'walkTo',fields:{trainingSite:'chickens'}},s=>s.player.worldX=101);
+  step(10,{id:'trial',type:'interactNpc',fields:{trainingSite:'chickens'}},s=>s.skills[0].experience+=50);
+  expect(d.memory.completedTrips).toBeUndefined();expect(d.memory.sites.chickens.tripStats).toBeUndefined();
+  const resumed=new TrainingDiscovery(file,'stinger',catalog,false,false,()=>clock.now);
+  const bank=structuredClone(s);bank.tick+=50;bank.bank={isOpen:true,items:[]};
+  resumed.afterAction(s,bank,{id:'open-bank',type:'interactLoc',fields:{},waitTicks:1});
+  const measured=Object.values(resumed.memory.sites.chickens.tripStats??{})[0];
+  expect(measured).toMatchObject({trips:1,xp:50,ticks:100,spentGp:0});expect(resumed.memory.trip).toBeUndefined();
+  expect(resumed.memory.completedTrips?.[0]?.mixed).toBe(false);
+  resumed.afterAction(s,bank,{id:'duplicate-result',type:'interactLoc',fields:{},waitTicks:1});
+  expect(Object.values(resumed.memory.sites.chickens.tripStats??{})[0].trips).toBe(1);
+}));
+
+test('unsampled accounting changes cannot produce a trusted full-trip estimate', fixture(d=>{
+  const s=state();d.beginTrial(s,{key:'test-trip',domain:'combat',target:{fact:'xp:strength'}});
+  const before=structuredClone(s);before.skills[0].experience+=500;before.tick+=50;
+  const after=structuredClone(before);after.tick+=5;after.skills[0].experience+=10;
+  d.afterAction(before,after,{id:'trial',type:'interactNpc',fields:{trainingSite:'chickens'},waitTicks:1});
+  const bank=structuredClone(after);bank.tick+=20;bank.bank={isOpen:true,items:[]};
+  d.afterAction(after,bank,{id:'bank',type:'interactLoc',fields:{},waitTicks:1});
+  expect(d.memory.completedTrips?.[0]?.mixed).toBe(true);expect(d.memory.sites.chickens.tripStats).toBeUndefined();
+}));
+
+test('a death does not become a successful full-trip return', fixture(d=>{
+  const s=state();d.beginTrial(s,{key:'test-trip',domain:'combat',target:{fact:'xp:strength'}});
+  const after=structuredClone(s);after.tick+=10;after.player.lifeId++;
+  d.afterAction(s,after,{id:'wait',type:'wait',waitTicks:1});
+  expect(d.memory.completedTrips?.[0]?.result).toBe('interrupted');expect(d.memory.sites.chickens.tripStats).toBeUndefined();
+}));
+
+const guideCatalog:Catalog={...catalog,sites:catalog.sites.map(s=>({...s,id:s.id==='chickens'?'east-chickens':s.id==='cows'?'east-cows':'village-barbarians'}))};
+test('superior measured full-trip performance outweighs a recommended-site prior', fixture(async d=>{
+  const s=state(),key='melee:Iron scimitar:def0:skill2:target-strength';s.skills.push({name:'defence',level:1,experience:0});
+  d.memory.sites['east-chickens'].tripStats={[key]:{trips:1,xp:10,ticks:500,food:1,ammo:0,spentGp:1}};
+  d.memory.sites['east-cows'].tripStats={[key]:{trips:3,xp:900,ticks:90,food:0,ammo:0,spentGp:0}};
+  const a=(await d.next(s,route,['lumbridge-chickens'],'strength'))[0];
+  expect(a.fields?.trainingSite).toBe('east-cows');
+}, {catalog:guideCatalog}));
+test('guide recommendation cannot override a blocked route or manufacture rock-crab content', fixture(async d=>{
+  const s=state();s.skills[0].level=1;
+  const a=(await d.next(s,async(f,t)=>t.x===100?{status:'blocked'}:route(f,t),['lumbridge-chickens','rock-crabs'],'strength'))[0];
+  expect(a.fields?.trainingSite).toBe('east-cows');
+  expect(Object.values(d.memory.sites).some(s=>s.name.includes('Rock'))).toBe(false);
+  expect(d.memory.status.guideLeads.find((l:any)=>l.id==='rock-crabs').status).toBe('investigation-required');
+}, {catalog:guideCatalog}));
+test('the selected training skill supersedes the original role mode but unsupported magic is not faked', fixture(async d=>{
+  const s=state();s.skills[0].level=1;s.combatStyle.weaponName='Shortbow';s.equipment=[{name:'Iron arrow',count:50}];
+  expect((await d.next(s,route,[],'ranged'))[0].type).not.toBe('interactLoc');
+  d.memory.commitment=undefined;s.tick++;s.combatStyle.weaponName='Iron scimitar';s.equipment=[];
+  expect((await d.next(s,route,[],'strength'))[0].id).not.toContain('no-viable');
+  expect((await d.next(s,route,[],'magic'))[0].id).toBe('training-spell-executor-required');
+}));
