@@ -81,3 +81,55 @@ test('recovery result can be rerun without duplicating action outcomes',()=>jour
   seed(store,lease);const [a,b]=transfer();reconcileAstraJournals(store,dir,a,b);const n=store.records('actions').length;
   reconcileAstraJournals(store,dir,a,b);expect(store.records('actions').length).toBe(n);
 }));
+
+async function movementWindow(run:(store:Store,dir:string,lease:string,clock:{advance:()=>void;now:()=>number},snapshot:()=>Observation)=>void|Promise<void>){
+  await journal(async(store,dir,lease)=>{
+    const real=Date.now;let now=real(),seq=10;Date.now=()=>now;
+    try{
+      const clock={now:()=>now,advance:()=>{now+=1000;store.renew(lease,now);seq+=2;}};
+      const snapshot=()=>{const o=observation(seq++);o.bank={open:false,items:null};return o;};
+      await run(store,dir,lease,clock,snapshot);
+    }finally{Date.now=real;}
+  });
+}
+function seedMove(store:Store,lease:string){
+  const before=observation(1);before.session_id='old-local-client';before.bank={open:false,items:null};
+  const c={...command(lease),intent:{operation:'move' as const,destination:{x:90,z:90,plane:0}}};
+  store.createAction(c,result());store.append('action_checkpoints',c.action_id,{action_id:c.action_id,before});return c;
+}
+test('startup old movement settles after measured fresh quiet observations with an immutable interruption receipt',()=>movementWindow((store,dir,lease,clock,snapshot)=>{
+  const c=seedMove(store,lease);let report=reconcileAstraJournals(store,dir,snapshot(),snapshot());
+  expect(report.ready).toBe(false);expect(report.unresolved[0]!.settling).toBe(true);
+  for(let n=0;n<30;n++){clock.advance();report=reconcileAstraJournals(store,dir,snapshot(),snapshot());}
+  expect(report.ready).toBe(true);expect(store.action(c.action_id)!.result.status).toBe('CANCELLED');
+  expect(store.action(c.action_id)!.result.reason).toBe('RECONCILED_TRANSIENT_INTERRUPTED');
+  expect(store.records<any>('transient_reconciliation')[0].original.command).toEqual(c);
+  expect(store.records<any>('transient_reconciliation')[0].original.result.status).toBe('RUNNING');
+  const count=store.records('actions').length;reconcileAstraJournals(store,dir,snapshot(),snapshot());expect(store.records('actions').length).toBe(count);
+  store.promoteRecovery(lease,clock.now());expect(store.control().mode).toBe('RUNNING');
+}));
+test('live arbiter uses the same movement settlement without dispatching an old packet',()=>movementWindow(async(store,_dir,lease,clock,snapshot)=>{
+  store.promoteRecovery(lease,clock.now());const c=seedMove(store,lease);let dispatched=0;
+  const arbiter=new ActionArbiter(store,{snapshot:async()=>snapshot(),dispatch:async()=>{dispatched++;return {success:true,phase:'test'};}},
+    {maxStaleMs:5000,maxDeaths:1,keepIds:[],allowedTiles:new Set(),safeEntities:new Set()},clock.now);
+  await arbiter.reconcile();for(let n=0;n<30;n++){clock.advance();await arbiter.reconcile();}
+  expect(dispatched).toBe(0);expect(store.action(c.action_id)!.result.reason).toBe('RECONCILED_TRANSIENT_INTERRUPTED');
+}));
+test('activity and position changes reset the startup quiet window instead of proving arrival',()=>movementWindow((store,dir,lease,clock,snapshot)=>{
+  seedMove(store,lease);reconcileAstraJournals(store,dir,snapshot(),snapshot());
+  for(let n=0;n<29;n++){clock.advance();reconcileAstraJournals(store,dir,snapshot(),snapshot());}
+  clock.advance();const first=snapshot(),second=snapshot();second.position!.x++;
+  expect(reconcileAstraJournals(store,dir,first,second).ready).toBe(false);
+  expect(store.action('old-command')!.result.status).toBe('RUNNING');
+}));
+test('even an expired historical dialogue is not erased by a quiet movement recovery policy',()=>movementWindow((store,dir,lease,clock,snapshot)=>{
+  const c={...command(lease),intent:{operation:'dialogue' as const,option_index:0}};store.createAction(c,result());
+  const before=observation(1);before.session_id='old-local-client';store.append('action_checkpoints',c.action_id,{action_id:c.action_id,before});
+  for(let n=0;n<35;n++){clock.advance();expect(reconcileAstraJournals(store,dir,snapshot(),snapshot()).ready).toBe(false);}
+  expect(store.action(c.action_id)!.result.status).toBe('RUNNING');
+}));
+test('manual takeover during an idle window prevents both settlement and any subsequent dispatch',()=>movementWindow((store,dir,lease,clock,snapshot)=>{
+  seedMove(store,lease);reconcileAstraJournals(store,dir,snapshot(),snapshot());clock.advance();store.setControl('MANUAL');
+  expect(()=>reconcileAstraJournals(store,dir,snapshot(),snapshot())).toThrow('RECOVERY_LEASE_REQUIRED');
+  expect(store.action('old-command')!.result.status).toBe('RUNNING');
+}));

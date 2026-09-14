@@ -24,18 +24,18 @@ test('incidental scenery is not promoted to a frontier while services/transition
   assert.equal(meaningfulFrontierRoute({id:'wizardsTower',x:1,z:1,level:0,evidence:'bundled route lead'}),true);
 });
 
-test('stable item-on-item non-effect can retire as interrupted only after a continuous quiet window',()=>{
+test('stable repeatable item-on-item activity can retire as interrupted only after a continuous quiet window',()=>{
   const before=state(10), action={type:'useItemOnItem',fields:{sourceSlot:0,targetSlot:1}};
   const first=observeQuietStep(action,before,state(20),1_000,'observer');
   assert.equal(first.settled,false);
   const done=observeQuietStep(action,before,state(40),31_000,'observer',first.window);
-  assert.equal(done.settled,true);assert.match(done.reason,/no observable effect/i);
+  assert.equal(done.settled,true);assert.match(done.reason,/no success or non-execution is inferred/i);
 });
 
-test('observable mutation prevents item-on-item timeout retirement and transactions never timeout into replay',()=>{
+test('a mutation restarts observation; transactions never timeout into replay',()=>{
   const before=state(10), changed=state(40);changed.inventory[0]!.count=9;
   const item=observeQuietStep({type:'useItemOnItem',fields:{sourceSlot:0,targetSlot:1}},before,changed,40_000,'observer');
-  assert.equal(item.settled,false);assert.match(item.reason,/attributable outcome evidence/);
+  assert.equal(item.settled,false);assert.match(item.reason,/30-second quiet window/);
   const buy=observeQuietStep({type:'shopBuy',fields:{slot:0,amount:1}},before,state(40),40_000,'observer');
   assert.equal(buy.settled,false);assert.match(buy.reason,/timeout cannot authorize replay/);
 });

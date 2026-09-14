@@ -33,8 +33,7 @@ const raw = (i: { name: string }) => Object.hasOwn(rawLevels, normalize(i.name))
 const food = (o: Observation) => o.inventory.filter(i => i.count > 0 && healing(i) > 0 && option(i, /^eat$/));
 const foodCount = (o: Observation) => food(o).reduce((n, i) => n + i.count, 0);
 const reserve = (o: Observation) => food(o).reduce((n, i) => n + i.count * healing(i), 0);
-const reserveGoal = (o: Observation) => Math.max(24, Math.ceil((o.max_hp ?? 10) * 1.5));
-const supplied = (o: Observation) => foodCount(o) >= 8 && reserve(o) >= reserveGoal(o);
+
 const freeSlots = (o: Observation) => o.capacity === null ? null : o.capacity - new Set(o.inventory.filter(i => i.count > 0).map(i => i.slot)).size;
 const tool = (i: { name: string }) => /^(small fishing net|tinderbox|(?:bronze|iron|steel|black|mithril|adamant|rune) (?:axe|hatchet))$/.test(normalize(i.name));
 const supplyItem = (i: { name: string }) => tool(i) || healing(i) > 0 || raw(i) || /^(logs|feather|feathers|fishing bait|coins)$/.test(normalize(i.name));
@@ -135,6 +134,9 @@ const initial = (): State => ({ version: "astra-live-policy-v1", identity: null,
  * Stateful only for bounded behaviours/evidence. Persist summary(); refresh/reconcile
  * through the main arbiter before calling next again after an action proposal. */
 export class LivePolicy {
+  private tripFoodTarget=0;
+  private supplied(o:Observation){return foodCount(o)>=this.tripFoodTarget;}
+  private reserveGoal(o:Observation){return this.tripFoodTarget * (food(o).length?Math.min(...food(o).map(healing)):3);}
   private state: State;
   constructor(persisted?: unknown) {
     const candidate = persisted && typeof persisted === "object" && "state" in persisted ? persisted.state : persisted;
@@ -142,6 +144,7 @@ export class LivePolicy {
   }
 
   next(o: Observation, task?: Task): LiveDecision {
+    if(task)this.tripFoodTarget=Math.max(0,task.kind==='food'?task.target?.minimum??task.foodTarget??0:task.foodTarget??0);
     if (!o.connected) return block("observe", "DISCONNECTED", "A connected player observation is required.");
     if (o.fresh_at === null || o.observed_at < o.fresh_at || o.observed_at - o.fresh_at > 5000)
       return block("observe", "STALE_OBSERVATION", "Require a fresh advancing observation; the arbiter also checks wall-clock age.");
@@ -207,18 +210,18 @@ export class LivePolicy {
     if (o.activity.modal_open) return block("interface", "UNSUPPORTED_MODAL", "The open modal is not an observed bank, shop or supported tutorial.");
     const rawItem = o.inventory.find(i => i.count > 0 && raw(i));
     // Cook usable raw supplies even in a full inventory; converting them needs no new slot.
-    if (freeSlots(o)! <= 0 && !(rawItem && !supplied(o))) return this.finish(o, this.startBank(o));
+    if (freeSlots(o)! <= 0 && !(rawItem && !this.supplied(o))) return this.finish(o, this.startBank(o));
     // Strategic ownership: the Director has chosen the outcome before this
     // executor is asked for an action. No fallback to an unrelated activity.
     if (task) {
       switch (task.kind) {
-        case 'food': return this.finish(o, supplied(o)
+        case 'food': return this.finish(o, this.supplied(o)
           ? {goal:task.id,reason:'Food reserve observed; Director will review the actual predicate.',wait:true}
           : this.supply(o));
         case 'bank': return this.finish(o, this.startBank(o));
         case 'equipment': return this.finish(o, this.equip(o) ?? {goal:task.id,reason:'Owned kit is equipped.',wait:true});
         case 'combat': {
-          if (!supplied(o)) return this.finish(o, this.supply(o));
+          if (!this.supplied(o)) return this.finish(o, this.supply(o));
           const gear = this.equip(o);
           return this.finish(o, gear ?? this.training(o, task.skill));
         }
@@ -238,7 +241,7 @@ export class LivePolicy {
       if(gear)return this.finish(o,gear);
       return this.finish(o,this.training(o));
     }
-    if (!supplied(o) || rawItem) return this.finish(o, this.supply(o));
+    if (!this.supplied(o) || rawItem) return this.finish(o, this.supply(o));
     if (o.hp <= Math.max(Math.ceil(o.max_hp * 0.7), margin))
       return block("recover", "INSUFFICIENT_HEALTH_MARGIN", "Maximum/current health cannot cover the conservative encounter margin.");
     const equipment = this.equip(o);
@@ -517,9 +520,9 @@ export class LivePolicy {
     }
     if (freeSlots(o)! > 0) {
       const meal = o.bank.items.filter(i => i.count > 0 && healing(i) > 0).sort((a, b) => healing(b) - healing(a) || a.slot - b.slot)[0];
-      if (!supplied(o) && meal) return { goal: "bank:withdraw-food", reason: "Withdraw an observed food reserve, bounded by stack count and free slots.", intent: {
+      if (!this.supplied(o) && meal) return { goal: "bank:withdraw-food", reason: "Withdraw an observed food reserve, bounded by stack count and free slots.", intent: {
         operation: "withdraw", slot: meal.slot, item_id: meal.id,
-        amount: Math.min(meal.count, freeSlots(o)!, Math.max(8 - foodCount(o), Math.ceil((reserveGoal(o) - reserve(o)) / healing(meal)), 1)),
+        amount: Math.min(meal.count, freeSlots(o)!, Math.max(this.tripFoodTarget - foodCount(o), Math.ceil((this.reserveGoal(o) - reserve(o)) / healing(meal)), 1)),
       } };
       const missingTool = o.bank.items.filter(i => i.count > 0 && tool(i) && ![...o.inventory, ...o.equipment].some(have =>
         normalize(have.name) === normalize(i.name) || (/ (axe|hatchet)$/.test(normalize(i.name)) && / (axe|hatchet)$/.test(normalize(have.name)))))
@@ -573,7 +576,7 @@ export class LivePolicy {
     if (rawItem && batchSpot && distance(o.position!, batchSpot.position) <= 5 && freeSlots(o)! > 2
       && o.hp! > Math.max(7, Math.ceil(o.max_hp! * 0.7))
       && o.inventory.some(i => i.count > 0 && normalize(i.name) === "small fishing net")
-      && (predictedCount < 8 || predictedHealing < reserveGoal(o))) {
+      && freeSlots(o)! > (o.inventory.some(i=>normalize(i.name)==="logs")?0:1)) {
       if (target(o)?.ref === batchSpot.ref || o.activity!.animation >= 0)
         return { goal: "supply:fish", reason: "Build a useful raw-food batch before the cooking trip; raw food is not counted as combat-ready supplies.", wait: true };
       return this.entityAction(o, batchSpot, "supply:fish", { operation: "interact", entity_ref: batchSpot.ref,
@@ -606,7 +609,7 @@ export class LivePolicy {
       if (o.activity!.animation >= 0) return { goal: "supply:logs", reason: "Observe the active gathering attempt before interrupting it.", wait: true };
       return this.entityAction(o, tree, "supply:logs", { operation: "interact", entity_ref: tree.ref, option_index: option(tree, /^(chop down|chop-down|chop)$/)!.index });
     }
-    if (supplied(o)) return this.equip(o) ?? this.training(o);
+    if (this.supplied(o)) return this.equip(o) ?? this.training(o);
     if (freeSlots(o)! <= 0) return this.startBank(o);
     const ediblePile = this.nearest(o, e => e.kind === "ground_item" && (healing(e) > 0 || raw(e)) && pickupAvailable(e));
     if (ediblePile) return this.entityAction(o, ediblePile, "supply:pickup", { operation: "pickup", entity_ref: ediblePile.ref });

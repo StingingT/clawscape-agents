@@ -1,5 +1,6 @@
 import { ActionCommand, ActionResult, Observation, type Intent } from "./contracts.ts";
 import { Store } from "./store.ts";
+import { settleAstraTransient } from "./transient-recovery.ts";
 
 export interface Adapter {
   snapshot(): Promise<Observation>;
@@ -13,6 +14,7 @@ export type SafetyPolicy = {
   allowLocalEpoch?: boolean;
   recoveryTiles?: Set<string>;
   additionalCheck?: (intent: Intent, observation: Observation) => string | null;
+  foodRequirement?: (observation: Observation) => number;
 };
 const total = (items: Observation["inventory"] | null, id: number) =>
   items === null ? null : items.filter(i => i.id === id).reduce((n,i) => n + i.count, 0);
@@ -117,8 +119,9 @@ export function safety(intent: Intent, o: Observation, policy: SafetyPolicy, now
       const option = entity.options.find(p=>p.index===intent.option_index)!.text;
       if (/^attack$/i.test(option)) {
         if (!/^(rat|chicken|goblin|cow|cow calf)$/i.test(entity.name) || (entity.combat_level??100)>5) return 'UNSUPPORTED_PILOT_ENCOUNTER';
-        const healthyGoblinTrial = /^goblin$/i.test(entity.name) && entity.combat_level===2 && o.hp!==null && o.max_hp!==null && o.hp>=9 && o.hp>=o.max_hp*.9;
-        if (!healthyGoblinTrial && o.inventory.filter(i=>i.options.some(p=>/^eat$/i.test(p.text))).reduce((n,i)=>n+i.count,0)<3) return 'FOOD_RESERVE_REQUIRED';
+        const need=policy.foodRequirement?.(o) ?? 1; // unmeasured standalone probe, not a universal floor
+        if(!Number.isInteger(need)||need<0)return 'FOOD_PLAN_UNAVAILABLE';
+        if(o.inventory.filter(i=>i.options.some(p=>/^eat$/i.test(p.text))).reduce((n,i)=>n+i.count,0)<need)return 'LEARNED_TRIP_FOOD_REQUIRED';
         if (!o.equipment.some(i=>/sword|scimitar|mace|axe|dagger/i.test(i.name))) return 'MELEE_WEAPON_REQUIRED';
       }
     }
@@ -241,6 +244,9 @@ export class ActionArbiter {
       if (proof.length) {
         const r = this.result(pending.command.action_id,"SUCCEEDED","RECONCILED_EFFECT",proof);
         this.store.result(r); results.push(r);
+      } else {
+        const settled=settleAstraTransient(this.store,pending.command,pending.result,checkpoint.before,after,this.now());
+        if(settled.result)results.push(settled.result);
       }
     }
     return results;

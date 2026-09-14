@@ -156,7 +156,7 @@ test('startup validates a parsed game_root without re-reading a different config
 });
 test('configured invalid path cannot fall back to the obsolete agents/tmp map', t => {
   const f=fixture(t);checkout(resolve(f.runtimeRoot,'../tmp/clawscape/upstream'));
-  assert.throws(()=>checkedUpstream(f.runtimeRoot,'invalid-game-root'),/UPSTREAM_COLLISION_FILES_MISSING/);
+  assert.throws(()=>checkedUpstream(f.runtimeRoot,'invalid-game-root',undefined,{}),/UPSTREAM_COLLISION_FILES_MISSING/);
 });
 test('an explicitly empty override is invalid at startup, not permission to use another map', t => {
   const f=fixture(t),upstream=checkout(join(f.root,'valid'));

@@ -1,3 +1,4 @@
+import { seedProvisionHistory } from './provision-fixture.ts';
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtempSync, readFileSync, writeFileSync, mkdirSync, rmSync} from 'node:fs';
@@ -43,7 +44,7 @@ test('unavailable steps retain the parent, its spending and its exact outcome ac
 
 test('a sourced investigation is a support goal, and completing it does not finish the parent',()=>{
   const d=new Director(createMemory(id));d.next(view(),[goal],methods);d.blocked(1100,'Need a usable resource method.');
-  const lead:Opportunity={id:'survey-alternative',domain:'exploration',target:{fact:'visited',minimum:1},reason:'Investigate an observed nearby resource lead.',source:'frontier',evidence:['own-location']};
+  const lead:Opportunity={id:'survey-alternative',domain:'exploration',target:{fact:'visited',minimum:1},reason:'Investigate an observed nearby resource lead.',source:'investigation',investigates:[goal.target.fact],evidence:['own-location']};
   const survey={...method('survey',{visited:1}),capability:'explore',domain:'exploration' as const};
   const p=d.next(view({},1200),[goal,lead],[...methods,survey]);assert.equal(p.type,'execute');if(p.type!=='execute')return;
   assert.equal(p.goal.id,goal.id);assert.equal(p.step.methodId,'survey');assert.ok(p.step.supportGoalId);
@@ -87,6 +88,7 @@ const state=(extra:any={})=>({inGame:true,tick:1,player:{lifeId:1,hp:30,maxHp:30
   inventory:[],equipment:[],skills:[],...extra});
 function fixture(t:any){const dir=mkdtempSync(join(tmpdir(),'hierarchy-'));t.after(()=>rmSync(dir,{recursive:true,force:true}));let now=1000;
   const file=join(dir,'agency.json'),options={supported:['food','funds'] as any,now:()=>now};
+  seedProvisionHistory(file,id,state());
   return {dir,file,options,advance:(n:number)=>now+=n,agency:new LiveAgency(file,id,options)};}
 
 test('fresh own bank funds enter planning, cached closed-bank balances do not',t=>{

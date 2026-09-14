@@ -37,6 +37,7 @@ export async function callSkill(character: string, args: string[], home: string)
       throw new Error(`CLI ${args[0]} unavailable (exit ${code})${reason ? ': ' + reason : ''}`);
     }
     if (!reply || typeof reply !== 'object' || Array.isArray(reply)) throw new Error('Invalid CLI response');
+    if(args[0]==='act'&&reply.success===false&&reply.reason==='action_in_progress')return reply;
     if (code !== 0 || reply.error) throw new Error(`CLI ${args[0]}: ${String(reply.error ?? 'unavailable')}`);
     return reply;
   } finally { clearTimeout(timer); }

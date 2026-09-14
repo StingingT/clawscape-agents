@@ -1,11 +1,13 @@
 import { allowedTraining, guideTrainingTarget, strategyView, type Development } from './development.ts';
 import type { BuildRules } from './build-rules.ts';
+import { meaningfulFrontierRoute } from './reconciliation.ts';
+import { preparation, emptyTrips, type TripLearning } from './trip-logistics.ts';
 import type { Domain, Facts, Identity, Memory, Method, Observation, Opportunity } from './types.ts';
 
 export type LiveState = Record<string, any>;
 export type TaskKind = 'food' | 'ammunition' | 'equipment' | 'bank' | 'combat' | 'production' | 'gathering' | 'exploration' | 'funds' | 'prayer';
 export type Route = { id: string; x: number; z: number; level: number; evidence: string };
-export type Task = { id: string; kind: TaskKind; skill?: string; guideLeadIds?: string[]; route?: Route; target?: { fact: string; minimum: number } };
+export type Task = { foodTarget?:number; id: string; kind: TaskKind; skill?: string; guideLeadIds?: string[]; route?: Route; target?: { fact: string; minimum: number } };
 export type Policy = {
   reserveCoins: number; maxLossGp: number; maxDeaths: number; maxDurationMs: number;
   foodTarget: number; ammoTarget: number;
@@ -14,7 +16,7 @@ export type Policy = {
 };
 export const defaultPolicy: Policy = {
   reserveCoins: 25, maxLossGp: 100, maxDeaths: 1, maxDurationMs: 30 * 60_000,
-  foodTarget: 8, ammoTarget: 50,
+  foodTarget: 0, ammoTarget: 50,
 };
 export type Catalogue = { view: Observation; opportunities: Opportunity[]; methods: Method[]; tasks: Map<string, Task> };
 export type Knowledge = { bank: any[]; bankCheckedAt: number; routes: Record<string, Route>; visited: Record<string, string> };
@@ -71,13 +73,14 @@ export function observeKnowledge(state: LiveState, k: Knowledge, now: number, se
     if (!Number.isInteger(loc.x) || !Number.isInteger(loc.z) || loc.reachable !== true) continue;
     const plane = Number(loc.level ?? state.player?.level ?? 0), id = `observed:${loc.id}:${loc.x}:${loc.z}:${plane}`;
     if (Object.keys(k.routes).length >= 1024 && !k.routes[id]) continue;
-    k.routes[id] ??= { id, x:loc.x, z:loc.z, level:plane, evidence:`own-object:${state.player?.lifeId}:${state.tick}:${loc.name}` };
+    const route={ id, x:loc.x, z:loc.z, level:plane, evidence:`own-object:${state.player?.lifeId}:${state.tick}:${loc.name}` };
+    if(meaningfulFrontierRoute(route))k.routes[id]??=route;
   }
 }
 
 /** Goals are built from needs and observations BEFORE a low-level candidate is requested. */
 export function buildCatalogue(identity: Identity, state: LiveState, k: Knowledge, policy: Policy,
-  supported: TaskKind[], memory: Memory, now = Date.now(), development?: Development, buildRules?: BuildRules): Catalogue {
+  supported: TaskKind[], memory: Memory, now = Date.now(), development?: Development, buildRules?: BuildRules, trips?:TripLearning): Catalogue {
   const facts = observeFacts(state, k), tasks = new Map<string, Task>(), methods: Method[] = [], opportunities: Opportunity[] = [];
   const evidence = [`own-state:${state.player?.lifeId}:${state.tick}`];
   const add = (task: Task, domain: Domain, fact: string, target: number, delta: number,
@@ -95,14 +98,14 @@ export function buildCatalogue(identity: Identity, state: LiveState, k: Knowledg
       evidence:task.route ? [task.route.evidence] : evidence, source,
       priority: ['food','ammunition','equipment','bank','funds'].includes(task.kind) ? 'maintenance' : 'strategic' });
   };
-  add({id:'supply-food',kind:'food'}, 'gathering', 'food', policy.foodTarget, policy.foodTarget,
-    'Replenish cooked food for sustainable trips; bank and cooking actions are preparation, not the goal.', 'need');
+  add({id:'supply-food',kind:'food'}, 'gathering', 'food', policy.foodTarget, Math.max(1,policy.foodTarget),
+    'Prepare the currently estimated trip food; revise this estimate from comparable trips, not a universal meal minimum.', 'need');
   if (/bow/i.test(String(state.combatStyle?.weaponName)) || arrows(state.inventory ?? []) > 0)
     add({id:'supply-ammunition',kind:'ammunition'},'crafting','arrows',policy.ammoTarget,policy.ammoTarget,
       'Maintain a compatible ammunition reserve before another ranged trial.', 'need');
   add({id:'equip-usable-weapon',kind:'equipment'},'combat','weapon',1,1,
     'Equip a personally owned usable weapon before attempting combat.', 'need');
-  add({id:'free-inventory-space',kind:'bank'},'gathering','free-slots',4,24,
+  add({id:'free-inventory-space',kind:'bank'},'gathering','free-slots',1,Math.max(1,Number(state.capacity??28)-1),
     'Store surplus while retaining tools and essential supplies.', 'need');
   // Different skills are intentional opportunities with reasons. No permanent role-based level cap.
   const observedStyles=(state.combatStyle?.styles??[]).flatMap((s:any)=>s.trainsSkills??[]).map((n:any)=>String(n).toLowerCase());
@@ -116,7 +119,7 @@ export function buildCatalogue(identity: Identity, state: LiveState, k: Knowledg
       : `Improve ${skill} through a bounded encounter trial and compare its observed costs.`;
     add({id:'train-'+skill,kind:'combat',skill,guideLeadIds:development?.trainingLeadIds},'combat','xp:'+skill,target,target-current,reason+ (development?.sourceUrls?.length?' Guide hypothesis: '+development.sourceUrls.join(', '):'')+(development?.history.length&&development.focus.includes(skill)?' '+development.reason:''),
       development?.history.length&&development.focus.includes(skill)?'unlock':'collection',
-      [{fact:'food',minimum:Math.min(3,policy.foodTarget)},{fact:'weapon',minimum:1},
+      [{fact:'food',minimum:trips?preparation(state,'combat',trips).foodTarget:policy.foodTarget},{fact:'weapon',minimum:1},
        ...(/bow/i.test(String(state.combatStyle?.weaponName)) ? [{fact:'arrows',minimum:15}] : [])],
       policy.combatLossBoundGp === undefined ? 'unknown' : 'bounded');
   }
@@ -133,13 +136,18 @@ export function buildCatalogue(identity: Identity, state: LiveState, k: Knowledg
   }
   add({id:'production-batch',kind:'production'},'crafting','xp:production',Math.floor(facts['xp:production']!/100)*100+100,100,
     'Complete a bounded production batch, obtaining the inputs through the supported production routine.', 'collection');
-  add({id:'gathering-batch',kind:'gathering'},'gathering','xp:gathering',Math.floor(facts['xp:gathering']!/100)*100+100,100,
-    'Measure a complete gathering batch as an alternative to my previous activities.', 'collection', [{fact:'free-slots',minimum:2}]);
-  for (const route of Object.values(k.routes).filter(r => r.level === Number(state.player?.level ?? 0) && !k.visited[r.id]).slice(0,64))
+  if(trips) {
+    const cargo=preparation(state,'gathering',trips);
+    facts['gathering:banked']=trips.bankedCargo??0;
+    add({id:'gathering-batch',kind:'gathering'},'gathering','gathering:banked',facts['gathering:banked']+Math.max(1,cargo.cargoSlots),Math.max(1,cargo.cargoSlots),
+      'Gather a cargo-sized batch and bank the verified outputs; reserve tools and learned food, not arbitrary empty slots.', 'collection');
+  } else add({id:'gathering-batch',kind:'gathering'},'gathering','xp:gathering',Math.floor(facts['xp:gathering']!/100)*100+100,100,
+    'Measure a complete gathering batch as an alternative to my previous activities.', 'collection', [{fact:'free-slots',minimum:1}]);
+  for (const route of Object.values(k.routes).filter(r => meaningfulFrontierRoute(r) && r.level === Number(state.player?.level ?? 0) && !k.visited[r.id]).slice(0,64))
     add({id:'survey:'+route.id,kind:'exploration',route},'exploration','visited:'+route.id,1,1,
       'Visit a sourced lead and verify it personally; path assessment and arrival are required.', 'frontier');
   const completed=memory.reviews.filter(r=>r.result==='success').slice(-5);
-  if(completed.length===5 && !completed.some(r=>r.goal.domain==='exploration') && facts.food!>=Math.min(3,policy.foodTarget)) {
+  if(completed.length===5 && !completed.some(r=>r.goal.domain==='exploration') && facts.food!>=policy.foodTarget) {
     // A bounded survey periodically competes with training. It still needs a
     // sourced destination, a safe route and a complete affordable plan.
     for(const g of opportunities)if(g.source==='frontier')g.source='unlock';

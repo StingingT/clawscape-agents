@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { settleAstraTransient } from './transient-recovery.ts';
 import type { Observation, ActionResult } from './contracts.ts';
 import { evidence } from './arbiter.ts';
 import type { Store } from './store.ts';
@@ -6,7 +7,7 @@ import type { LiveAgency } from '../../../src/agency/live-adapter.ts';
 import { agencyState, agencyCandidate, arbiterVerification } from './agency-bridge.ts';
 import { atomicRecoveryJson, durableRecoveryEvidence, recoverLegacyJournals } from '../../../src/agency/journal-recovery.ts';
 
-export type RestartReport = { version:1; at:number; ready:boolean; resolved:string[]; unresolved:Array<{commandId:string;operation:string;reason:string}> };
+export type RestartReport = { version:1; at:number; ready:boolean; resolved:string[]; unresolved:Array<{commandId:string;operation:string;reason:string;settling?:boolean}> };
 export function unsettledResult(r:ActionResult):boolean {
   return !((r.status==='SUCCEEDED'&&r.evidence.length>0)||r.status==='REJECTED'||r.status==='EXPIRED'
     ||r.status==='CANCELLED'&&!/MAY_STILL|OUTCOME_UNKNOWN|PREEMPTED/.test(r.reason));
@@ -27,7 +28,7 @@ export function reconcileAstraJournals(store:Store,directory:string,first:Observ
     if(command.character!==second.character||command.world!==second.world||command.profile_id!==second.profile_id
       ||result.action_id!==command.action_id)throw new Error('EXECUTOR_JOURNAL_IDENTITY_MISMATCH');
     if(!unsettledResult(result))continue;
-    let resolved:ActionResult|undefined;
+    let resolved:ActionResult|undefined;let settling=false;let why='No attributable terminal outcome; no replay is permitted.';
     if(result.status==='QUEUED')resolved={...result,status:'CANCELLED',reason:'RESTART_BEFORE_DISPATCH',at:Date.now(),evidence:['journal reservation never entered dispatch']};
     else {
       const before=checkpoints.find(c=>c.action_id===command.action_id)?.before;
@@ -42,9 +43,15 @@ export function reconcileAstraJournals(store:Store,directory:string,first:Observ
         } catch { /* Missing original entity/slot is uncertainty, never a guessed mapping. */ }
       }
       if(proof.length)resolved={...result,status:'SUCCEEDED',reason:'RECONCILED_DURABLE_EFFECT',evidence:proof,at:Date.now()};
+      else if(before&&['move','close_interface','style'].includes(command.intent.operation)) {
+        const transient=settleAstraTransient(store,command,result,before,second);
+        why=transient.reason;settling=transient.settling;
+        // The shared helper writes its cancellation and immutable audit atomically.
+        if(transient.result){report.resolved.push(command.action_id);continue;}
+      }
     }
     if(resolved){store.result(resolved);report.resolved.push(command.action_id);}
-    else report.unresolved.push({commandId:command.action_id,operation:command.intent.operation,reason:'No attributable terminal outcome; no replay is permitted.'});
+    else report.unresolved.push({commandId:command.action_id,operation:command.intent.operation,reason:why,settling});
   }
   if(agency) for(const scope of ['safety','task'] as const) {
     const receipt=agency.pending(scope);if(!receipt)continue;

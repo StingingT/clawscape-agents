@@ -59,6 +59,7 @@ export function agencyCandidate(o: Observation, decision: LiveDecision): LiveCan
 export function arbiterVerification(commandId:string,result:ActionResult|undefined):Verification {
   if(!result)return {status:'unknown',evidence:[],reason:'No action result yet.'};
   if(result.action_id!==commandId)throw new Error('RESULT_COMMAND_ID_MISMATCH');
+  if(result.status==='CANCELLED'&&result.reason==='RECONCILED_TRANSIENT_INTERRUPTED'&&result.evidence.length)return {status:'interrupted',evidence:result.evidence,reason:result.reason};
   if(result.status==='SUCCEEDED'&&result.evidence.length)return {status:'verified',evidence:result.evidence};
   if(result.status==='REJECTED'||result.status==='EXPIRED'||result.status==='CANCELLED'&&!/MAY_STILL|OUTCOME_UNKNOWN|PREEMPTED/.test(result.reason))
     return {status:'rejected',evidence:[`arbiter-before-dispatch:${result.reason}`]};

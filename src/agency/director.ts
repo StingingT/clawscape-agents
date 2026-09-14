@@ -1,5 +1,6 @@
 import type { Budget, Decision, Facts, Goal, Identity, Memory, Method, MethodStats, Observation, Opportunity, Outcome, Plan, Requirement, SupportGoal } from './types.ts';
 
+import { createHash } from 'node:crypto';
 const MAX_STEPS = 48;
 const COOLDOWN_MS = 5 * 60_000;
 const key = (...parts: string[]) => JSON.stringify(parts);
@@ -102,8 +103,7 @@ export class Director {
   }
 
   private attach(goal: Goal, plan: Plan, view: Observation, purpose: SupportGoal['purpose'] = 'prerequisite'): Decision {
-    const nodes = new Map<string, SupportGoal>((goal.supportGoals ?? []).map(n => [n.id, { ...n,
-      status: met(view.facts, n.target) ? 'satisfied' as const : 'pending' as const }]));
+    const nodes = new Map<string, SupportGoal>((goal.supportGoals ?? []).filter(n=>met(view.facts,n.target)).slice(-8).map(n => [n.id, { ...n, status:'satisfied' as const }]));
     for (const step of plan.steps) {
       step.goalKey = goal.key;
       const lineage = step.lineage ?? [goal.target];
@@ -111,7 +111,7 @@ export class Director {
       const chain = lineage[0]?.fact === goal.target.fact && lineage[0]?.minimum === goal.target.minimum ? lineage.slice(1) : lineage;
       let parentId = goal.key;
       for (const target of chain) {
-        const id = key(parentId, 'support', target.fact, String(target.minimum));
+        const id = 'support:'+createHash('sha256').update(key(parentId,target.fact,String(target.minimum))).digest('hex').slice(0,24);
         const node: SupportGoal = { id, parentId, target: { ...target }, purpose,
           reason: purpose === 'investigate-blocker' ? 'Investigate an alternative while preserving the blocked parent objective.' :
             `Prepare ${target.fact} >= ${target.minimum} for ${goal.id}.`,
@@ -123,10 +123,31 @@ export class Director {
     }
     const first = plan.steps[0]!;
     if (first.supportGoalId) nodes.get(first.supportGoalId)!.status = 'active';
-    goal.supportGoals = [...nodes.values()].slice(-96);
+    goal.supportGoals = [...nodes.values()].slice(-20);
     goal.plan = structuredClone(plan); goal.planContext = view.context;
     if (purpose === 'prerequisite') delete goal.blocker;
     return { type: 'execute', goal: structuredClone(goal), plan, step: first };
+  }
+
+  /** Obsolete scenery goals are retired only when no executor command is pending. */
+  retireObsoleteSurveys(routes:Set<string>,at:number):void {
+    if(this.memory.pending)return;
+    const g=this.memory.active;if(!g)return;
+    if(g.id.startsWith('survey:observed:')&&!routes.has(g.id.slice(7))) {
+      this.review(at,'partial','Retired incidental scenery objective; no arrival or task success inferred.',[]);return;
+    }
+    g.supportGoals=(g.supportGoals??[]).filter(n=>!n.target.fact.startsWith('visited:observed:')||routes.has(n.target.fact.slice(8))).slice(-20);
+    if(g.investigation?.target.fact.startsWith('visited:observed:')&&!routes.has(g.investigation.target.fact.slice(8)))delete g.investigation;
+  }
+  /** Refresh the food dependency, not the strategic objective or a pending receipt. */
+  reviseFoodNeed(target:number,at:number):void {
+    if(this.memory.pending||!Number.isInteger(target)||target<0)return;
+    const g=this.memory.active;if(!g)return;
+    if(g.id==='supply-food'&&g.target.minimum!==target){
+      if(target===0){this.review(at,'partial','Trip re-evaluation no longer requires a food preparation task.',[]);return;}
+      g.target={fact:'food',minimum:target};delete g.plan;
+    }
+    if(g.requestedSupport?.target.fact==='food')g.requestedSupport.target.minimum=target;
   }
 
   /** Extra preparation is linked to this objective, never installed as a replacement goal. */
@@ -174,7 +195,7 @@ export class Director {
         // A failed research method may yield to a different lead, but not erase the parent.
         delete active.investigation;
         active.blocker ??= { at: view.at, reason: 'Current methods or prerequisites are unavailable; objective retained.', recheckAt: view.at + 30_000 };
-        const leads = opportunities.filter(g => ['frontier', 'investigation'].includes(g.source)
+        const leads = opportunities.filter(g => g.source==='investigation' && g.investigates?.includes(active.target.fact)
           && outcomeTarget(g.target) && g.evidence.length && g.reason.trim() && !met(view.facts, g.target));
         for (const lead of leads) {
           const research = makePlan(this.memory, remaining, lead, methods);
@@ -272,6 +293,12 @@ export class Director {
       stats.cooldownUntil = productive ? 0 : outcome.at + COOLDOWN_MS;
       stats.viability = productive ? 'viable' : 'temporarily-poor';
     }
+    stats.idleObservationMs=outcome.observationOnly&&!productive?(stats.idleObservationMs??0)+outcome.elapsedMs:0;
+    if(stats.idleObservationMs>=60_000){
+      stats.viability='temporarily-poor';stats.cooldownUntil=outcome.at+30_000;
+      goal.blocker={at:outcome.at,reason:'Read-only observations produced no objective effect for 60 seconds; recheck this method after a bounded cooldown.',recheckAt:outcome.at+30_000};
+      stats.idleObservationMs=0;
+    }
     stats.knowledgeRevision = pending.knowledgeRevision ?? 0;
     if (productive) {
       this.memory.learningRevision = (this.memory.learningRevision ?? 0) + 1;
@@ -283,7 +310,7 @@ export class Director {
         support.status = 'satisfied'; support.evidence = [...outcome.evidence];
       }
     }
-    goal.attempts++; goal.noProgress = productive || outcome.status === 'progress' ? 0 : goal.noProgress + 1;
+    goal.attempts++; goal.noProgress = productive || outcome.status === 'progress'&&!outcome.observationOnly ? 0 : goal.noProgress + 1;
     goal.spentGp += outcome.spentGp; goal.lostGp += outcome.lostGp; goal.deaths += outcome.deaths; goal.elapsedMs += outcome.elapsedMs;
     this.memory.sequence = outcome.sequence;
     delete this.memory.pending;

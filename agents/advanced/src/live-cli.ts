@@ -131,7 +131,8 @@ export async function main(context:StartupContext){
       .finally(()=>{researchJob=undefined;});
   };
   const safety:SafetyPolicy={maxStaleMs:config.max_stale_ms,maxDeaths:config.max_deaths,keepIds:config.keep_item_ids,
-    allowedTiles:new Set(),safeEntities:new Set(),allowLocalEpoch:true,recoveryTiles:new Set()};
+    allowedTiles:new Set(),safeEntities:new Set(),allowLocalEpoch:true,recoveryTiles:new Set(),
+    foodRequirement:o=>agency?.tripPreparation(agencyState(o),'combat').foodTarget ?? 1};
   const arbiter=new ActionArbiter(store,adapter,safety);
   let activeGoal='initialise',actions=0,verified=0,failed=0,lastProgress=Date.now();
   const deadline=Date.now()+Math.min(config.max_session_minutes*60,Number(option('seconds',mode==='pilot'?'120':String(config.max_session_minutes*60))))*1000;
@@ -162,7 +163,13 @@ export async function main(context:StartupContext){
           {id:'documented-chicken-area',x:3232,z:3295,level:0,evidence:'documented lead; no encounter claimed before observation'}],
       });
     }
-    const recovery=reconcileAstraJournals(store,data,first,latest,agency);
+    let recovery=reconcileAstraJournals(store,data,first,latest,agency);
+    const settleUntil=Date.now()+45_000;
+    while(!recovery.ready&&recovery.unresolved.some(r=>r.settling)&&Date.now()<settleUntil&&!revoked) {
+      publish('RECONCILING','Observing stale transient journals; no actions dispatched');
+      await sleep(1_000);const previous=latest;latest=await adapter.snapshot();
+      recovery=reconcileAstraJournals(store,data,previous,latest,agency);
+    }
     if(!recovery.ready) {
       reason='JOURNAL_RECONCILIATION_REQUIRED';publish('RECONCILIATION_REQUIRED',reason);process.exitCode=2;return;
     }
@@ -316,7 +323,7 @@ export async function main(context:StartupContext){
         verified++;lastProgress=Date.now();
         if(mode==='pilot'&&intent.operation==='move'&&JSON.stringify(before.position)!==JSON.stringify(latest.position))pilotMoved=true;
         if(mode==='pilot'&&decision.goal==='pilot-interaction')pilotInteracted=true;
-      }else if(result.status==='RUNNING'){reason='UNRESOLVED_ACTION_STOP_NO_REPLAY';publish('BLOCKED',reason);break;}
+      }else if(result.status==='RUNNING'){publish('RECONCILING','Awaiting exact outcome or transient settling; no replay');await sleep(700);continue;}
       else{failed++;if(decision.destination)navigator!.fail(decision.destination,result.reason);}
       publish('RUNNING',result.reason+': '+decision.reason);
       if(Date.now()-lastProgress>60_000){reason='NO_VERIFIED_PROGRESS_60_SECONDS';break;}

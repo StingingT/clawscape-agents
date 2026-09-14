@@ -1,4 +1,5 @@
 import {test} from 'node:test';
+import { seedProvisionHistory } from './provision-fixture.ts';
 import assert from 'node:assert/strict';
 import {mkdtempSync,readFileSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
@@ -15,9 +16,10 @@ const s=(extra:any={})=>({inGame:true,tick:1,player:{hp:30,maxHp:30,lifeId:1,wor
   inventory:[],equipment:[],skills:[{name:'attack',level:10,baseLevel:10,experience:100},{name:'defence',level:10,baseLevel:10,experience:100},{name:'strength',level:10,baseLevel:10,experience:100}],
   combatStyle:{weaponName:'Bronze sword',currentStyle:0,styles:[{index:0,trainsSkills:['attack']},{index:1,trainsSkills:['strength']},{index:2,trainsSkills:['defence']}]},...extra});
 const verified={status:'verified' as const,evidence:['specific verified effect']};
-function fixture(t:any,options:any={}){const dir=mkdtempSync(join(tmpdir(),'agency-integration-'));t.after(()=>rmSync(dir,{recursive:true,force:true}));
+function fixture(t:any,options:any={},historyState=s()){const dir=mkdtempSync(join(tmpdir(),'agency-integration-'));t.after(()=>rmSync(dir,{recursive:true,force:true}));
   let now=1000;const file=join(dir,'agency.json'),config={supported:['food','equipment','bank','combat','exploration'] as any,
     policy:{...defaultPolicy,combatLossBoundGp:20},now:()=>now,...options};
+  seedProvisionHistory(file,identity,historyState);
   return {file,config,advance:(n=1000)=>now+=n,agency:new LiveAgency(file,identity,config)};}
 function select(a:LiveAgency,state:any):Selection{const r=a.plan(state);assert.ok(isSelection(r));return r;}
 const hasKit=()=>s({inventory:Array.from({length:8},(_,i)=>shrimp(i)),equipment:[{id:1277,name:'Bronze sword',slot:3,count:1}]});
@@ -107,7 +109,7 @@ test('unknown loss valuation is not silently declared safe',t=>{
   assert.equal((result as any).type,'blocked');
 });
 test('equipment or permanent skill changes require revalidation; walking and eating do not reset context',t=>{
-  const {agency:a}=fixture(t,{supported:['food']}),state=hasKit();state.inventory=[];const p=select(a,state);
+  const state=hasKit();state.inventory=[];const {agency:a}=fixture(t,{supported:['food']},state);const p=select(a,state);
   const moved=structuredClone(state);moved.tick++;moved.player.worldX++;moved.inventory=[shrimp(1)];
   assert.equal(capabilityContext(state),capabilityContext(moved));
   moved.equipment[0].id=1281;assert.throws(()=>a.begin(p,{id:'wait',type:'wait'},moved),/CONTEXT_CHANGED/);
