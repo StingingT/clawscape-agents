@@ -1,6 +1,7 @@
 /** Optional local audited effect contracts. Web guides and chat cannot populate these.
  * No fallback XP curve, combat multiplier, price, quest access, or prayer benefit. */
 import { existsSync, readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import type { Identity } from './types.ts';
 export type BuildRules = {
   version:1; world:string; revision:string; source:string;
@@ -25,6 +26,16 @@ export function validateBuildRules(value: unknown, identity: Pick<Identity,'worl
   return structuredClone(r);
 }
 export function loadBuildRules(file:string,identity:Pick<Identity,'world'|'revision'>):BuildRules|undefined {
-  return existsSync(file)?validateBuildRules(JSON.parse(readFileSync(file,'utf8')),identity):undefined;
+  // Profile-specific rules win. A shared audited file lets all standard agents use the
+  // same inspected server contract without copying it into four profile directories.
+  // An explicit environment path is useful when the rules are generated beside a local
+  // server-source audit. None of these paths fabricate rules from guides.
+  const candidates=[file,process.env.CLAWSCAPE_BUILD_RULES,resolve(dirname(file),'..','build-rules.json')]
+    .filter((v):v is string=>typeof v==='string'&&v.trim().length>0);
+  for(const candidate of [...new Set(candidates)]) {
+    if(!existsSync(candidate))continue;
+    return validateBuildRules(JSON.parse(readFileSync(candidate,'utf8')),identity);
+  }
+  return undefined;
 }
 export const hasBuildFeature=(rules:BuildRules|undefined,id:string)=>rules?.features[id]?.supported===true && !!rules.features[id]?.evidence;
