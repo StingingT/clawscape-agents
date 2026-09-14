@@ -1,7 +1,7 @@
 /* Offline execution of the ORIGINAL shared episode function with fake I/O.
  * No CLI subprocess, game connection, network call or persistent user state is used. */
 let ts;try{ts=require('typescript');}catch{ts=require('../agents/advanced/node_modules/typescript');}
-const {readFileSync,mkdtempSync,rmSync}=require('node:fs');
+const {readFileSync,writeFileSync,mkdtempSync,rmSync}=require('node:fs');
 const {join}=require('node:path');
 const {tmpdir}=require('node:os');
 const vm=require('node:vm');
@@ -12,7 +12,7 @@ const wanted=['runEpisode','actionsForTask','executeAgencyAction','verification'
 const extracted=parsed.statements.filter(s=>ts.isFunctionDeclaration(s)&&wanted.includes(s.name?.text)).map(s=>s.getText(parsed)).join('\n');
 assert.equal(parsed.statements.filter(s=>ts.isFunctionDeclaration(s)&&wanted.includes(s.name?.text)).length,wanted.length);
 const js=ts.transpileModule(extracted,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText;
-async function runScenario({blocked=false,unknown=false,deny=false,movement=false,mapWait=false}={}){
+async function runScenario({blocked=false,unknown=false,deny=false,movement=false,mapWait=false,legacyNavigation=false}={}){
   const {LiveAgency,isSelection}=await import('../src/agency/live-adapter.ts');
   const {verifyActionOutcome}=await import('../src/action-outcome.ts');
   const {recoverLegacyJournals}=await import('../src/agency/journal-recovery.ts');
@@ -22,8 +22,11 @@ async function runScenario({blocked=false,unknown=false,deny=false,movement=fals
     class TestDate extends Date { static now(){return now;} }
     const identity={agent:'test',world:'test',revision:'test'};
     const agency=new LiveAgency(join(dir,'journal.json'),identity,{supported:movement?['exploration']:['food'],routes:movement?[{id:'bank-route',x:50,z:1,level:0,evidence:'observed lead'}]:[],policy:{foodTarget:3},now:()=>now});
-    const state={inGame:true,tick:1,player:{hp:30,maxHp:30,lifeId:1,level:0,worldX:1,worldZ:1,combat:{inCombat:false,targetType:'none',targetIndex:-1}},
+    const state={inGame:true,tick:1,player:{hp:30,maxHp:30,lifeId:1,level:0,worldX:1,worldZ:1,animId:-1,combat:{inCombat:false,targetType:'none',targetIndex:-1}},
       inventory:[],equipment:[],skills:[],bank:{isOpen:!movement,items:[{id:315,name:'Shrimps',count:10,slot:7}]}};
+    const legacyPath=join(dir,'action-intent.json');
+    if(legacyNavigation)writeFileSync(legacyPath,JSON.stringify({commandId:'test-old-bank-for-fishing-tool-funds',
+      actionId:'bank-for-fishing-tool-funds',type:'walkTo',fields:{x:50,z:1,level:0},status:'failed',beforeState:structuredClone(state)}));
     const originalPlan=agency.plan.bind(agency);agency.plan=(s)=>{planned=true;return blocked?{type:'blocked',reason:'test refusal',missingCapabilities:[]}:originalPlan(s);};
     if(unknown){const p=originalPlan(state);agency.begin(p,{id:'buy-arrows',type:'wait'},state,'old-command');agency.record('old-command',state,{status:'unknown',evidence:[]});
       // Use a still-unresolved shop intent for the actual episode reconciliation branch.
@@ -32,8 +35,9 @@ async function runScenario({blocked=false,unknown=false,deny=false,movement=fals
     const environment={
       agency,steps:8,character:'test',role:'brawler',build:'melee',forumEnabled:false,training:undefined,
       console:{log(){},error(){}},Date:TestDate,JSON,Number,Math,Set,Array,String,
-      loadActionIntent:()=>undefined,actionIntentPath:'unused',finishActionIntent:()=>{},
-      dataDir:dir,existsSync:require('node:fs').existsSync,resolve:require('node:path').resolve,recoverLegacyJournals,process:{env:{}},
+      loadActionIntent:()=>undefined,actionIntentPath:legacyPath,finishActionIntent:()=>{},
+      dataDir:dir,existsSync:require('node:fs').existsSync,resolve:require('node:path').resolve,
+      recoverLegacyJournals:(dir,id,options)=>recoverLegacyJournals(dir,id,{...options,now}),process:{env:{CLAWSCAPE_SERVER:'test'}},
       stateFrom:v=>v.state,isSelection,verifyActionOutcome,available:v=>v,choose:(_,v)=>v[0],stateKey:()=>'',
       position:s=>({x:s.player.worldX,z:s.player.worldZ,level:s.player.level}),
       navigator:{
@@ -67,7 +71,17 @@ async function runScenario({blocked=false,unknown=false,deny=false,movement=fals
       },
     };
     const context=vm.createContext(environment);vm.runInContext(js,context);
+    if(legacyNavigation){
+      await context.runEpisode();assert.equal(mutationCalls,0,'must not skip the idle settling window');
+      now+=15_000;await context.runEpisode();assert.equal(mutationCalls,0);
+      now+=15_000;
+    }
     await context.runEpisode();
+    if(legacyNavigation){
+      const recovery=JSON.parse(readFileSync(join(dir,'legacy-recovery.json'),'utf8'));
+      assert.equal(recovery.entries[0].outcome,'interrupted');
+      assert.equal(JSON.parse(readFileSync(legacyPath,'utf8')).status,'failed','original record is preserved');
+    }
     if(blocked||unknown||deny)assert.equal(mutationCalls,0,'A planner refusal/unknown intent fell through to real execution');
     else{assert.equal(mutationCalls,3);if(movement){assert.equal(legs,3);assert.equal(assessments,1);assert.equal(agency.pending(),undefined);}assert.equal(agency.director.memory.reviews.length,1);assert.equal(agency.director.memory.reviews[0].result,'success');}
     return {mutationCalls,reviews:agency.director.memory.reviews.length};
@@ -75,6 +89,6 @@ async function runScenario({blocked=false,unknown=false,deny=false,movement=fals
 }
 (async()=>{
   const results=[];
-  for(const scenario of [{},{blocked:true},{unknown:true},{deny:true},{movement:true},{movement:true,mapWait:true}])results.push({scenario,...await runScenario(scenario)});
-  console.log(JSON.stringify({controllerChecks:6,passed:6,results},null,2));
+  for(const scenario of [{},{blocked:true},{unknown:true},{deny:true},{movement:true},{movement:true,mapWait:true},{movement:true,legacyNavigation:true}])results.push({scenario,...await runScenario(scenario)});
+  console.log(JSON.stringify({controllerChecks:results.length,passed:results.length,results},null,2));
 })().catch(e=>{console.error(e);process.exitCode=1;});
