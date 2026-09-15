@@ -1,0 +1,76 @@
+name: Apply incidental secondary-purpose behavior
+on:
+  push:
+    branches: [codex/incidental-purpose-completion]
+    paths: [.github/workflows/apply-incidental-purpose.yml]
+permissions: {contents: write}
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with: {node-version: '22.16.0'}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with: {bun-version: '1.3.10'}
+      - name: Apply reviewed edits
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          def rep(path,old,new,n=1):
+            p=Path(path);s=p.read_text();assert s.count(old)==n,(path,s.count(old),old);p.write_text(s.replace(old,new,n))
+          rep('src/agent.ts',"import { acquisitionActions, type AcquisitionHint } from './agency/acquisition.ts';","import { acquisitionActions, type AcquisitionHint } from './agency/acquisition.ts';\nimport { incidentalBankable } from './agency/incidental.ts';")
+          rep('src/agent.ts',"    if (isFinishedArrow(itemName)) return surplusArrows > 0;\n    return edible ? surplusFood > 0 : isBankableResource(String(item.name));","    if (isFinishedArrow(itemName)) return surplusArrows > 0;\n    if (incidentalBankable(item, agency?.summary().acquisition?.incidental?.ids)) return true;\n    return edible ? surplusFood > 0 : isBankableResource(String(item.name));")
+          marker="/** Task-specific executors are asked for actions only AFTER the Director chooses a goal. */\n"
+          helper="""function incidentalProcessingCandidates(state:GameState):Candidate[] {
+  const raw=(state.inventory??[]).find((i:any)=>/^raw\\b/i.test(String(i.name??''))&&Number.isInteger(i.slot));if(!raw)return [];
+  const p=state.player??{};
+  const heat=(state.nearbyLocs??[]).filter((l:any)=>Number.isInteger(l.x)&&Number.isInteger(l.z)&&/^(fire|fireplace|range|stove|cooking pot)$/i.test(String(l.name??''))&&Math.max(Math.abs(Number(p.worldX)-Number(l.x)),Math.abs(Number(p.worldZ)-Number(l.z)))<=1)[0];
+  return heat?[{id:`incidental-process-${raw.id}-${heat.id}`,type:'useItemOnLoc',fields:{itemSlot:raw.slot,x:heat.x,z:heat.z,locId:heat.id,reason:'process a useful incidental raw resource at a freshly observed heat source'},waitTicks:4}]:[];
+}
+
+"""
+          rep('src/agent.ts',marker,helper+marker)
+          rep('src/agent.ts',"    case 'production': {\n      work.economy ??= {bankItems:work.bankItems??[]};","    case 'production': {\n      if(task.id==='incidental-process')return incidentalProcessingCandidates(state);\n      work.economy ??= {bankItems:work.bankItems??[]};")
+          old="""  const prayerTarget=guideTrainingTarget(development,state,'prayer',buildRules);
+  if (prayerTarget!==undefined && (state.inventory ?? []).some((i: any) => (i.optionsWithIndex ?? []).some((o: any) => /^bury$/i.test(String(o.text)))))
+    add({id:'train-prayer',kind:'prayer',skill:'prayer'},'combat','xp:prayer',Math.min(prayerTarget,Math.floor(facts['xp:prayer'] ?? 0)+1),1,
+      'Investigate Prayer progression using personally held bones and the observed Bury option.', 'collection');
+"""
+          new="""  const prayerTarget=guideTrainingTarget(development,state,'prayer',buildRules);
+  if ((state.inventory ?? []).some((i: any) => (i.optionsWithIndex ?? []).some((o: any) => /^bury$/i.test(String(o.text))))) {
+    const current=Math.floor(facts['xp:prayer'] ?? 0),target=prayerTarget===undefined?current+1:Math.min(prayerTarget,current+1);
+    if(target>current)add({id:'train-prayer',kind:'prayer',skill:'prayer'},'combat','xp:prayer',target,1,
+      'Use a personally held incidental resource when its freshly observed action provides low-cost skill progress.', 'collection');
+  }
+"""
+          rep('src/agency/world-model.ts',old,new)
+          needle="""  add({id:'production-batch',kind:'production'},'crafting','xp:production',Math.floor(facts['xp:production']!/100)*100+100,100,
+    'Complete a bounded production batch, obtaining the inputs through the supported production routine.', 'collection');
+"""
+          extra=needle+"""  const incidentalRaw=(state.inventory??[]).some((i:any)=>/^raw\\b/i.test(String(i.name??'')));
+  const adjacentHeat=(state.nearbyLocs??[]).some((l:any)=>Number.isInteger(l.x)&&Number.isInteger(l.z)&&/^(fire|fireplace|range|stove|cooking pot)$/i.test(String(l.name??''))&&Math.max(Math.abs(Number(state.player?.worldX)-Number(l.x)),Math.abs(Number(state.player?.worldZ)-Number(l.z)))<=1);
+  if(incidentalRaw&&adjacentHeat)add({id:'incidental-process',kind:'production'},'crafting','xp:cooking',Math.floor(facts['xp:cooking']??0)+1,1,
+    'Process an incidental carried resource when an observed nearby facility makes the secondary skill gain cheap.', 'collection');
+"""
+          rep('src/agency/world-model.ts',needle,extra)
+          rep('agents/advanced/src/live-policy.ts',"const depositable = (i: Item) => !i.protected && !supplyItem(i) &&\n  /^(cowhide|cow hide|bones|burnt (?:fish|shrimps|shrimp|meat|chicken)|ashes|copper ore|tin ore|iron ore|wool|bronze dagger|shortbow|bronze arrows?|(?:air|mind|water|earth|fire|body) runes?)$/.test(normalize(i.name));","const depositable = (i: Item) => !i.protected && !supplyItem(i);")
+          rep('agents/advanced/src/live-policy.ts',"const lootAllowed = (e: Entity) => supplyItem(e) || /^(cowhide|cow hide|bones)$/.test(normalize(e.name));","const lootAllowed = (e: Entity) => e.kind === 'ground_item' && e.reachable === true;")
+          PY
+      - name: Install pinned dependencies
+        run: |
+          npm install --prefix "$RUNNER_TEMP/agency-tests" --ignore-scripts --no-audit --no-fund --no-package-lock zod@4.1.5 typescript@5.9.3 @types/node@22.16.0
+          ln -s "$RUNNER_TEMP/agency-tests/node_modules" agents/advanced/node_modules
+      - run: npm run test:agency
+      - run: npm run test:integration
+      - run: npm run check:agency
+      - run: bun test tests/agency/incidental.test.ts tests/agency/incidental-purpose.test.ts agents/advanced/tests/agency-policy.test.ts src/action-outcome.test.ts
+      - name: Commit tested source only
+        run: |
+          git diff --check
+          git add src/agent.ts src/agency/world-model.ts agents/advanced/src/live-policy.ts tests/agency/incidental-purpose.test.ts
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Let incidental resources serve secondary purposes'
+          git push origin HEAD:codex/incidental-purpose-completion
