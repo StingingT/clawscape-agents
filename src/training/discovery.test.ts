@@ -154,13 +154,14 @@ test('encounters aggregate XP, damage and supplies across actions, disappearance
   const a = { id: 'training-attack-chickens', type: 'interactNpc', fields: { trainingSite: 'chickens', npcIndex: 7 }, waitTicks: 6 };
   d.beforeAction(s, a); const next = structuredClone(s); next.tick += 6; next.skills[0].experience += 12; next.player.hp -= 2; next.nearbyNpcs = [];
   d.afterAction(s, next, a);
+  d.afterAction(next,{...next,tick:next.tick+3},{id:'verify-ended',type:'wait',waitTicks:3});
   const stats = Object.values(d.memory.sites.chickens.stats)[0];
-  expect(stats).toMatchObject({ encounters: 1, productive: 1, xp: 12, ticks: 6, damage: 2, kills: 0 }); expect(d.memory.pending).toBeUndefined();
+  expect(stats).toMatchObject({ encounters: 1, productive: 1, xp: 12, ticks: 9, damage: 2, kills: 0 }); expect(d.memory.pending).toBeUndefined();
 }));
-test('confirmed NPC zero HP is distinct from death and retreat penalties', fixture((d, _file, clock) => {
+test('an identified own kill is distinct from another player killing the target or our death', fixture((d, _file, clock) => {
   const s = state(); s.nearbyNpcs = [npc()];
   const a = { id: 'training-attack-chickens', type: 'interactNpc', fields: { trainingSite: 'chickens', npcIndex: 7 }, waitTicks: 6 };
-  d.beforeAction(s, a); const next = structuredClone(s); next.tick += 6; next.nearbyNpcs[0].hp = 0; next.skills[0].experience += 12;
+  s.player.index=11;d.beforeAction(s, a); const next = structuredClone(s); next.tick += 6; next.nearbyNpcs[0].hp = 0;next.combatEvents=[{type:'kill',tick:next.tick,sourceType:'player',sourceIndex:11,targetType:'npc',targetIndex:7}]; next.skills[0].experience += 12;
   d.afterAction(s, next, a); expect(Object.values(d.memory.sites.chickens.stats)[0].kills).toBe(1);
   d.beforeAction(s, a); d.afterAction(s, { ...next, player: { ...next.player, lifeId: 2 } }, { id: 'escape', type: 'retreat', waitTicks: 2 });
   expect(Object.values(d.memory.sites.chickens.stats)[0].deaths).toBe(1);

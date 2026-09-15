@@ -12,14 +12,15 @@ const wanted=['runEpisode','actionsForTask','executeAgencyAction','verification'
 const extracted=parsed.statements.filter(s=>ts.isFunctionDeclaration(s)&&wanted.includes(s.name?.text)).map(s=>s.getText(parsed)).join('\n');
 assert.equal(parsed.statements.filter(s=>ts.isFunctionDeclaration(s)&&wanted.includes(s.name?.text)).length,wanted.length);
 const js=ts.transpileModule(extracted,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText;
-async function runScenario({blocked=false,unknown=false,deny=false,movement=false,mapWait=false,legacyNavigation=false,combatGoal=false,badStyle=false,meleeGoal=false}={}){
+async function runScenario({blocked=false,unknown=false,deny=false,movement=false,mapWait=false,legacyNavigation=false,combatGoal=false,badStyle=false,meleeGoal=false,rebound=false,missingInput=false}={}){
   const {LiveAgency,isSelection}=await import('../src/agency/live-adapter.ts');
+  const {bindItems,resolveItems,MissingItem}=await import('../src/agency/item-intents.ts');
   const {verifyActionOutcome}=await import('../src/action-outcome.ts');
   const {recoverLegacyJournals}=await import('../src/agency/journal-recovery.ts');
   const {seedProvisionHistory}=await import('../tests/agency/provision-fixture.ts');
   const dir=mkdtempSync(join(tmpdir(),'agency-controller-'));
   try{
-    let now=1000,ids=0,mutationCalls=0,planned=false,legs=0,assessments=0,mapWaited=false;
+    let now=1000,ids=0,mutationCalls=0,planned=false,legs=0,assessments=0,mapWaited=false,itemChanged=false;
     class TestDate extends Date { static now(){return now;} }
     const identity={agent:'test',world:'test',revision:'test'};
     const goalSkill=meleeGoal?'strength':'ranged';
@@ -38,7 +39,7 @@ async function runScenario({blocked=false,unknown=false,deny=false,movement=fals
     }
     // This scenario explicitly learned a three-meal requirement; there is no global minimum.
     if(!movement)seedProvisionHistory(join(dir,'journal.json'),identity,state,3,combatGoal?{combat:2}:{});
-    const agency=new LiveAgency(join(dir,'journal.json'),identity,{supported:combatGoal?['food','combat']:movement?['exploration']:['food'],developmentHint:combatGoal?(meleeGoal?'melee':'ranged-magic'):undefined,preferences:combatGoal?{combat:2}:{},routes:movement?[{id:'bank-route',x:50,z:1,level:0,evidence:'observed lead'}]:[],policy:{foodTarget:3,combatLossBoundGp:5},now:()=>now});
+    const agency=new LiveAgency(join(dir,'journal.json'),identity,{supported:combatGoal?['food','combat']:movement?['exploration']:missingInput?['food','acquisition']:['food'],developmentHint:combatGoal?(meleeGoal?'melee':'ranged-magic'):undefined,preferences:combatGoal?{combat:2}:{},routes:movement?[{id:'bank-route',x:50,z:1,level:0,evidence:'observed lead'}]:[],policy:{foodTarget:3,combatLossBoundGp:5},now:()=>now});
     const legacyPath=join(dir,'action-intent.json');
     if(legacyNavigation)writeFileSync(legacyPath,JSON.stringify({commandId:'test-old-bank-for-fishing-tool-funds',
       actionId:'bank-for-fishing-tool-funds',type:'walkTo',fields:{x:50,z:1,level:0},status:'failed',beforeState:structuredClone(state)}));
@@ -60,10 +61,10 @@ async function runScenario({blocked=false,unknown=false,deny=false,movement=fals
       loadActionIntent:()=>undefined,actionIntentPath:legacyPath,finishActionIntent:()=>{},
       dataDir:dir,existsSync:require('node:fs').existsSync,resolve:require('node:path').resolve,
       recoverLegacyJournals:(dir,id,options)=>recoverLegacyJournals(dir,id,{...options,now}),process:{env:{CLAWSCAPE_SERVER:'test'}},
-      stateFrom:v=>v.state,isSelection,verifyActionOutcome,available:v=>v,choose:(_,v)=>v[0],stateKey:()=>'',
+      bindItems,resolveItems,MissingItem,stateFrom:v=>v.state,isSelection,verifyActionOutcome,available:v=>v,choose:(_,v)=>v[0],stateKey:()=>'',
       position:s=>({x:s.player.worldX,z:s.player.worldZ,level:s.player.level}),
       navigator:{
-        assess:async()=>{assessments++;return {status:'ready'};},
+        assessApproach:async(_from,destination)=>{assessments++;return {status:'ready',destination};},
         step:async destination=>{
           assert.ok(agency.pending(),'movement needs durable receipt');
           assert.equal(agency.director.memory.reviews.length,0,'partial movement cannot finish route goal');
@@ -79,10 +80,11 @@ async function runScenario({blocked=false,unknown=false,deny=false,movement=fals
       randomUUID:()=>`command-${++ids}`,dialogCandidates:()=>[],bankingCandidates:()=>{
         assert.ok(planned,'Legacy executor was called BEFORE the Director');
         if(combatGoal&&state.inventory.length>=3)return [{id:'close-bank',type:'closeModal',waitTicks:1}];
-        return [{id:'withdraw-food',type:'bankWithdraw',fields:{slot:7,amount:1},waitTicks:1}];
+        return [{id:'withdraw-food',type:'bankWithdraw',fields:{slot:state.bank.items[0]?.slot,amount:1},waitTicks:1}];
       },
       cliCall:async args=>{
         now+=100;state.tick++;
+        if(args[0]==='state'&&planned&&!itemChanged&&(rebound||missingInput)){itemChanged=true;if(rebound)state.bank.items[0].slot=9;else state.bank.items=[];}
         if(args[0]==='act'){
           mutationCalls++;
           if(combatGoal) {
@@ -97,7 +99,7 @@ async function runScenario({blocked=false,unknown=false,deny=false,movement=fals
               return {state:structuredClone(state)};
             }
           }
-          assert.equal(args[1],'bankWithdraw');
+          assert.equal(args[1],'bankWithdraw');if(rebound)assert.equal(JSON.parse(args[3]).slot,9,'packet must use the new slot for the captured item ID');
           const receipt=agency.pending();assert.ok(receipt,'Action dispatched without durable intent');
           assert.match(receipt.commandId,/^command-/);
           state.bank.items[0].count--;
@@ -118,13 +120,15 @@ async function runScenario({blocked=false,unknown=false,deny=false,movement=fals
       assert.equal(recovery.entries[0].outcome,'interrupted');
       assert.equal(JSON.parse(readFileSync(legacyPath,'utf8')).status,'failed','original record is preserved');
     }
-    if(blocked||unknown||deny)assert.equal(mutationCalls,0,'A planner refusal/unknown intent fell through to real execution');
+    if(blocked||unknown||deny||missingInput)assert.equal(mutationCalls,0,'A planner refusal/unknown intent fell through to real execution');
     else{assert.equal(mutationCalls,combatGoal?(badStyle?4:5):3);if(movement){assert.equal(legs,3);assert.equal(assessments,1);assert.equal(agency.pending(),undefined);}assert.equal(agency.director.memory.reviews.length,badStyle?0:1);if(!badStyle)assert.equal(agency.director.memory.reviews[0].result,'success');}
+    if(missingInput){assert.equal(agency.summary().acquisition.need.name,'Shrimps');assert.equal(agency.director.memory.active.id,'supply-food');}
     return {mutationCalls,reviews:agency.director.memory.reviews.length};
   }finally{rmSync(dir,{recursive:true,force:true});}
 }
 async function runGatherScenario(){
   const {LiveAgency,isSelection}=await import('../src/agency/live-adapter.ts');
+  const {bindItems,resolveItems,MissingItem}=await import('../src/agency/item-intents.ts');
   const {verifyActionOutcome}=await import('../src/action-outcome.ts');
   const {recoverLegacyJournals}=await import('../src/agency/journal-recovery.ts');
   const dir=mkdtempSync(join(tmpdir(),'gather-controller-'));
@@ -141,7 +145,7 @@ async function runGatherScenario(){
     const env={agency,steps:11,character:'test',role:'resource',build:'melee',forumEnabled:false,console:{log(){},error(){}},Date:TestDate,
       loadActionIntent:()=>undefined,actionIntentPath:join(dir,'action-intent.json'),finishActionIntent(){},
       dataDir:dir,existsSync:require('node:fs').existsSync,resolve:require('node:path').resolve,
-      recoverLegacyJournals,process:{env:{CLAWSCAPE_SERVER:'test'}},stateFrom:v=>v.state,isSelection,verifyActionOutcome,
+      recoverLegacyJournals,process:{env:{CLAWSCAPE_SERVER:'test'}},bindItems,resolveItems,MissingItem,stateFrom:v=>v.state,isSelection,verifyActionOutcome,
       available:v=>v,choose:(_,v)=>v[0],stateKey:()=>'',training:undefined,
       urgentAgencyAction:()=>undefined,validateMetal:()=>true,validateBow:()=>true,validateFishing:()=>true,
       equipmentGoals:{validate:()=>true},observeAgencyResult(){},appendFileSync(){},experiencePath:'unused',randomUUID:()=>`gather-${++ids}`,
@@ -172,7 +176,7 @@ async function runGatherScenario(){
 }
 (async()=>{
   const results=[];
-  for(const scenario of [{},{blocked:true},{unknown:true},{deny:true},{movement:true},{movement:true,mapWait:true},{movement:true,legacyNavigation:true},{combatGoal:true},{combatGoal:true,badStyle:true},{combatGoal:true,meleeGoal:true},{combatGoal:true,meleeGoal:true,badStyle:true}])results.push({scenario,...await runScenario(scenario)});
+  for(const scenario of [{},{rebound:true},{missingInput:true},{blocked:true},{unknown:true},{deny:true},{movement:true},{movement:true,mapWait:true},{movement:true,legacyNavigation:true},{combatGoal:true},{combatGoal:true,badStyle:true},{combatGoal:true,meleeGoal:true},{combatGoal:true,meleeGoal:true,badStyle:true}])results.push({scenario,...await runScenario(scenario)});
   results.push(await runGatherScenario());
   console.log(JSON.stringify({controllerChecks:results.length,passed:results.length,results},null,2));
 })().catch(e=>{console.error(e);process.exitCode=1;});

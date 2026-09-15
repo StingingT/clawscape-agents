@@ -38,3 +38,17 @@ test('the actual navigator marks a map wait as no movement dispatch',async()=>{
  expect(verifyActionOutcome(state,r.state,{type:'walkTo',fields:{x:20,z:10,level:0}},r).verified).toBe(true);
  }finally{navigator.close();rmSync(root,{recursive:true,force:true});}
 });
+
+test('survey probes collision-verified adjacent tiles rather than forcing the object footprint',async()=>{
+ const root=mkdtempSync(join(tmpdir(),'survey-approach-'));
+ const from={x:10,z:10,level:0},object={x:20,z:20,level:0};let dispatched=0;
+ const nav=new Navigator({state:async()=>({}),wait:async()=>({}),act:async()=>{dispatched++;return{};}},join(root,'nav.json'),async(_f,to)=>({unmappedTiles:0,legs:to.x===20&&to.z===20?[]:[{target:to,doors:[]}]}));
+ try{const result=await nav.assessApproach(from,object);expect(result.status).toBe('ready');expect((result as any).destination).not.toEqual(object);expect((result as any).approachOnly).toBe(true);expect(dispatched).toBe(0);}
+ finally{nav.close();rmSync(root,{recursive:true,force:true});}
+});
+test('no collision-covered survey approach reports the real refusal instead of guessing a reachable tile',async()=>{
+ const root=mkdtempSync(join(tmpdir(),'survey-refusal-'));
+ const nav=new Navigator({state:async()=>({}),wait:async()=>({}),act:async()=>({})},join(root,'nav.json'),async(_f,to)=>({unmappedTiles:1,legs:[{target:to,doors:[]}]}));
+ try{const r=await nav.assessApproach({x:10,z:10,level:0},{x:20,z:20,level:0});expect(r.status).toBe('blocked');expect(r.reason).toContain('unverified-collision-coverage');}
+ finally{nav.close();rmSync(root,{recursive:true,force:true});}
+});

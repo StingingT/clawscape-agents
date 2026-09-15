@@ -147,7 +147,9 @@ test('epoch reset and invalid counts never qualify for automatic death reconcili
 });
 test('a life change cannot silently settle a pending bank transaction',t=>{
   const f=fixture(t,saved({samples:[sample(state(),'exploration',1),sample(state(),'gathering',1)]}));
-  const a=new LiveAgency(f.file,identity,{supported:['food'],now:()=>1000}),before=state(),p=a.plan(before);assert.ok(isSelection(p));
+  const a=new LiveAgency(f.file,identity,{supported:['food'],now:()=>1000}),before=state();
+  before.bank={isOpen:true,items:[{slot:1,id:315,name:'Shrimps',count:1}]};
+  const p=a.plan(before);assert.ok(isSelection(p));
   a.begin(p,{id:'transfer',type:'bankWithdraw',fields:{slot:1,amount:1}},before,'bank');const after=state(20);after.player.lifeId=2;
   a.record('bank',after,{status:'unknown',evidence:[]});assert.equal(a.pending()?.commandId,'bank');
 });

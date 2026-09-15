@@ -7,6 +7,8 @@
     "test:agency": "node --experimental-strip-types --test tests/agency/*.test.ts",
     "test:integration": "node --experimental-strip-types scripts/test-agency-controller.cjs",
     "check:agency": "node scripts/check-agency.cjs",
-    "journals:inspect": "node --experimental-strip-types scripts/inspect-journals.ts"
+    "journals:inspect": "node --experimental-strip-types scripts/inspect-journals.ts",
+    "status:export": "bun scripts/status-export.ts",
+    "knowledge:refresh-drops": "bun scripts/refresh-drop-leads.ts"
   }
 }

@@ -4,6 +4,9 @@ import { validateBuildRules, type BuildRules } from './build-rules.ts';
 import { chooseDevelopment, reviewDevelopment, developmentReadiness, guardDevelopment, protectedXpChanged, type Development } from './development.ts';
 import { observeQuietStep, recordViability, retryAllowed, stepKey, type QuietWindow, type Viability } from './step-retry.ts';
 import { meaningfulFrontierRoute, reconcileDeathLoss } from './reconciliation.ts';
+import { addAcquisition, emptyAcquisition, observeAcquisitionSources, rememberAcquisitionSources, type AcquisitionMemory, type AcquisitionHint } from './acquisition.ts';
+import type { DropLead } from './drop-leads.ts';
+import { bindItems, resolveItems, itemFact, itemCount, type ItemNeed, type ItemRef } from './item-intents.ts';
 import { randomUUID } from 'node:crypto';
 import { emptyTrips, preparation, observeTrip, recordTripEffect, type TripLearning, type TripPreparation } from './trip-logistics.ts';
 import { Director, createMemory } from './director.ts';
@@ -11,10 +14,10 @@ import type { Decision, Identity, Memory, Method, Observation, Outcome } from '.
 import { buildCatalogue, capabilityContext, cash, defaultPolicy, emptyKnowledge, observeFacts, observeKnowledge,
   type Catalogue, type Knowledge, type LiveState, type Policy, type Route, type Task, type TaskKind } from './world-model.ts';
 
-export type LiveCandidate = { id: string; type: string; fields?: Record<string, any>; waitTicks?: number };
+export type LiveCandidate = { itemRefs?:ItemRef[]; id: string; type: string; fields?: Record<string, any>; waitTicks?: number };
 export type Selection = { decision: Extract<Decision,{type:'execute'}>; method: Method; task: Task; view: Observation };
 export type Receipt = { commandId:string; action:LiveCandidate; before:LiveState; startedAt:number; scope:'task'|'safety'; methodId?:string; execution?:{accepted?:boolean;phase?:string;navigation?:{status:string;reason?:string;movementDispatched?:boolean}}; stationary?:QuietWindow };
-type Document = { trips?:TripLearning; preparation?:TripPreparation; version:2; memory:Memory; knowledge:Knowledge; receipt?:Receipt; safetyReceipt?:Receipt;
+type Document = { acquisition?:AcquisitionMemory; interruptions?:Array<{at:number;receipt:Receipt;reason:string}>; trips?:TripLearning; preparation?:TripPreparation; version:2; memory:Memory; knowledge:Knowledge; receipt?:Receipt; safetyReceipt?:Receipt;
   buildReadiness?:ReturnType<typeof developmentReadiness>; lastCommands:string[]; route?:{goalKey:string;methodId:string;action:LiveCandidate}; blocked?:string; development?:Development; updatedAt?:number;
   retries?:Record<string,Viability>; lastOutcome?:{at:number;commandId:string;type:string;status:string;reason?:string;evidence:string[]};
   losses?:Array<{at:number;commandId:string;lifeFrom:any;lifeTo:any;lostGp:number;items:Array<{id:number|string;count:number;name?:string}>}>;
@@ -39,9 +42,12 @@ export class LiveAgency {
   private document:Document;
   private readonly developmentHint?:string;
   private readonly buildRules?:BuildRules;
+  private readonly dropLeads:DropLead[];
+  private readonly acquisitionHints:AcquisitionHint[];
   private readonly observer = randomUUID();
   constructor(file:string,identity:Identity,options:{policy?:Partial<Policy>;supported:TaskKind[];routes?:Route[];
-    preferences?:Memory['preferences'];now?:()=>number;developmentHint?:string;buildRules?:BuildRules}) {
+    dropLeads?:DropLead[];acquisitionHints?:AcquisitionHint[];preferences?:Memory['preferences'];now?:()=>number;developmentHint?:string;buildRules?:BuildRules}) {
+    this.dropLeads=options.dropLeads??[];this.acquisitionHints=options.acquisitionHints??[];
     this.file=file;this.identity={...identity};this.supported=options.supported;this.routes=options.routes??[];
     this.policy={...defaultPolicy,...options.policy};this.clock=options.now??Date.now;this.developmentHint=options.developmentHint;
     this.buildRules=options.buildRules?validateBuildRules(options.buildRules,identity):undefined;
@@ -89,7 +95,18 @@ export class LiveAgency {
       }
     }
     this.document.buildReadiness=developmentReadiness(this.document.development,state,this.buildRules);
-    return buildCatalogue(this.identity,state,this.document.knowledge,{...this.policy,foodTarget:this.document.preparation.foodTarget},this.supported,this.director.memory,this.clock(),this.document.development,this.buildRules,this.document.trips);
+    const catalogue=buildCatalogue(this.identity,state,this.document.knowledge,{...this.policy,foodTarget:this.document.preparation.foodTarget},this.supported,this.director.memory,this.clock(),this.document.development,this.buildRules,this.document.trips);
+    if(this.supported.includes('acquisition')) {
+      this.document.acquisition??=emptyAcquisition();
+      observeAcquisitionSources(this.document.acquisition,state,this.clock());
+      const need=this.document.acquisition.need,goal=this.director.memory.active;
+      if(need&&goal?.key===need.parentKey&&!this.document.receipt&&!this.document.safetyReceipt
+        && itemCount(state.inventory,need)<need.minimum && (!goal.requestedSupport||catalogue.view.facts[goal.requestedSupport.target.fact]!>=goal.requestedSupport.target.minimum))
+        this.director.requestSupport({fact:itemFact(need),minimum:need.minimum},need.reason,[`own-missing-item:${need.at}`]);
+      addAcquisition(catalogue,state,this.document.knowledge.bank,this.document.acquisition,this.director.memory,
+        {...this.policy,foodTarget:this.tripPreparation(state,'combat').foodTarget},this.dropLeads,this.acquisitionHints,this.clock());
+    }
+    return catalogue;
   }
   plan(state:LiveState):Selection|Decision {
     if(state.character && String(state.character).toLowerCase()!==this.identity.agent.toLowerCase())throw new Error('OBSERVATION_AGENT_MISMATCH');
@@ -158,7 +175,8 @@ export class LiveAgency {
   // Existing controller adapters retain compatibility; semantics remain operation-specific.
   settleNavigation(commandId:string,state:LiveState):Verification|undefined { return this.settleStep(commandId,state); }
   eligible(action:LiveCandidate,state:LiveState):boolean {
-    return retryAllowed(this.document.retries?.[stepKey(action,state)],this.clock(),capabilityContext(state),this.director.memory.learningRevision??0);
+    let current=action;try{current=bindItems(action,state);}catch{return false;}
+    return retryAllowed(this.document.retries?.[stepKey(current,state)],this.clock(),capabilityContext(state),this.director.memory.learningRevision??0);
   }
   /** Funding is an observed prerequisite. This never grants purchase authority by itself. */
   prepareFunding(action:LiveCandidate,state:LiveState):boolean {
@@ -174,12 +192,33 @@ export class LiveAgency {
       [`own-shop-quote:${state.tick}:${row.id}:${price}`,`own-bank-lead:${this.document.knowledge.bankCheckedAt}`]);
     this.save();return true;
   }
+  requestItem(need:ItemNeed,state:LiveState,reason:string):void {
+    if(this.document.receipt||this.document.safetyReceipt)throw new Error('RECONCILE_PENDING_ACTION_FIRST');
+    const goal=this.director.memory.active;
+    if(!goal||!this.supported.includes('acquisition')){this.blocked('Item acquisition capability required: '+need.name);return;}
+    if(!need.name.trim()||need.name.length>120||!Number.isSafeInteger(need.minimum)||need.minimum<1||need.minimum>100000
+      ||need.id!==undefined&&(!Number.isInteger(need.id)||need.id<0))throw new Error('INVALID_ITEM_REQUIREMENT');
+    this.document.acquisition??=emptyAcquisition();
+    this.document.acquisition.need={...need,parentKey:goal.key,reason,at:this.clock()};
+    this.director.requestSupport({fact:itemFact(need),minimum:need.minimum},reason,[`own-missing-item:${state.tick}:${need.id??need.name}`]);
+    delete this.document.route;this.save();
+  }
+  deferSurvey(route:Route,state:LiveState,reason:string):void {
+    if(this.document.receipt||this.document.safetyReceipt)throw new Error('RECONCILE_PENDING_ACTION_FIRST');
+    this.document.knowledge.routeFailures??={};
+    const old=this.document.knowledge.routeFailures[route.id],now=this.clock(),attempts=(old?.attempts??0)+1;
+    this.document.knowledge.routeFailures[route.id]={at:now,retryAt:now+Math.min(30*60_000,60_000*2**Math.min(5,attempts)),
+      attempts,context:capabilityContext(state),learningRevision:this.director.memory.learningRevision??0,reason};
+    this.director.deferSurvey(route.id,now,reason,[`own-route-assessment:${state.tick}:${route.id}`]);
+    delete this.document.route;this.document.blocked=reason;this.save();
+  }
   blocked(reason:string):void {
     this.director.blocked(this.clock(),reason);this.document.blocked=reason;this.save();
   }
   /** No re-selection here. A refused begin MUST prevent normal execution. */
   begin(selection:Selection,action:LiveCandidate,state:LiveState,commandId:string=randomUUID()):string {
     if(this.document.receipt||this.document.safetyReceipt)throw new Error('RECONCILE_PENDING_ACTION_FIRST');
+    action=bindItems(action,state);
     const view=this.catalogue(state).view;
     if(view.context!==selection.view.context)throw new Error('CAPABILITY_CONTEXT_CHANGED');
     if(!this.eligible(action,state))throw new Error('STEP_AWAITING_EVIDENCE_OR_COOLDOWN');
@@ -195,6 +234,7 @@ export class LiveAgency {
   /** Urgent survival is independent of the goal; it cannot overwrite an unresolved ordinary intent. */
   beginSafety(action:LiveCandidate,state:LiveState,commandId:string=randomUUID()):string {
     if(this.document.safetyReceipt)throw new Error('RECONCILE_SAFETY_ACTION_FIRST');
+    action=bindItems(action,state);
     if(!safetyAction(state,action))throw new Error('NOT_AN_URGENT_SAFETY_ACTION');
     this.document.safetyReceipt={commandId,action:structuredClone(action),before:structuredClone(state),startedAt:this.clock(),scope:'safety'};
     this.save();return commandId;
@@ -205,6 +245,8 @@ export class LiveAgency {
     const receipt=safety?this.document.safetyReceipt:this.document.receipt;
     if(!receipt && this.document.lastCommands.includes(commandId))return;
     if(!receipt||receipt.commandId!==commandId)throw new Error('OUTCOME_WITHOUT_MATCHING_INTENT');
+    if(verification.status==='verified') {this.document.acquisition??=emptyAcquisition();rememberAcquisitionSources(this.document.acquisition,receipt.before,after,receipt.action,this.clock());}
+    if(verification.status==='interrupted')this.document.interruptions=[...(this.document.interruptions??[]),{at:this.clock(),receipt:structuredClone(receipt),reason:verification.reason??'interrupted'}].slice(-16);
     this.document.trips??=emptyTrips();
     recordTripEffect(this.document.trips,commandId,receipt.before,after,receipt.action,verification.status==='verified');
     const state=this.catalogue(after).view;
@@ -253,7 +295,7 @@ export class LiveAgency {
   }
   summary() {
     const brief=(r:Receipt|undefined)=>r?{commandId:r.commandId,action:r.action,startedAt:r.startedAt}:undefined;
-    return {source:'agency-v2.json',preparation:this.document.preparation,updatedAt:this.document.updatedAt,buildReadiness:this.document.buildReadiness,development:this.document.development,
+    return {source:'agency-v2.json',acquisition:this.document.acquisition,routeFailures:this.document.knowledge.routeFailures,preparation:this.document.preparation,updatedAt:this.document.updatedAt,buildReadiness:this.document.buildReadiness,development:this.document.development,
       lastObservation:this.document.lastObservation,lastOutcome:this.document.lastOutcome,losses:(this.document.losses??[]).slice(-8),
       goal:this.director.memory.active,pending:brief(this.pending()),safetyPending:brief(this.pending('safety')),blocked:this.document.blocked};
   }
@@ -287,6 +329,7 @@ export function authorizeAction(state:LiveState,action:LiveCandidate,method:Meth
     if(!npc||npc.reachable!==true||!option)throw new Error('FRESH_NPC_OPTION_REQUIRED');
     if(/^attack$/i.test(String(option.text)) && (method.risk!=='bounded'||method.domain!=='combat'))throw new Error('COMBAT_REQUIRES_A_BOUNDED_COMBAT_METHOD');
   }
+  bindItems(action,state); // Refuse absent/changed items before creating any pending journal.
   if(action.type==='shopBuy') {
     const row=(state.shop?.shopItems??[]).find((i:any)=>i.slot===action.fields?.slot),n=Number(action.fields?.amount);
     if(!state.shop?.isOpen||!row||!Number.isFinite(row.buyPrice)||row.buyPrice<0||!Number.isInteger(n)||n<1||Number(row.count)<n)

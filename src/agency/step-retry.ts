@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { obsoleteEmptyRecipe } from './item-intents.ts';
 import type { LiveState } from './world-model.ts';
 
 export type StepAction = { type: string; fields?: Record<string, any> };
@@ -16,6 +17,8 @@ export function stepKey(action: StepAction, state: LiveState): string {
   const npc = (state.nearbyNpcs ?? []).find((n: any) => n.index === f.npcIndex);
   const item = (state.inventory ?? []).find((i: any) => i.slot === (f.slot ?? f.sourceSlot ?? f.itemSlot));
   const option = npc?.optionsWithIndex?.find((o: any) => o.opIndex === f.optionIndex)?.text;
+  const refs=(action as any).itemRefs;
+  if(refs?.length)return digest([action.type,refs.map((r:any)=>[r.container,r.id,r.minimum,r.option]),f.x,f.z,f.locId]);
   return digest([action.type, f.x, f.z, f.level, f.locId, npc?.id, npc?.name, option, item?.id,
     f.style, f.optionIndex, f.itemId, f.amount, f.targetSlot]);
 }
@@ -71,7 +74,8 @@ export function observeQuietStep(action: StepAction, before: LiveState, after: L
   observer: string, previous?: QuietWindow): { window?: QuietWindow; settled: boolean; reason: string } {
   const no = (reason: string) => ({ settled: false, reason });
   const transient = ['walkTo', 'retreat', 'closeModal', 'closeShop', 'setCombatStyle'].includes(action.type);
-  const repeatable = repeatableActivity(action, before);
+  const invalidRecipe = obsoleteEmptyRecipe(action, before, after);
+  const repeatable = repeatableActivity(action, before) || invalidRecipe;
   if (!transient && !repeatable)
     return no('This operation requires attributable outcome evidence; a timeout cannot authorize replay.');
   const a = after.player, b = before.player;
@@ -102,7 +106,9 @@ export function observeQuietStep(action: StepAction, before: LiveState, after: L
     && now >= previous.at && now - previous.at <= 60_000 && after.tick > previous.tick;
   const window = { observer, fingerprint, since: continuous ? previous.since : now, at: now, tick: after.tick };
   const settled = now - window.since >= 30_000;
-  const completedReason = repeatable
+  const completedReason = invalidRecipe
+    ? 'Invalid historical tool/empty-slot context interrupted after fresh quiescence. Original effects remain unknown; no reward or non-execution inferred and no stale packet may be replayed.'
+    : repeatable
     ? 'Repeatable activity interrupted: it is now idle after a continuous quiet window; historical effects are unknown, no success or non-execution is inferred, and any new action needs fresh validation.'
     : 'Transient step interrupted after a continuous quiet window; no success or replay inferred.';
   return { window, settled,

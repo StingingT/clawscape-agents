@@ -45,3 +45,33 @@ test('Astra partial movement completes the action observation without losing its
 test('standalone policy has no old 40/60/40 completion gate or reported fixed quotas',()=>{
  const policy=new LivePolicy();expect(policy.next(observed()).blocked).not.toBe('PROPOSED_TARGETS_REACHED');expect((policy.summary() as any).proposalTargets).toBeUndefined();
 });
+
+test('a delayed own kill event is attributed once without requiring a damage field',()=>{
+ const policy=new LivePolicy(),before=observed();before.hp=10;before.own_player_index=11;
+ before.activity!.target_type='npc';before.activity!.target_index=7;
+ const after=structuredClone(before);after.seq++;after.tick!++;after.observed_at+=600;after.fresh_at=after.observed_at;
+ after.skills[0]!.xp+=10;after.entities=[];after.activity!.target_type='none';after.activity!.target_index=-1;
+ policy.observe(before,after);expect((policy.summary() as any).state.learning.active).not.toBeNull();
+ const delayed=structuredClone(after);delayed.seq++;delayed.tick!++;delayed.observed_at+=600;delayed.fresh_at=delayed.observed_at;
+ delayed.activity!.events=[{tick:after.tick!,type:'kill',source_type:'player',source_index:11,target_type:'npc',target_index:7,damage:0}];
+ policy.observe(after,delayed);policy.observe(after,delayed);
+ const summary=(policy.summary() as any).state;expect(summary.counters.encountersCompleted).toBe(1);expect(summary.learning.methods[0].confirmed).toBe(1);
+});
+test('XP, disappearance or a different player kill do not become a confirmed own kill',()=>{
+ const policy=new LivePolicy(),before=observed();before.own_player_index=11;before.activity!.target_type='npc';before.activity!.target_index=7;
+ const after=structuredClone(before);after.seq++;after.tick!++;after.observed_at+=600;after.fresh_at=after.observed_at;
+ after.skills[0]!.xp+=10;after.entities=[];after.activity!.target_type='none';after.activity!.target_index=-1;
+ after.activity!.events=[{tick:after.tick!,type:'kill',source_type:'player',source_index:12,target_type:'npc',target_index:7,damage:0}];
+ policy.observe(before,after);const end=structuredClone(after);end.seq++;end.tick!+=4;end.observed_at+=3000;end.fresh_at=end.observed_at;
+ policy.observe(after,end);const summary=(policy.summary() as any).state;
+ expect(summary.learning.active).toBeNull();expect(summary.counters.encountersCompleted).toBe(0);expect(summary.learning.methods[0].xp).toBe(10);expect(summary.learning.methods[0].uncertain).toBe(1);
+});
+test('observed NPC index reuse or life change cannot receive old encounter credit',()=>{
+ for(const lifeChange of [true,false]){
+ const policy=new LivePolicy(),before=observed();before.own_player_index=11;before.activity!.target_type='npc';before.activity!.target_index=7;
+ const after=structuredClone(before);after.seq++;after.tick!++;after.observed_at+=600;
+ if(lifeChange)after.life_id=2;else after.entities[0]!.content_id=999;
+ after.activity!.events=[{tick:after.tick!,type:'kill',source_type:'player',source_index:11,target_type:'npc',target_index:7,damage:0}];
+ policy.observe(before,after);expect((policy.summary() as any).state.counters.encountersCompleted).toBe(0);
+ }
+});

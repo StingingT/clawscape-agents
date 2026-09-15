@@ -84,3 +84,12 @@ test('clock alone or unrelated item changes cannot verify a production dialogue'
  const b=state();b.dialog={isOpen:true,options:[{index:2,text:'Make all arrows'}]};const a=structuredClone(b);a.tick++;a.inventory=[{id:53,count:1}];
  assert.equal(verifyActionOutcome(b,a,{type:'clickDialogOption',fields:{optionIndex:2}}).verified,false);
 });
+
+test('a failed survey yields to another lead and persists a reversible route refusal',t=>{
+ const f=fixture(t),a=f.agency,b=state();const selected=a.plan(b);assert.ok(isSelection(selected));
+ const route=selected.task.route!;a.deferSurvey(route,b,'No verified approach: partial-path');
+ assert.equal(a.director.memory.active,undefined);assert.equal(a.director.memory.reviews[0]?.result,'partial');
+ const next=a.plan(state());assert.ok(!isSelection(next));
+ const restarted=new LiveAgency(f.file,f.identity,f.options);assert.ok(!isSelection(restarted.plan(state())));
+ f.time(31*60_000);assert.ok(isSelection(restarted.plan(state(10,10,30))),'cooldown is temporary, not permanent blacklisting');
+});

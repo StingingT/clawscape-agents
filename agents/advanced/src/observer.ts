@@ -1,3 +1,4 @@
+import { combatEvents, observedPlayerIndex } from '../../../src/combat-evidence.ts';
 import { z } from "zod";
 import { readFileSync } from "node:fs";
 import { resolve, join } from "node:path";
@@ -43,6 +44,7 @@ export function projectSnapshot(raw: unknown, identity: {
     session_id: identity.session, profile_id: identity.profile, seq: identity.seq,
     tick: num(s.tick), observed_at: identity.now, fresh_at: identity.freshAt, provenance: "cli-player-observation",
     connected: outer.connected === true, position: plane !== null && x !== null && zCoord !== null ? { x, z: zCoord, plane } : null,
+    own_player_index: observedPlayerIndex(p.index),
     hp: num(p.hp), max_hp: num(p.maxHp), life_id: num(p.lifeId), respawns: num(p.respawnCount),
     skills: list(s.skills).flatMap(raw => {
       const v = obj(raw), current = num(v.level), base = num(v.baseLevel), xp = num(v.experience);
@@ -61,13 +63,7 @@ export function projectSnapshot(raw: unknown, identity: {
       target_type: obj(p.combat).targetType ?? 'none', last_damage_tick: obj(p.combat).lastDamageTick ?? -1,
       modal_open: s.modalOpen === true, modal_id: s.modalInterface ?? -1,
       design_open: s.modalOpen === true && s.modalInterface === 3559,
-      events: list(s.combatEvents).slice(-30).flatMap(raw => {
-        const e=obj(raw);
-        return num(e.tick)!==null&&num(e.damage)!==null&&['damage_taken','damage_dealt','kill'].includes(String(e.type))
-          && typeof e.sourceIndex==='number'&&typeof e.targetIndex==='number'
-          ? [{tick:e.tick,type:e.type,damage:e.damage,source_type:str(e.sourceType),source_index:e.sourceIndex,
-            target_type:str(e.targetType),target_index:e.targetIndex}] : [];
-      }),
+      events: combatEvents(s.combatEvents),
       style: num(obj(s.combatStyle).currentStyle), styles: list(obj(s.combatStyle).styles).flatMap(raw => {
         const st = obj(raw), index = num(st.index);
         return index === null ? [] : [{index, name: str(st.name), skill: list(st.trainsSkills).map(str).join(',')}];
