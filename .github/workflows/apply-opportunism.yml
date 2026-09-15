@@ -39,6 +39,12 @@ jobs:
           assert needle in s
           s=s.replace(needle,add,1)
           p.write_text(s)
+          # The VM integration harness extracts functions from agent.ts without imports.
+          # Supply a no-op dependency there; dedicated policy tests exercise the real implementation.
+          q=Path('scripts/test-agency-controller.cjs'); t=q.read_text()
+          t=t.replace("urgentAgencyAction:()=>undefined,validateMetal", "incidentalOpportunity:()=>undefined,urgentAgencyAction:()=>undefined,validateMetal")
+          t=t.replace("const env={agency,steps:11,character:'test',role:'resource',build:'melee',forumEnabled:false,", "const env={agency,steps:11,character:'test',role:'resource',build:'melee',forumEnabled:false,incidentalOpportunity:()=>undefined,")
+          q.write_text(t)
       - name: Install pinned offline agency dependencies
         run: |
           npm install --prefix "$RUNNER_TEMP/agency-tests" --ignore-scripts --no-audit --no-fund --no-package-lock zod@4.1.5 typescript@5.9.3 @types/node@22.16.0
@@ -50,7 +56,7 @@ jobs:
       - name: Commit tested product files
         run: |
           git diff --check
-          git add src/agent.ts src/opportunity-policy.ts src/opportunity-policy.test.ts
+          git add src/agent.ts src/opportunity-policy.ts src/opportunity-policy.test.ts scripts/test-agency-controller.cjs
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git commit -m 'Use worthwhile incidental resources without abandoning primary goals'
