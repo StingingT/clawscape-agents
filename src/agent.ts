@@ -1370,7 +1370,12 @@ async function runEpisode(): Promise<void> {
     training?.beginTrial?.(state,planned.decision.goal);
     const committedRoute=agency.routeStep(planned,state);
     const options=available(committedRoute?[committedRoute as Candidate]:await actionsForTask(state,planned.task)).filter(a=>agency!.eligible(a,state));
-    if(!options.length){if(!agency.summary().blocked && !agency.summary().acquisition?.need)agency.blocked('Selected task has no feasible current executor step: '+planned.task.id);await cliCall(['wait','2']);continue;}
+    if(!options.length){
+      if(planned.task.kind==='exploration'&&planned.task.route){
+        agency.deferSurvey(planned.task.route,state,'Selected survey has no feasible executor step from the current context.');
+      } else if(!agency.summary().blocked && !agency.summary().acquisition?.need) agency.blocked('Selected task has no feasible current executor step: '+planned.task.id);
+      await cliCall(['wait','2']);continue;
+    }
     let action:Candidate;
     try {
       const candidate=choose(stateKey(state),options);

@@ -73,6 +73,15 @@ const fighting = (o: Observation) => {
   const e = target(o);
   return e && e.hp !== 0 && option(e, /^attack$/) ? e : undefined;
 };
+const ownKillSignal = (before:Observation, after:Observation, active:{index:number;contentId:number;startTick:number|null;clearedAt?:number;clearedTick?:number|null}) => {
+  const prior=before.entities.find(e=>e.kind==='npc'&&e.index===active.index&&e.content_id===active.contentId);
+  const now=after.entities.find(e=>e.kind==='npc'&&e.index===active.index&&e.content_id===active.contentId);
+  const xpGain=meleeXp(after)>meleeXp(before);
+  const targetCleared=before.activity?.target_type==='npc'&&before.activity.target_index===active.index&&after.activity?.target_index!==active.index;
+  const npcGone=!!prior&&!now;
+  const recent=active.startTick===null||after.tick===null||after.tick-active.startTick<=200;
+  return recent&&xpGain&&targetCleared&&npcGone;
+};
 const xp = (o: Observation, names: string[]) => o.skills.filter(s => names.includes(normalize(s.name))).reduce((n, s) => n + s.xp, 0);
 const inventoryMark = (o: Observation, predicate: (i: Item) => boolean) =>
   JSON.stringify(o.inventory.filter(predicate).map(i => [i.id, i.count]).sort((a, b) => a[0]! - b[0]!));
