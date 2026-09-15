@@ -131,9 +131,11 @@ export function buildCatalogue(identity: Identity, state: LiveState, k: Knowledg
       policy.combatLossBoundGp === undefined ? 'unknown' : 'bounded');
   }
   const prayerTarget=guideTrainingTarget(development,state,'prayer',buildRules);
-  if (prayerTarget!==undefined && (state.inventory ?? []).some((i: any) => (i.optionsWithIndex ?? []).some((o: any) => /^bury$/i.test(String(o.text)))))
-    add({id:'train-prayer',kind:'prayer',skill:'prayer'},'combat','xp:prayer',Math.min(prayerTarget,Math.floor(facts['xp:prayer'] ?? 0)+1),1,
-      'Investigate Prayer progression using personally held bones and the observed Bury option.', 'collection');
+  if (allowedTraining(development,['prayer'],state) && (state.inventory ?? []).some((i: any) => (i.optionsWithIndex ?? []).some((o: any) => /^bury$/i.test(String(o.text))))) {
+    const current=Math.floor(facts['xp:prayer'] ?? 0),target=prayerTarget===undefined?current+1:Math.min(prayerTarget,current+1);
+    if(target>current)add({id:'train-prayer',kind:'prayer',skill:'prayer'},'combat','xp:prayer',target,1,
+      'Use a personally held incidental resource when its freshly observed action provides low-cost skill progress.', 'collection');
+  }
   const bankCoins = state.bank?.isOpen === true && Array.isArray(state.bank.items) ? cash(state.bank.items) : 0;
   const knownBankCoins = state.bank?.isOpen === true ? bankCoins : cash(k.bank);
   if (knownBankCoins > 0) {
@@ -143,6 +145,10 @@ export function buildCatalogue(identity: Identity, state: LiveState, k: Knowledg
   }
   add({id:'production-batch',kind:'production'},'crafting','xp:production',Math.floor(facts['xp:production']!/100)*100+100,100,
     'Complete a bounded production batch, obtaining the inputs through the supported production routine.', 'collection');
+  const incidentalRaw=(state.inventory??[]).some((i:any)=>/^raw\b/i.test(String(i.name??'')));
+  const adjacentHeat=(state.nearbyLocs??[]).some((l:any)=>Number.isInteger(l.x)&&Number.isInteger(l.z)&&/^(fire|fireplace|range|stove|cooking pot)$/i.test(String(l.name??''))&&Math.max(Math.abs(Number(state.player?.worldX)-Number(l.x)),Math.abs(Number(state.player?.worldZ)-Number(l.z)))<=1);
+  if(incidentalRaw&&adjacentHeat)add({id:'incidental-process',kind:'production'},'crafting','xp:cooking',Math.floor(facts['xp:cooking']??0)+1,1,
+    'Process an incidental carried resource when an observed nearby facility makes the secondary skill gain cheap.', 'collection');
   if(trips) {
     const cargo=preparation(state,'gathering',trips);
     facts['gathering:banked']=trips.bankedCargo??0;

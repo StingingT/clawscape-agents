@@ -38,10 +38,9 @@ const freeSlots = (o: Observation) => o.capacity === null ? null : o.capacity - 
 const tool = (i: { name: string }) => /^(small fishing net|tinderbox|(?:bronze|iron|steel|black|mithril|adamant|rune) (?:axe|hatchet))$/.test(normalize(i.name));
 const supplyItem = (i: { name: string }) => tool(i) || healing(i) > 0 || raw(i) || /^(logs|feather|feathers|fishing bait|coins)$/.test(normalize(i.name));
 // An allowlist makes unfamiliar/quest items protected even if the observer has no quest journal.
-const depositable = (i: Item) => !i.protected && !supplyItem(i) &&
-  /^(cowhide|cow hide|bones|burnt (?:fish|shrimps|shrimp|meat|chicken)|ashes|copper ore|tin ore|iron ore|wool|bronze dagger|shortbow|bronze arrows?|(?:air|mind|water|earth|fire|body) runes?)$/.test(normalize(i.name));
+const depositable = (i: Item) => !i.protected && !supplyItem(i);
 const canDeposit = (o: Observation, i: Item) => depositable(i) && !o.equipment.some(e => e.id === i.id);
-const lootAllowed = (e: Entity) => supplyItem(e) || /^(cowhide|cow hide|bones)$/.test(normalize(e.name));
+const lootAllowed = (e: Entity) => e.kind === 'ground_item' && e.reachable === true;
 // SDK ground piles omit menu options; a filtered visible, reachable pile is the
 // normal pickup capability. If options ARE supplied, honour that narrower menu.
 const pickupAvailable = (e: Entity) => !!option(e, /^(take|pick-up|pick up)$/)
