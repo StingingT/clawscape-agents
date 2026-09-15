@@ -682,7 +682,14 @@ export class LivePolicy {
         .sort((a, b) => rank(b, shield) - rank(a, shield) || a.slot - b.slot)[0];
       if (candidate) return { goal: shield ? "equipment:shield" : "equipment:sword", reason: "Equip an observed sword/shield with a supported material requirement; no purchase or invented slot.",
         intent: { operation: "equip", slot: candidate.slot, item_id: candidate.id } };
-      if (current < 0) return block("equipment", shield ? "MISSING_SHIELD" : "MISSING_SWORD", "No supported wielded or inventory sword/shield; an acquisition route is required before combat.");
+      if (current < 0) {
+        const stored=(o.bank.open?o.bank.items??[]:[]).filter(i=>i.count>0&&rank(i,shield)>=0)
+          .sort((a,b)=>rank(b,shield)-rank(a,shield)||a.slot-b.slot)[0];
+        if(stored)return {goal:shield?'equipment:shield-bank':'equipment:sword-bank',reason:'Withdraw the strongest usable owned upgrade from the freshly observed bank; no item or slot is assumed.',
+          intent:{operation:'withdraw',slot:stored.slot,item_id:stored.id,amount:1}};
+        if(!o.bank.open&&this.state.bankLead)return this.startBank(o);
+        return block("equipment", shield ? "MISSING_SHIELD" : "MISSING_SWORD", "No supported wielded, carried, or freshly observed banked sword/shield; an acquisition route is required before combat.");
+      }
     }
     return undefined;
   }

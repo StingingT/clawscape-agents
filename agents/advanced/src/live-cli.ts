@@ -250,6 +250,10 @@ export async function main(context:StartupContext){
       }
       activeGoal=decision.goal;
       if(decision.blocked){
+        if(agency&&planned?.task.kind==='exploration'&&planned.task.route&&!agency.pending()&&!agency.pending('safety')){
+          agency.deferSurvey(planned.task.route,agencyState(latest),decision.blocked);
+          publish('REPLANNING',decision.blocked);await sleep(700);continue;
+        }
         // A disappearing NPC or a short UI transition is a new observation
         // requirement, not a reason to disconnect the whole controller.
         if(['TARGET_NOT_OBSERVED','STALE_OBSERVATION','UNRESOLVED_THREAT'].includes(decision.blocked) && Date.now()-lastProgress<60_000){await sleep(700);continue;}
@@ -266,7 +270,13 @@ export async function main(context:StartupContext){
             next:step.intent?.operation==='move'?step.intent.destination:null};
           if(!recordedRoutes.has(step.route)){recordedRoutes.add(step.route);store.append('navigation_plans',crypto.randomUUID(),{at:Date.now(),from:latest.position,goal:decision.goal,...step.route});}
         }
-        if(step.blocked){if(agency&&!agency.pending())agency.blocked(step.blocked);policy.recordOutcome(latest,latest,decision,'FAILED');publish('REPLANNING',step.blocked);failed++;await sleep(700);continue;}
+        if(step.blocked){
+          if(agency&&!agency.pending()){
+            if(planned?.task.kind==='exploration'&&planned.task.route)agency.deferSurvey(planned.task.route,agencyState(latest),step.blocked);
+            else agency.deferCurrent(agencyState(latest),step.blocked);
+          }
+          policy.recordOutcome(latest,latest,decision,'FAILED');publish('REPLANNING',step.blocked);failed++;await sleep(700);continue;
+        }
         if(step.arrived){
           if(mode==='pilot'&&!pilotMoved){reason='PILOT_NO_ACTUAL_MOVEMENT';break;}
           policy.recordOutcome(latest,latest,decision,'ARRIVED');await sleep(500);continue;
