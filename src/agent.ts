@@ -34,6 +34,7 @@ import { preferRangedSupply } from './action-priority';
 import { dropLearningCandidates, knowledgeSummary, recordObservedDrops, runeDiscoveryCandidates } from './world-knowledge';
 import { foodCount as learnedFoodCount, foodBankReserve, learnedFoodReserve, recordFoodExperience, type FoodExperience } from './food-policy';
 import { isAgentClutter, isUrgentClutter, isBankableResource, isFinishedArrow, surplusArrowAmount } from './inventory-policy';
+import { incidentalOpportunity, bankableIncidentalEquipment } from './opportunity-policy';
 import { validateFishing, type FishingPreparation } from './fishing-progression';
 import { beginActionIntent, finishActionIntent, loadActionIntent, type ActionIntent } from './action-intent';
 import { verifyActionOutcome } from './action-outcome';
@@ -740,6 +741,7 @@ function bankingCandidates(state: GameState, task?: Task): Candidate[] {
     const edible = isFood(item);
     const itemName = text(item.name);
     if (isAgentClutter(item, build, equippedNames, keepWeaponName)) return true;
+    if (bankableIncidentalEquipment(item) && String(item.name) !== String(keepWeaponName ?? '')) return true;
     if (isFinishedArrow(itemName)) return surplusArrows > 0;
     return edible ? surplusFood > 0 : isBankableResource(String(item.name));
   });
@@ -1196,6 +1198,10 @@ async function actionsForTask(state: GameState, task: Task): Promise<Candidate[]
     const guide=(state.nearbyNpcs??[]).find(n=>/runescape guide|tutorial guide/i.test(String(n.name))&&n.reachable===true);
     if(guide)return [{id:'tutorial-guide',type:'talkToNpc',fields:{npcIndex:guide.index},waitTicks:3}];
   }
+  // Evaluate one cheap side opportunity only after the Director has selected the primary task.
+  // The side action does not replace that goal and cannot justify a long detour.
+  const incidental=incidentalOpportunity(state,task.kind) as Candidate|undefined;
+  if(incidental)return [incidental];
   if(task.kind==='funds') {
     const coins=(state.inventory??[]).filter(i=>Number(i.id)===995||/^coins$/i.test(String(i.name))).reduce((n,i)=>n+Number(i.count??1),0);
     const required=Math.max(0,(task.target?.minimum??0)-coins);
