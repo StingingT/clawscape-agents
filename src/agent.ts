@@ -1237,7 +1237,11 @@ async function actionsForTask(state: GameState, task: Task): Promise<Candidate[]
       return [...immediate,...safeAmmoSupplyCandidates(state)];
     }
     case 'bank': return bankingCandidates(state,task);
-    case 'equipment': return gearCandidates(state);
+    case 'equipment': {
+      // Prefer fresh carried/equipped observations and the agent's own observed bank before seeking another item.
+      const owned=await equipmentGoals.next(state,(from,to)=>navigator!.assess(from,to));
+      return owned?[owned as Candidate]:gearCandidates(state);
+    }
     case 'combat': {
       if(!state.combatStyle?.styles?.some((s:any)=>s.trainsSkills?.some((k:string)=>k.toLowerCase()===task.skill)))return [];
       const gear=gearCandidates(state,task.skill);
@@ -1373,7 +1377,9 @@ async function runEpisode(): Promise<void> {
     if(!options.length){
       if(planned.task.kind==='exploration'&&planned.task.route){
         agency.deferSurvey(planned.task.route,state,'Selected survey has no feasible executor step from the current context.');
-      } else if(!agency.summary().blocked && !agency.summary().acquisition?.need) agency.blocked('Selected task has no feasible current executor step: '+planned.task.id);
+      } else if(!agency.summary().acquisition?.need) {
+        agency.deferCurrent(state,'Selected task has no feasible current executor step: '+planned.task.id);
+      }
       await cliCall(['wait','2']);continue;
     }
     let action:Candidate;

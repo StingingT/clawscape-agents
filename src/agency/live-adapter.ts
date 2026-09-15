@@ -203,6 +203,12 @@ export class LiveAgency {
     this.director.requestSupport({fact:itemFact(need),minimum:need.minimum},reason,[`own-missing-item:${state.tick}:${need.id??need.name}`]);
     delete this.document.route;this.save();
   }
+  deferCurrent(state:LiveState,reason:string):void {
+    if(this.document.receipt||this.document.safetyReceipt)throw new Error('RECONCILE_PENDING_ACTION_FIRST');
+    const goal=this.director.memory.active;if(!goal)return;
+    this.director.deferCurrent(this.clock(),reason,[`fresh-no-executor:${state.tick}:${goal.id}`]);
+    delete this.document.route;this.document.blocked=reason;this.save();
+  }
   deferSurvey(route:Route,state:LiveState,reason:string):void {
     if(this.document.receipt||this.document.safetyReceipt)throw new Error('RECONCILE_PENDING_ACTION_FIRST');
     this.document.knowledge.routeFailures??={};

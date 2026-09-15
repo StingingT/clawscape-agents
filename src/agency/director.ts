@@ -148,6 +148,13 @@ export class Director {
     else if(goal.investigation?.id==='survey:'+routeId)delete goal.investigation;
   }
 
+  /** Retire a bounded attempt that has no executable step in the fresh world state. */
+  deferCurrent(at:number,reason:string,evidence:string[]):void {
+    if(this.memory.pending)throw new Error('RECONCILE_PENDING_ACTION_FIRST');
+    if(!this.memory.active)return;
+    this.review(at,'partial',reason,evidence);
+  }
+
   /** Refresh the food dependency, not the strategic objective or a pending receipt. */
   reviseFoodNeed(target:number,at:number):void {
     if(this.memory.pending||!Number.isInteger(target)||target<0)return;
