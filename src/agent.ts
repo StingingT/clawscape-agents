@@ -1319,6 +1319,19 @@ async function runEpisode(): Promise<void> {
   if(!agency)throw new Error('AGENCY_NOT_INITIALIZED');
   await cliCall(['connect']);
   let state=stateFrom(await cliCall(['state']));
+  // A receipt already present before this episode belongs to an earlier runtime/episode. Observe twice first:
+  // prove its effect normally when possible; otherwise abandon only non-transactional bookkeeping, never replay it.
+  if(agency.pending()||agency.pending('safety')) {
+    await cliCall(['wait','2']);
+    const stable=stateFrom(await cliCall(['state']));
+    for(const scope of ['safety','task'] as const) {
+      const old=agency.pending(scope);if(!old)continue;
+      const check=verifyActionOutcome(old.before,stable,old.action,old.execution);
+      if(!check.uncertain)agency.record(old.commandId,stable,verification(check));
+      else agency.retireRestartPending(scope,state,stable,check.reason??'terminal effect is no longer attributable after restart');
+    }
+    state=stable;
+  }
   if(existsSync(actionIntentPath)||existsSync(resolve(dataDir,'agency-memory.json'))) {
     await cliCall(['wait','2']);
     const stable=stateFrom(await cliCall(['state']));

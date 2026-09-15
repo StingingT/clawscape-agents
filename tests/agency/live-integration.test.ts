@@ -56,6 +56,19 @@ test('unknown retains receipt and does not become a rejected method',t=>{
   assert.equal(a.pending()?.commandId,'a');assert.equal(a.director.memory.sequence,0);assert.deepEqual(a.director.memory.methods,{});
   const restarted=new LiveAgency(f.file,identity,f.config);assert.equal((restarted.plan(before) as any).type,'reconcile');
 });
+test('restart can abandon an unattributed old movement without replay or success',t=>{
+  const f=fixture(t,{supported:['food']}),a=f.agency,before=s({tick:10});a.begin(select(a,before),{id:'old-route',type:'walkTo',fields:{x:3300,z:3300,level:0}},before,'old-walk');
+  a.record('old-walk',before,{status:'unknown',evidence:[],reason:'navigation clock reset'});
+  const first=s({tick:20}),stable=s({tick:21});assert.equal(a.retireRestartPending('task',first,stable,'clock reset'),true);
+  assert.equal(a.pending(),undefined);assert.equal(a.summary().lastOutcome?.status,'interrupted');
+  assert.match(a.summary().lastOutcome?.reason??'',/RESTART_UNATTRIBUTED/);assert.ok(!a.summary().lastOutcome?.evidence.some(e=>/success/i.test(e)));
+});
+test('restart does not abandon value-moving transactions without attribution',t=>{
+  const f=fixture(t,{supported:['food']}),a=f.agency,before=s({tick:10,inventory:[{id:995,name:'Coins',slot:0,count:100}],shop:{isOpen:true,shopItems:[{id:303,slot:0,count:5,buyPrice:10}]}});
+  a.begin(select(a,before),{id:'buy',type:'shopBuy',fields:{slot:0,amount:1}},before,'old-buy');
+  a.record('old-buy',before,{status:'unknown',evidence:[],reason:'transport lost'});
+  assert.equal(a.retireRestartPending('task',s({tick:20}),s({tick:21}),'restart'),false);assert.equal(a.pending()?.commandId,'old-buy');
+});
 test('a different success cannot finalize an old pending command',t=>{
   const {agency:a}=fixture(t,{supported:['food']}),before=s();a.begin(select(a,before),{id:'food',type:'wait'},before,'old');
   assert.throws(()=>a.record('new',s({tick:2,inventory:[shrimp(0)]}),verified),/MATCHING_INTENT/);

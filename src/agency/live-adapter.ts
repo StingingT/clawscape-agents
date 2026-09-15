@@ -172,6 +172,28 @@ export class LiveAgency {
     this.document.blocked=result.reason;this.save();
     return result.settled?{status:'interrupted',evidence:[result.reason],reason:result.reason}:undefined;
   }
+  /** Retire a non-transactional receipt inherited from an earlier runtime when two fresh own observations
+   * still cannot attribute its terminal effect. This never calls the executor and never records success.
+   * Purchases, bank transfers and dialogue choices remain strict because replay could duplicate value/choice. */
+  retireRestartPending(scope:'task'|'safety',first:LiveState,stable:LiveState,reason:string):boolean {
+    const receipt=scope==='safety'?this.document.safetyReceipt:this.document.receipt;
+    if(!receipt)return false;
+    const strict=new Set(['shopBuy','shopSell','bankDeposit','bankWithdraw','clickDialogOption']);
+    if(strict.has(receipt.action.type))return false;
+    const a=first.player,b=stable.player;
+    if(first.inGame!==true||stable.inGame!==true||!a||!b||a.isDead||b.isDead
+      ||![first.tick,stable.tick,a.worldX,a.worldZ,a.level,b.worldX,b.worldZ,b.level].every(Number.isFinite)
+      ||Number(stable.tick)<=Number(first.tick))return false;
+    for(const field of ['character','world','worldEpoch','profileId'] as const)
+      if((first as any)[field]!==undefined&&(first as any)[field]!== (stable as any)[field])return false;
+    const evidence=[`restart-fresh-observations:${first.tick}->${stable.tick}`,
+      `stale-${receipt.action.type}-retired-without-replay`,
+      'Historical effect remains unknown; a future action must be selected and validated from fresh state.'];
+    const deaths=Math.max(0,Number(b.respawnCount??0)-Number(receipt.before.player?.respawnCount??0));
+    this.record(receipt.commandId,stable,{status:'interrupted',evidence,reason:'RESTART_UNATTRIBUTED_NONTRANSACTIONAL_ACTION: '+reason},
+      {spentGp:0,lostGp:0,deaths,elapsedMs:Math.max(0,this.clock()-receipt.startedAt)});
+    return !(scope==='safety'?this.document.safetyReceipt:this.document.receipt);
+  }
   // Existing controller adapters retain compatibility; semantics remain operation-specific.
   settleNavigation(commandId:string,state:LiveState):Verification|undefined { return this.settleStep(commandId,state); }
   eligible(action:LiveCandidate,state:LiveState):boolean {
