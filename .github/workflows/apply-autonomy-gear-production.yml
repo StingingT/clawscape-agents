@@ -1,9 +1,13 @@
 name: Apply autonomy gear production fixes
 on:
   push:
-    branches: [codex/autonomy-gear-production-recovery]
-    paths: [.github/workflows/apply-autonomy-gear-production.yml]
-permissions: { contents: write }
+    branches:
+      - codex/autonomy-gear-production-recovery
+    paths:
+      - .github/workflows/apply-autonomy-gear-production.yml
+      - .github/scripts/apply_autonomy_gear.py
+permissions:
+  contents: write
 jobs:
   apply:
     runs-on: ubuntu-latest
@@ -11,217 +15,13 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with: { node-version: '22.16.0' }
+        with:
+          node-version: '22.16.0'
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
-        with: { bun-version: '1.3.10' }
-      - name: Apply reviewed source changes
-        shell: python
-        run: |
-          from pathlib import Path
-
-          def rep(path, old, new, count=1):
-              p=Path(path); s=p.read_text(); actual=s.count(old)
-              assert actual==count,(path,'expected',count,'found',actual,old[:120])
-              p.write_text(s.replace(old,new,count))
-
-          # 1) Director: executor-level dead ends may retire the current direct goal,
-          # while support/investigation failures preserve the strategic parent.
-          path='src/agency/director.ts'
-          old="""  /** Refresh the food dependency, not the strategic objective or a pending receipt. */
-  reviseFoodNeed(target:number,at:number):void {"""
-          new="""  /** An executor can prove that the selected method has no current action even though planning was feasible.
-   * Support/investigation dead ends preserve the strategic parent; a direct goal is reviewed as partial
-   * and receives the normal bounded cooldown before it can compete again. */
-  deferActive(at:number,reason:string,evidence:string[]=[]):void {
-    if(this.memory.pending)throw new Error('RECONCILE_PENDING_ACTION_FIRST');
-    const goal=this.memory.active;if(!goal)return;
-    this.blocked(at,reason,evidence);
-    if(goal.requestedSupport){delete goal.requestedSupport;delete goal.plan;return;}
-    if(goal.investigation){delete goal.investigation;delete goal.plan;return;}
-    this.review(at,'partial',reason,evidence);
-  }
-
-  /** Refresh the food dependency, not the strategic objective or a pending receipt. */
-  reviseFoodNeed(target:number,at:number):void {"""
-          rep(path,old,new)
-
-          # 2) LiveAgency wrapper used by both standard agents and Astra.
-          path='src/agency/live-adapter.ts'
-          old="""  blocked(reason:string):void {
-    this.director.blocked(this.clock(),reason);this.document.blocked=reason;this.save();
-  }
-"""
-          new="""  deferCurrent(state:LiveState,reason:string):void {
-    if(this.document.receipt||this.document.safetyReceipt)throw new Error('RECONCILE_PENDING_ACTION_FIRST');
-    this.director.deferActive(this.clock(),reason,[`own-executor-dead-end:${state.tick??'unknown'}`]);
-    delete this.document.route;this.document.blocked=reason;this.save();
-  }
-  blocked(reason:string):void {
-    this.director.blocked(this.clock(),reason);this.document.blocked=reason;this.save();
-  }
-"""
-          rep(path,old,new)
-
-          # 3) Shared world model: treat a personally known owned upgrade as an equipment need.
-          path='src/agency/world-model.ts'
-          old="""    'xp:production': ['smithing','fletching','crafting'].reduce((n,k) => n + XP(state,k), 0),
-    'xp:gathering': ['woodcutting','mining','fishing'].reduce((n,k) => n + XP(state,k), 0) };"""
-          new="""    'gear-ready': state.gearUpgradeAvailable===true ? 0 : 1,
-    'xp:production': ['smithing','fletching','crafting'].reduce((n,k) => n + XP(state,k), 0),
-    'xp:gathering': ['woodcutting','mining','fishing'].reduce((n,k) => n + XP(state,k), 0) };"""
-          rep(path,old,new)
-          old="""      priority: ['food','ammunition','equipment','bank','funds'].includes(task.kind) ? 'maintenance' : 'strategic' });"""
-          new="""      priority: ['food','ammunition','bank','funds'].includes(task.kind) ? 'maintenance' : 'strategic' });"""
-          rep(path,old,new)
-          old="""  add({id:'equip-usable-weapon',kind:'equipment'},'combat','weapon',1,1,
-    'Equip a personally owned usable weapon before attempting combat.', 'need');
-"""
-          new="""  add({id:'equip-usable-weapon',kind:'equipment'},'combat','weapon',1,1,
-    'Equip a personally owned usable weapon before attempting combat.', 'need');
-  if(state.gearUpgradeAvailable===true) add({id:'equip-owned-upgrade',kind:'equipment'},'combat','gear-ready',1,1,
-    'Use a personally observed owned equipment upgrade when it improves the current kit; do not invent an item, slot, price or source.', 'need');
-"""
-          rep(path,old,new)
-
-          # 4) Standard controller: signal known upgrades from fresh carried/equipped state and recently verified bank state.
-          path='src/agent.ts'; p=Path(path); s=p.read_text()
-          old="""const work: { foodBatch?: FoodBatch; fishing?: FishingPreparation; economy?: EconomyMemory; resource?: { goal?: string; site?: string; lastBankAt?: number }; autonomy?: AutonomyMemory; learning?: Json & { food?: FoodExperience }; appearance?: AppearanceMemory; foodWithdrawalPending?: boolean | 'raw'; fishingToolFundingUntil?: number; fishingToolTradeAttempted?: boolean; pickpocketStreak?: number; bankReturn?: { x: number; z: number; level: number }; bankReturnReady?: boolean; bankItems?: Json[]; failures: Record<string, { until: number; count: number }> } = (() => {"""
-          new="""const work: { foodBatch?: FoodBatch; fishing?: FishingPreparation; economy?: EconomyMemory; resource?: { goal?: string; site?: string; lastBankAt?: number }; autonomy?: AutonomyMemory; learning?: Json & { food?: FoodExperience }; appearance?: AppearanceMemory; foodWithdrawalPending?: boolean | 'raw'; fishingToolFundingUntil?: number; fishingToolTradeAttempted?: boolean; pickpocketStreak?: number; bankReturn?: { x: number; z: number; level: number }; bankReturnReady?: boolean; bankItems?: Json[]; productionNoStep?: {key:string;count:number;at:number}; failures: Record<string, { until: number; count: number }> } = (() => {"""
-          assert old in s;s=s.replace(old,new,1)
-          marker="""const defensiveGoals = new EquipmentGoals(resolve(dataDir,'defensive-equipment-goals.json'),gearCatalog,'defender',false);
-defensiveGoals.seedBank(work.economy?.bankItems ?? work.bankItems ?? []);
-"""
-          helper=marker+"""
-function gearLossRisk(state:GameState):boolean {
-  const combat=state.player?.combat as Json|undefined;
-  const danger=(state as any).danger;
-  return combat?.targetType==='player'||danger?.pvp===true||danger?.playerThreat===true;
-}
-function refreshGearSignal(state:GameState):void {
-  if(gearLossRisk(state)){(state as any).gearUpgradeAvailable=false;return;}
-  const recentBank=Date.now()-Number(equipmentGoals.memory.bankCheckedAt??0)<=30*60_000?equipmentGoals.memory.bank:[];
-  const bank=state.bank?.isOpen===true&&Array.isArray(state.bank.items)?state.bank.items:recentBank;
-  const owned=[...(state.inventory??[]),...(state.equipment??[]),...(bank??[])];
-  const equipped=state.equipment??[];
-  const families=build==='ranged-magic'?['bow','legs','hands']:
-    role==='economy'?['melee','axe','pickaxe']:['melee','shield','body'];
-  const current=(family:string)=>Math.max(0,...gearCatalog.items.filter(g=>g.family===family&&usable(g,state)&&
-    (g.tool?[...(state.inventory??[]),...equipped]:equipped).some((i:any)=>i.id===g.id)).map(g=>g.quality));
-  const best=(family:string)=>Math.max(0,...gearCatalog.items.filter(g=>g.family===family&&usable(g,state)&&owned.some((i:any)=>i.id===g.id)).map(g=>g.quality));
-  (state as any).gearUpgradeAvailable=families.some(f=>best(f)>current(f));
-}
-function noteProductionNoStep(task:Task):boolean {
-  work.economy??={bankItems:work.bankItems??[]};
-  const memory=objectives(work.economy),now=Date.now(),intent=memory.intent?.id??'none';
-  const key=`${task.id}:${intent}`;
-  const previous=work.productionNoStep;
-  const count=previous?.key===key&&now-previous.at<=60_000?previous.count+1:1;
-  work.productionNoStep={key,count,at:now};
-  if(count<3){saveWork();return false;}
-  if(memory.intent){memory.blocked[memory.intent.id]=now+5*60_000;delete memory.intent;delete memory.cycle;}
-  delete work.productionNoStep;saveWork();return true;
-}
-"""
-          assert marker in s;s=s.replace(marker,helper,1)
-          old="""    case 'equipment': return gearCandidates(state);"""
-          new="""    case 'equipment': {
-      if(gearLossRisk(state))return [];
-      const immediate=gearCandidates(state);if(immediate.length)return immediate;
-      const next=await equipmentGoals.next(state,(from,to)=>navigator!.assess(from,to));
-      return next?[next as Candidate]:[];
-    }"""
-          assert old in s;s=s.replace(old,new,1)
-          old="""      const result=economyNext(state,work.economy,id=>!actionReady(work.failures[id]));
-      saveWork(); return result;"""
-          new="""      const result=economyNext(state,work.economy,id=>!actionReady(work.failures[id]));
-      if(result.length)delete work.productionNoStep;
-      saveWork(); return result;"""
-          assert old in s;s=s.replace(old,new,1)
-          old="""    state=stateFrom(await cliCall(['state']));
-    training?.observe(state);
-    agency.catalogue(state);"""
-          new="""    state=stateFrom(await cliCall(['state']));
-    refreshGearSignal(state);
-    training?.observe(state);
-    agency.catalogue(state);"""
-          assert old in s;s=s.replace(old,new,1)
-          old="""      if(planned.task.kind==='exploration'&&planned.task.route){
-        agency.deferSurvey(planned.task.route,state,'Selected survey has no feasible executor step from the current context.');
-      } else if(!agency.summary().blocked && !agency.summary().acquisition?.need) agency.blocked('Selected task has no feasible current executor step: '+planned.task.id);
-      await cliCall(['wait','2']);continue;"""
-          new="""      if(planned.task.kind==='exploration'&&planned.task.route){
-        agency.deferSurvey(planned.task.route,state,'Selected survey has no feasible executor step from the current context.');
-      } else if(planned.task.kind==='production') {
-        if(noteProductionNoStep(planned.task))agency.deferCurrent(state,'Production executor produced no actionable step after three fresh attempts; preserve evidence, cool down this method, and replan.');
-      } else if(!agency.summary().blocked && !agency.summary().acquisition?.need) agency.blocked('Selected task has no feasible current executor step: '+planned.task.id);
-      await cliCall(['wait','2']);continue;"""
-          assert old in s;s=s.replace(old,new,1)
-          p.write_text(s)
-
-          # 5) Astra: blocked direct goals replan after their bounded recheck instead of logging forever.
-          path='agents/advanced/src/live-cli.ts'; p=Path(path); s=p.read_text()
-          old="""        supported:['food','bank','equipment','combat','exploration'],preferences:{exploration:2,combat:1},"""
-          new="""        supported:['food','bank','equipment','combat','exploration'],preferences:{exploration:-1,combat:2},"""
-          assert old in s;s=s.replace(old,new,1)
-          old="""          const selection=agency.plan(agencyState(latest));
-          if(!isSelection(selection)){publish('BLOCKED',selection.type==='blocked'?selection.reason:'Reconciliation required');await sleep(700);continue;}
-          planned=selection;
-          decision=policy.next(latest,planned.task);"""
-          new="""          const selection=agency.plan(agencyState(latest));
-          if(!isSelection(selection)){
-            const summary:any=agency.summary(),goal:any=summary.goal;
-            if(selection.type==='blocked'&&goal?.blocker?.recheckAt&&Date.now()>=goal.blocker.recheckAt&&!agency.pending()&&!agency.pending('safety')){
-              agency.deferCurrent(agencyState(latest),'Blocked objective exhausted its bounded recheck without an executable method; temporarily retire it and select another supported goal.');
-              publish('REPLANNING','Blocked goal cooled down; selecting another supported objective.');await sleep(350);continue;
-            }
-            publish('BLOCKED',selection.type==='blocked'?selection.reason:'Reconciliation required');await sleep(700);continue;
-          }
-          planned=selection;
-          decision=policy.next(latest,planned.task);"""
-          assert old in s;s=s.replace(old,new,1)
-          p.write_text(s)
-
-          # 6) Test the shared Director deferral semantics and owned-upgrade catalogue signal.
-          path='tests/agency/director.test.ts'; p=Path(path); s=p.read_text()
-          s += """
-
-test('executor dead end retires a direct goal but preserves a parent with support work',()=>{
-  const d=new Director(createMemory({agent:'a',world:'w',revision:'r'}));
-  const view:any={agent:'a',world:'w',revision:'r',context:'c',at:1000,facts:{x:0},budget:{spendableGp:0,maxLossGp:0,maxDeaths:0,maxDurationMs:10000},capabilities:['exploration']};
-  const goal:any={id:'g',domain:'exploration',target:{fact:'x',minimum:1},reason:'r',evidence:['e'],source:'frontier',priority:'strategic'};
-  const method:any={id:'m',capability:'exploration',domain:'exploration',effects:{x:1},prerequisites:[],costGp:0,lossBoundGp:0,durationMs:1000,risk:'safe'};
-  const first=d.next(view,[goal],[method]);expect(first.type).toBe('execute');
-  d.deferActive(1100,'no executor',['own']);expect(d.memory.active).toBeUndefined();expect(d.memory.reviews.at(-1)?.result).toBe('partial');
-});
-"""
-          p.write_text(s)
-
-          path='tests/agency/world-model.test.ts'; p=Path(path); s=p.read_text()
-          s += """
-
-test('personally known owned gear upgrade becomes an equipment opportunity',()=>{
-  const state:any={gearUpgradeAvailable:true,capacity:28,player:{hp:10,worldX:0,worldZ:0,level:0,lifeId:1},inventory:[],equipment:[{id:1,name:'Bronze sword',count:1}],skills:[],combatStyle:{styles:[]}};
-  const c=buildCatalogue({agent:'a',world:'w',revision:'r'},state,emptyKnowledge(),defaultPolicy,['equipment'],createMemory({agent:'a',world:'w',revision:'r'}),1000);
-  expect(c.opportunities.some((o:any)=>o.id==='equip-owned-upgrade')).toBe(true);
-});
-"""
-          p.write_text(s)
-
-          # 7) Astra combat executor must actually produce an Attack intent for a safe observed combat task.
-          path='agents/advanced/tests/agency-policy.test.ts'; p=Path(path); s=p.read_text()
-          s += """
-
-test('Director combat task initiates a fresh safe observed enemy instead of only observing it',()=>{
-  const o:any=baseObservation();
-  o.skills=[{name:'Attack',current:10,base:10,xp:1000},{name:'Strength',current:10,base:10,xp:1000},{name:'Defence',current:10,base:10,xp:1000}];
-  o.activity={...(o.activity??{}),style:0,styles:[{index:0,name:'Accurate',skill:'attack'}],target_type:'none',target_index:null,animation:-1,events:[]};
-  o.entities=[{ref:'npc:g',kind:'npc',content_id:100,index:7,name:'Goblin',position:{x:o.position.x+1,z:o.position.z,plane:o.position.plane},reachable:true,in_combat:false,combat_level:2,hp:5,max_hp:5,count:null,options:[{index:1,text:'Attack'}]}];
-  o.inventory=[];o.equipment=[{id:1277,name:'Bronze sword',slot:3,count:1,protected:false,options:[]}];o.hp=10;o.max_hp=10;o.danger={active:false,damage_margin:0};
-  const p=new LivePolicy();const d:any=p.next(o,{id:'train-attack',kind:'combat',skill:'attack',foodTarget:0});
-  expect(d.intent?.operation).toBe('interact');expect(d.intent?.entity_ref).toBe('npc:g');
-});
-"""
-          p.write_text(s)
+        with:
+          bun-version: '1.3.10'
+      - name: Apply source changes
+        run: python3 .github/scripts/apply_autonomy_gear.py
       - name: Install pinned dependencies
         run: |
           npm install --prefix "$RUNNER_TEMP/agency-tests" --ignore-scripts --no-audit --no-fund --no-package-lock zod@4.1.5 typescript@5.9.3 @types/node@22.16.0
@@ -229,11 +29,11 @@ test('Director combat task initiates a fresh safe observed enemy instead of only
       - run: npm run test:agency
       - run: npm run test:integration
       - run: npm run check:agency
-      - run: bun test agents/advanced/tests/agency-policy.test.ts
+      - run: bun test agents/advanced/tests/agency-policy.test.ts tests/agency/gear-readiness.test.ts
       - name: Commit tested source only
         run: |
           git diff --check
-          git add src/agency/director.ts src/agency/live-adapter.ts src/agency/world-model.ts src/agent.ts agents/advanced/src/live-cli.ts tests/agency/director.test.ts tests/agency/world-model.test.ts agents/advanced/tests/agency-policy.test.ts
+          git add src/agency/director.ts src/agency/live-adapter.ts src/agency/world-model.ts src/agent.ts agents/advanced/src/live-cli.ts tests/agency/director.test.ts tests/agency/gear-readiness.test.ts agents/advanced/tests/agency-policy.test.ts
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git commit -m 'Replan dead ends and use owned gear upgrades'
