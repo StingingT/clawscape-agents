@@ -1,74 +1,13 @@
-name: Apply opportunistic resource integration
+name: Apply incidental patch
 on:
   push:
-    branches:
-      - codex/opportunistic-resources
-    paths:
-      - .github/workflows/apply-incidental.yml
+    branches: [codex/opportunistic-resources]
+    paths: [.github/workflows/apply-incidental.yml]
 permissions:
   contents: write
 jobs:
   apply:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with:
-          node-version: '22.16.0'
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
-        with:
-          bun-version: '1.3.10'
-      - name: Integrate generic incidental support into live controller
-        shell: bash
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          p=Path('src/agent.ts');s=p.read_text()
-          def rep(old,new):
-            global s
-            assert old in s, 'PATCH_ANCHOR_MISSING:'+old[:80]
-            s=s.replace(old,new,1)
-          rep("import { bindItems, resolveItems, MissingItem, type ItemRef } from './agency/item-intents.ts';",
-              "import { bindItems, resolveItems, MissingItem, type ItemRef } from './agency/item-intents.ts';\nimport { chooseIncidentalGroundItem, incidentalBankable } from './agency/incidental.ts';")
-          rep("appearance?: AppearanceMemory; foodWithdrawalPending?: boolean | 'raw';",
-              "appearance?: AppearanceMemory; incidental?: { lastAt?: number; cooldowns?: Record<string,number>; ids?: Record<string,number> }; foodWithdrawalPending?: boolean | 'raw';")
-          rep("if (isAgentClutter(item, build, equippedNames, keepWeaponName)) return true;",
-              "if (isAgentClutter(item, build, equippedNames, keepWeaponName) || incidentalBankable(item,work.incidental?.ids)) return true;")
-          anchor="""    training?.beginTrial?.(state,planned.decision.goal);
-    const committedRoute=agency.routeStep(planned,state);"""
-          insert="""    // A primary objective may temporarily gain a small incidental-resource support step.
-    // This never replaces the parent goal. Capacity, cooldown and current observed value
-    // determine whether the diversion is worthwhile; uncollected scenery/items are ignored.
-    const incidentalState=work.incidental??={cooldowns:{},ids:{}};
-    incidentalState.cooldowns??={};incidentalState.ids??={};
-    const incidental=(planned.task.kind!=='acquisition' && !planned.decision.goal.requestedSupport
-      && Date.now()-(incidentalState.lastAt??0)>=30_000)
-      ? chooseIncidentalGroundItem(state,Date.now(),incidentalState.cooldowns):undefined;
-    if(incidental) {
-      incidentalState.lastAt=Date.now();incidentalState.cooldowns[incidental.key]=Date.now()+120_000;
-      if(incidental.need.id!==undefined)incidentalState.ids[String(incidental.need.id)]=Date.now();
-      saveWork();
-      agency.requestItem(incidental.need,state,incidental.reason);
-      continue;
-    }
-    training?.beginTrial?.(state,planned.decision.goal);
-    const committedRoute=agency.routeStep(planned,state);"""
-          rep(anchor,insert)
-          p.write_text(s)
-          PY
-      - name: Install pinned offline test dependencies
-        run: npm install --prefix "$RUNNER_TEMP/agency-tests" --ignore-scripts --no-audit --no-fund --no-package-lock zod@4.1.5 typescript@5.9.3 @types/node@22.16.0
-      - run: npm run test:agency
-      - run: npm run test:integration
-      - run: npm run check:agency
-      - run: node --experimental-strip-types --test tests/agency/incidental.test.ts
-      - name: Commit only runtime and tests
-        shell: bash
-        run: |
-          git diff --check
-          git add src/agent.ts src/agency/incidental.ts tests/agency/incidental.test.ts
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'Use worthwhile incidental resources without replacing primary goals'
-          git push origin HEAD:codex/opportunistic-resources
+      - run: echo ready
