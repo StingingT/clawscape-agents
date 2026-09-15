@@ -376,7 +376,14 @@ export class Director {
       goal.preparationOnlyStreak = 0;
       goal.lastPreparationMethodId = undefined;
     }
-    goal.attempts++; goal.noProgress = productive || outcome.status === 'progress'&&!outcome.observationOnly ? 0 : goal.noProgress + 1;
+    // `progress` is the journal's terminal status for a verified but
+    // non-productive action. It is not objective progress: bank/interface
+    // preparation can verify successfully while the selected production or
+    // combat target remains unchanged. Count only a method effect, a
+    // measurable intermediate fact, or a newly satisfied dependency as
+    // progress so repeated setup cycles reach the bounded replan path.
+    const causalProgress = productive || measurableIntermediate || supportSatisfied || newlySatisfiedPrerequisite;
+    goal.attempts++; goal.noProgress = causalProgress ? 0 : goal.noProgress + 1;
     goal.spentGp += outcome.spentGp; goal.lostGp += outcome.lostGp; goal.deaths += outcome.deaths; goal.elapsedMs += outcome.elapsedMs;
     this.memory.sequence = outcome.sequence;
     delete this.memory.pending;

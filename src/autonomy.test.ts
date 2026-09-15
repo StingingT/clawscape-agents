@@ -44,3 +44,19 @@ test('a zero-yield resource action is not kept alive by incidental HP changes', 
   expect(recordAutonomy(memory, before, after, action, 1).stalled).toBe(false);
   expect(recordAutonomy(memory, before, after, action, 2).stalled).toBe(true);
 });
+
+test('an alternating preparation cycle is blocked even when each transfer changes local state', () => {
+  const memory: any = {};
+  const deposited = { ...state(), inventory: [{ id: 1, count: 1 }] };
+  recordAutonomy(memory, state(), state(), { id: 'open-bank', type: 'interactNpc' }, 1, false, 'goal-production', false);
+  recordAutonomy(memory, state(), deposited, { id: 'deposit-cargo', type: 'bankDeposit' }, 2, false, 'goal-production', false);
+  recordAutonomy(memory, state(), state(), { id: 'open-bank', type: 'interactNpc' }, 3, false, 'goal-production', false);
+  expect(recordAutonomy(memory, state(), deposited, { id: 'deposit-cargo', type: 'bankDeposit' }, 4, false, 'goal-production', false).stalled).toBe(true);
+});
+
+test('changing goals clears the old action-cycle evidence', () => {
+  const memory: any = {};
+  recordAutonomy(memory, state(), state(), { id: 'open-bank', type: 'interactNpc' }, 1, false, 'old-goal', false);
+  recordAutonomy(memory, state(), state(), { id: 'open-bank', type: 'interactNpc' }, 2, false, 'old-goal', false);
+  expect(recordAutonomy(memory, state(), state(), { id: 'open-bank', type: 'interactNpc' }, 3, false, 'new-goal', false).stalled).toBe(false);
+});

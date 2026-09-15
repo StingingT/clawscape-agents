@@ -1341,6 +1341,62 @@ function observeAgencyResult(before:GameState,after:GameState,action:Candidate):
   delete work.failures[action.id];saveWork();
 }
 
+/**
+ * Feed terminal executor outcomes into the shared autonomy circuit breaker.
+ * This is intentionally goal- and character-agnostic: an interface change or
+ * local movement may be useful preparation, but it must not keep an unchanged
+ * strategic goal alive forever. Repeated cycles are reviewed and replanned by
+ * the Director, preserving the evidence instead of installing a character
+ * specific escape route.
+ */
+function recordAutonomyOutcome(
+  before:GameState,
+  after:GameState,
+  action:Candidate,
+  check:ReturnType<typeof verifyActionOutcome>,
+  beforeSummary:ReturnType<LiveAgency['summary']>,
+):boolean {
+  if(check.uncertain)return false;
+  const afterSummary=agency!.summary();
+  const previousGoal=beforeSummary.goal;
+  const nextGoal=afterSummary.goal;
+  const objectiveProgress=Boolean(
+    nextGoal && previousGoal && (Number(nextGoal.lastObjectiveProgressAt??0)>Number(previousGoal.lastObjectiveProgressAt??0)
+      || Number(nextGoal.lastSupportProgressAt??0)>Number(previousGoal.lastSupportProgressAt??0))
+    || previousGoal && !nextGoal && check.verified,
+  );
+  if(previousGoal&&!nextGoal&&check.verified){
+    work.autonomy={...(work.autonomy??{}),active:undefined,recentActions:[],stalled:{}};
+    saveWork();
+    return false;
+  }
+  const guard=recordAutonomy(work.autonomy??={},before,after,action,Date.now(),false,previousGoal?.key,objectiveProgress);
+  if(!guard.stalled&&!progressTimedOut(work.autonomy,Date.now())){saveWork();return false;}
+  const reason=`Autonomy circuit breaker: ${guard.reason??'objective progress deadline exceeded'}; review the verified outcome and choose a fresh executable goal.`;
+  if(nextGoal&&!agency!.pending()&&!agency!.pending('safety'))agency!.deferCurrent(after,reason);
+  work.autonomy={...(work.autonomy??{}),active:undefined,recentActions:[],stalled:{}};
+  saveWork();
+  console.error(JSON.stringify({agency:'progress-watchdog',goal:previousGoal?.id,action:action.id,reason,nextGoal:agency!.summary().goal?.id??null}));
+  return true;
+}
+
+function recordAutonomyBlockedWait(
+  before:GameState,
+  after:GameState,
+  action:Candidate,
+  beforeSummary:ReturnType<LiveAgency['summary']>,
+):boolean {
+  const afterSummary=agency!.summary();
+  const guard=recordAutonomy(work.autonomy??={},before,after,action,Date.now(),false,beforeSummary.goal?.key,false);
+  if(!guard.stalled&&!progressTimedOut(work.autonomy,Date.now())){saveWork();return false;}
+  const reason=`Autonomy circuit breaker: planner remained blocked without verified progress; ${guard.reason??'replan after the progress deadline'}.`;
+  if(afterSummary.goal&&!agency!.pending()&&!agency!.pending('safety'))agency!.deferCurrent(after,reason);
+  work.autonomy={...(work.autonomy??{}),active:undefined,recentActions:[],stalled:{}};
+  saveWork();
+  console.error(JSON.stringify({agency:'planner-watchdog',action:action.id,reason,nextGoal:agency!.summary().goal?.id??null}));
+  return true;
+}
+
 async function runEpisode(): Promise<void> {
   if(!agency)throw new Error('AGENCY_NOT_INITIALIZED');
   await cliCall(['connect']);
@@ -1408,7 +1464,16 @@ async function runEpisode(): Promise<void> {
     const planned=agency.plan(state);
     if(!isSelection(planned)) {
       console.log(JSON.stringify({agency:planned.type,detail:planned,goal:agency.summary().goal}));
-      await cliCall(['wait','3']);continue;
+      const blockedBefore=state;
+      const blockedSummary=agency.summary();
+      const blockedAfter=stateFrom(await cliCall(['wait','3']));
+      // Bucket the diagnostic wait so a legitimate short recheck window is
+      // preserved, while a planner that remains blocked for the normal
+      // five-minute progress deadline is forced through review/replanning.
+      const blockedAction={id:`planner-blocked-${planned.type}-${Math.floor(Date.now()/60_000)}`,type:'wait',waitTicks:3};
+      const plannerWatchdog=recordAutonomyBlockedWait(blockedBefore,blockedAfter,blockedAction,blockedSummary);
+      state=blockedAfter;
+      if(plannerWatchdog)continue;
     }
     training?.beginTrial?.(state,planned.decision.goal);
     const committedRoute=agency.routeStep(planned,state);
@@ -1447,15 +1512,19 @@ async function runEpisode(): Promise<void> {
     catch(error) { if(!agency.pending())agency.blocked('Pre-dispatch validation refused '+action.id+': '+String(error));else throw error;continue; }
     training?.beforeAction(state,action);
     try {
-      const {next,result}=await executeAgencyAction(state,action);
+      const beforeActionState=state;
+      const {next,result}=await executeAgencyAction(beforeActionState,action);
       agency.rememberExecution(commandId,result);
-      const check=verifyActionOutcome(state,next,action,result);
+      const check=verifyActionOutcome(beforeActionState,next,action,result);
+      const beforeSummary=agency.summary();
       agency.record(commandId,next,verification(check));
-      if(check.verified)observeAgencyResult(state,next,action);
+      if(check.verified)observeAgencyResult(beforeActionState,next,action);
       appendFileSync(experiencePath,JSON.stringify({at:new Date().toISOString(),commandId,goal:planned.decision.goal.id,
         method:planned.method.id,action,outcome:verification(check)})+'\n');
       console.log(JSON.stringify({agency:'step',commandId,goal:planned.decision.goal.id,supportGoal:planned.decision.step.supportGoalId,method:planned.method.id,action:action.type,outcome:verification(check)}));
+      const watchdogTripped=recordAutonomyOutcome(beforeActionState,next,action,check,beforeSummary);
       state=next;
+      if(watchdogTripped)continue;
     } catch(error) {
       // A transport exception does not prove the server rejected the command.
       agency.record(commandId,state,{status:'unknown',evidence:[],reason:String(error)});

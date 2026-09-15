@@ -2,7 +2,7 @@ export type CandidateLike = { id: string; type: string; fields?: Record<string, 
 export const ACTION_PROGRESS_TIMEOUT_MS = 5 * 60_000;
 
 export type AutonomyMemory = {
-  active?: { intent: string; action: string; since: number; lastProgress: number; reason: string };
+  active?: { intent: string; action: string; since: number; lastProgress: number; reason: string; goalKey?: string };
   stalled?: Record<string, { count: number; lastAt: number }>;
   recentActions?: string[];
 };
@@ -59,17 +59,57 @@ export function madeProgress(before: any, after: any, action: CandidateLike): bo
   return Boolean(before.player?.combat?.inCombat) === false && Boolean(after.player?.combat?.inCombat) === true;
 }
 
-export function recordAutonomy(memory: AutonomyMemory, before: any, after: any, action: CandidateLike, now = Date.now(), transient = false): { stalled: boolean; intent: string; progress: boolean } {
+function repeatedCycle(actions: string[]): boolean {
+  for (const length of [2, 3, 4]) {
+    if (actions.length < length * 2) continue;
+    const previous = actions.slice(-length * 2, -length).join('|');
+    const current = actions.slice(-length).join('|');
+    if (previous === current) return true;
+  }
+  return false;
+}
+
+/**
+ * Record one terminal action result for the generic autonomy circuit breaker.
+ * `objectiveProgress` is deliberately separate from a local state change:
+ * opening a bank or moving an interface can change state without advancing
+ * the selected goal. This distinction is what prevents productive-looking
+ * preparation cycles from becoming permanent loops.
+ */
+export function recordAutonomy(
+  memory: AutonomyMemory,
+  before: any,
+  after: any,
+  action: CandidateLike,
+  now = Date.now(),
+  transient = false,
+  goalKey?: string,
+  objectiveProgress = false,
+): { stalled: boolean; intent: string; progress: boolean; reason?: string } {
   const intent = intentFor(action);
-  const progressed = madeProgress(before, after, action);
+  if (goalKey && memory.active?.goalKey && memory.active.goalKey !== goalKey) {
+    memory.stalled = {};
+    memory.recentActions = [];
+  }
+  const stateProgress = madeProgress(before, after, action);
+  const progressed = objectiveProgress || stateProgress;
   memory.active = memory.active?.intent === intent
-    ? { ...memory.active, action: action.id, lastProgress: progressed ? now : memory.active.lastProgress }
-    : { intent, action: action.id, since: now, lastProgress: progressed ? now : 0, reason: action.id };
+    ? { ...memory.active, action: action.id, goalKey: goalKey ?? memory.active.goalKey, lastProgress: progressed ? now : memory.active.lastProgress }
+    : { intent, action: action.id, goalKey, since: now, lastProgress: progressed ? now : 0, reason: action.id };
   memory.stalled ??= {};
   const prior = memory.stalled[action.id];
   const count = progressed || transient ? 0 : (prior?.count ?? 0) + 1;
   memory.stalled[action.id] = { count, lastAt: now };
-  return { stalled: count >= 2, intent, progress: progressed };
+  memory.recentActions = [...(memory.recentActions ?? []), action.id].slice(-8);
+  const cycle = !transient && !objectiveProgress && repeatedCycle(memory.recentActions);
+  const timedOut = !transient && progressTimedOut(memory, now);
+  const stalled = !transient && !objectiveProgress && (count >= 2 || cycle || timedOut);
+  return {
+    stalled,
+    intent,
+    progress: progressed,
+    reason: stalled ? cycle ? 'repeated-action-cycle' : timedOut ? 'objective-progress-timeout' : 'repeated-no-progress-action' : undefined,
+  };
 }
 
 export function progressTimedOut(memory: AutonomyMemory, now = Date.now(), timeoutMs = ACTION_PROGRESS_TIMEOUT_MS): boolean {
