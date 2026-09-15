@@ -77,7 +77,7 @@ export class Store {
       if (["MANUAL", "PAUSED"].includes(c.mode)) throw new Error("MANUAL_TAKEOVER");
       if (c.lease && c.expires > now) throw new Error("CONTROL_OWNED");
       const lease = crypto.randomUUID();
-      this.db.query("UPDATE control SET mode='RECONCILING',lease=?,owner=?,expires=?").run(lease,owner,now+5000);
+      this.db.query("UPDATE control SET mode='RECONCILING',lease=?,owner=?,expires=?").run(lease,owner,now+15000);
       return lease;
     }).immediate();
   }
@@ -92,7 +92,7 @@ export class Store {
   renew(lease: string, now: number): void {
     const c = this.control();
     if (c.disabled || !["RUNNING","RECONCILING"].includes(c.mode) || c.lease !== lease || c.expires <= now) throw new Error("CONTROL_REVOKED");
-    this.db.query("UPDATE control SET expires=? WHERE lease=?").run(now + 5000, lease);
+    this.db.query("UPDATE control SET expires=? WHERE lease=?").run(now + (c.mode==='RECONCILING'?15000:5000), lease);
   }
   setControl(mode: "PAUSED" | "STOPPED" | "MANUAL" | "DISABLED"): void {
     this.db.transaction(() => {

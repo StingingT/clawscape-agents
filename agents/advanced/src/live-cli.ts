@@ -163,11 +163,15 @@ export async function main(context:StartupContext){
           {id:'documented-chicken-area',x:3232,z:3295,level:0,evidence:'documented lead; no encounter claimed before observation'}],
       });
     }
+    // Explicit renewal around potentially expensive journal scans prevents scheduler/SQLite stalls from
+    // turning a valid sole-controller recovery lease into RECOVERY_LEASE_REQUIRED mid-reconciliation.
+    store.renew(lease,Date.now());
     let recovery=reconcileAstraJournals(store,data,first,latest,agency);
     const settleUntil=Date.now()+45_000;
     while(!recovery.ready&&recovery.unresolved.some(r=>r.settling)&&Date.now()<settleUntil&&!revoked) {
       publish('RECONCILING','Observing stale transient journals; no actions dispatched');
       await sleep(1_000);const previous=latest;latest=await adapter.snapshot();
+      store.renew(lease,Date.now());
       recovery=reconcileAstraJournals(store,data,previous,latest,agency);
     }
     if(!recovery.ready) {
