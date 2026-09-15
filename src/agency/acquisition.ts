@@ -1,4 +1,5 @@
 import { itemName,itemCount,itemMatches,itemFact,type ItemNeed } from './item-intents.ts';
+import { chooseIncidentalGroundItem } from './incidental.ts';
 import type { DropLead } from './drop-leads.ts';
 import type { Catalogue,LiveState,Policy,Route,Task } from './world-model.ts';
 import type { Memory,Method } from './types.ts';
@@ -10,6 +11,7 @@ export type AcquisitionSource={key:string;kind:'bank'|'shop'|'ground'|'gather'|'
 export type AcquisitionHint=AcquisitionSource;
 export type NeededItem=ItemNeed & {parentKey:string;reason:string;at:number};
 export type AcquisitionMemory={need?:NeededItem;shops:AcquisitionSource[];sightings:AcquisitionSource[];
+  incidental?:{lastAt?:number;cooldowns:Record<string,number>;ids:Record<string,number>};
   lastResolution?:{at:number;item:ItemNeed;evidence:string};leads?:AcquisitionSource[];blocker?:string};
 export const emptyAcquisition=():AcquisitionMemory=>({shops:[],sightings:[]});
 const valid=(p:any)=>p&&[p.x,p.z,p.level].every(Number.isInteger);
@@ -72,6 +74,20 @@ export function acquisitionSources(state:LiveState,bank:any[],memory:Acquisition
  * bank is not the same fact as carrying them, and visiting a shop never satisfies it. */
 export function addAcquisition(c:Catalogue,state:LiveState,bank:any[],m:AcquisitionMemory,memory:Memory,
   policy:Policy,drops:DropLead[],hints:AcquisitionHint[],now:number):void {
+  // Opportunism is subordinate to the current objective. With no existing dependency,
+  // a valuable observed ground resource may become one small acquisition support step.
+  // The evaluator is generic: it uses carrying cost, collection/stack/equipment value
+  // and personal observation rather than a hard-coded creature or drop list.
+  if(!m.need&&memory.active&&!memory.pending&&!memory.active.requestedSupport&&state.player?.combat?.inCombat!==true) {
+    m.incidental??={cooldowns:{},ids:{}};m.incidental.cooldowns??={};m.incidental.ids??={};
+    const choice=now-(m.incidental.lastAt??0)>=30_000?chooseIncidentalGroundItem(state,now,m.incidental.cooldowns):undefined;
+    if(choice) {
+      m.incidental.lastAt=now;m.incidental.cooldowns[choice.key]=now+120_000;
+      if(choice.need.id!==undefined)m.incidental.ids[String(choice.need.id)]=now;
+      m.need={...choice.need,parentKey:memory.active.key,reason:choice.reason,at:now};
+      memory.active.requestedSupport={target:{fact:itemFact(choice.need),minimum:choice.need.minimum},reason:choice.reason,evidence:choice.evidence};
+    }
+  }
   const need=m.need;if(!need||need.parentKey!==memory.active?.key){delete m.need;return;}
   c.view.facts[itemFact(need)]=itemCount(state.inventory,need);
   if(c.view.facts[itemFact(need)]!>=need.minimum){m.lastResolution={at:now,item:need,evidence:`fresh-carried-items:${state.tick}`};delete m.need;delete m.blocker;return;}
