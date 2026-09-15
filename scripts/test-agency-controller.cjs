@@ -75,7 +75,7 @@ async function runScenario({blocked=false,unknown=false,deny=false,movement=fals
           return {state:structuredClone(state),navigation:{status:legs===3?'arrived':'progress',movementDispatched:true}};
         },
       },
-      urgentAgencyAction:()=>undefined,validateMetal:()=>true,validateBow:()=>true,validateFishing:()=>true,
+      chooseIncidentalUse:()=>undefined,urgentAgencyAction:()=>undefined,validateMetal:()=>true,validateBow:()=>true,validateFishing:()=>true,
       equipmentGoals:{validate:()=>true},observeAgencyResult:()=>{},appendFileSync:()=>{},experiencePath:'unused',
       randomUUID:()=>`command-${++ids}`,dialogCandidates:()=>[],bankingCandidates:()=>{
         assert.ok(planned,'Legacy executor was called BEFORE the Director');
@@ -142,12 +142,12 @@ async function runGatherScenario(){
       nearbyNpcs:[{id:1,index:5,name:'Banker',reachable:true,optionsWithIndex:[{opIndex:1,text:'Bank'}]}]};
     const agency=new LiveAgency(join(dir,'agency-v2.json'),{agent:'test',world:'test',revision:'test'},
       {supported:['gathering','food','bank'],now:()=>now});
-    const env={agency,steps:11,character:'test',role:'resource',build:'melee',forumEnabled:false,console:{log(){},error(){}},Date:TestDate,
+    const env={agency,steps:11,character:'test',role:'resource',build:'melee',forumEnabled:false,chooseIncidentalUse:()=>undefined,console:{log(){},error(){}},Date:TestDate,
       loadActionIntent:()=>undefined,actionIntentPath:join(dir,'action-intent.json'),finishActionIntent(){},
       dataDir:dir,existsSync:require('node:fs').existsSync,resolve:require('node:path').resolve,
       recoverLegacyJournals,process:{env:{CLAWSCAPE_SERVER:'test'}},bindItems,resolveItems,MissingItem,stateFrom:v=>v.state,isSelection,verifyActionOutcome,
       available:v=>v,choose:(_,v)=>v[0],stateKey:()=>'',training:undefined,
-      urgentAgencyAction:()=>undefined,validateMetal:()=>true,validateBow:()=>true,validateFishing:()=>true,
+      chooseIncidentalUse:()=>undefined,urgentAgencyAction:()=>undefined,validateMetal:()=>true,validateBow:()=>true,validateFishing:()=>true,
       equipmentGoals:{validate:()=>true},observeAgencyResult(){},appendFileSync(){},experiencePath:'unused',randomUUID:()=>`gather-${++ids}`,
       economyCandidates:()=>[{id:'chop-tree',type:'interactLoc',fields:{locId:1276,x:2,z:1,optionIndex:1},waitTicks:1}],localEconomyDiscovery:()=>[],
       bankAt:()=>{assert.equal(state.inventory.length,6,'do not bank a half-empty resource bag');return [{id:'open-bank',type:'interactNpc',fields:{npcIndex:5,optionIndex:1},waitTicks:1}];},

@@ -42,6 +42,7 @@ import { recoverLegacyJournals } from './agency/journal-recovery.ts';
 import { LiveAgency, isSelection, type Selection, type Verification } from './agency/live-adapter.ts';
 import type { Task, TaskKind, Route } from './agency/world-model.ts';
 import { acquisitionActions, type AcquisitionHint } from './agency/acquisition.ts';
+import { chooseIncidentalUse } from './agency/incidental-use.ts';
 import { loadDropIndex } from './agency/drop-leads.ts';
 import { bindItems, resolveItems, MissingItem, type ItemRef } from './agency/item-intents.ts';
 import { randomUUID } from 'node:crypto';
@@ -1196,6 +1197,10 @@ async function actionsForTask(state: GameState, task: Task): Promise<Candidate[]
     const guide=(state.nearbyNpcs??[]).find(n=>/runescape guide|tutorial guide/i.test(String(n.name))&&n.reachable===true);
     if(guide)return [{id:'tutorial-guide',type:'talkToNpc',fields:{npcIndex:guide.index},waitTicks:3}];
   }
+  // A cheap observed side-use may happen inside the selected goal. Normal begin() still
+  // applies development/protected-XP guards before dispatch, so this cannot bypass a build boundary.
+  const incidentalUse=chooseIncidentalUse(state) as Candidate|undefined;
+  if(incidentalUse)return [incidentalUse];
   if(task.kind==='funds') {
     const coins=(state.inventory??[]).filter(i=>Number(i.id)===995||/^coins$/i.test(String(i.name))).reduce((n,i)=>n+Number(i.count??1),0);
     const required=Math.max(0,(task.target?.minimum??0)-coins);
