@@ -42,6 +42,7 @@ import { recoverLegacyJournals } from './agency/journal-recovery.ts';
 import { LiveAgency, isSelection, type Selection, type Verification } from './agency/live-adapter.ts';
 import type { Task, TaskKind, Route } from './agency/world-model.ts';
 import { acquisitionActions, type AcquisitionHint } from './agency/acquisition.ts';
+import { incidentalBankable } from './agency/incidental.ts';
 import { loadDropIndex } from './agency/drop-leads.ts';
 import { bindItems, resolveItems, MissingItem, type ItemRef } from './agency/item-intents.ts';
 import { randomUUID } from 'node:crypto';
@@ -741,6 +742,7 @@ function bankingCandidates(state: GameState, task?: Task): Candidate[] {
     const itemName = text(item.name);
     if (isAgentClutter(item, build, equippedNames, keepWeaponName)) return true;
     if (isFinishedArrow(itemName)) return surplusArrows > 0;
+    if (incidentalBankable(item, agency?.summary().acquisition?.incidental?.ids)) return true;
     return edible ? surplusFood > 0 : isBankableResource(String(item.name));
   });
   const coins = coinsIn(inventory);
@@ -1179,6 +1181,13 @@ function learn(key: string, action: Candidate, value: number, nextKey: string, n
   q[key][action.id] = Number((old + alpha * (value + gamma * nextBest - old)).toFixed(6));
 }
 
+function incidentalProcessingCandidates(state:GameState):Candidate[] {
+  const raw=(state.inventory??[]).find((i:any)=>/^raw\b/i.test(String(i.name??''))&&Number.isInteger(i.slot));if(!raw)return [];
+  const p=state.player??{};
+  const heat=(state.nearbyLocs??[]).filter((l:any)=>Number.isInteger(l.x)&&Number.isInteger(l.z)&&/^(fire|fireplace|range|stove|cooking pot)$/i.test(String(l.name??''))&&Math.max(Math.abs(Number(p.worldX)-Number(l.x)),Math.abs(Number(p.worldZ)-Number(l.z)))<=1)[0];
+  return heat?[{id:`incidental-process-${raw.id}-${heat.id}`,type:'useItemOnLoc',fields:{itemSlot:raw.slot,x:heat.x,z:heat.z,locId:heat.id,reason:'process a useful incidental raw resource at a freshly observed heat source'},waitTicks:4}]:[];
+}
+
 /** Task-specific executors are asked for actions only AFTER the Director chooses a goal. */
 async function actionsForTask(state: GameState, task: Task): Promise<Candidate[]> {
   if (state.player?.isDead === true) return [];
@@ -1241,6 +1250,7 @@ async function actionsForTask(state: GameState, task: Task): Promise<Candidate[]
       return bone&&option?[{id:'bury-owned-bone',type:'useInventoryItem',fields:{slot:bone.slot,optionIndex:option.opIndex},waitTicks:2}]:[];
     }
     case 'production': {
+      if(task.id==='incidental-process')return incidentalProcessingCandidates(state);
       work.economy ??= {bankItems:work.bankItems??[]};
       work.economy.tripFoodTarget=task.foodTarget??0;
       selectWork(state,work.economy);
