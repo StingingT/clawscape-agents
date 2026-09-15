@@ -96,7 +96,6 @@ export class Director {
     const goal = this.memory.active;
     if (!goal) return;
     this.memory.reviews.push({ goal: structuredClone(goal), at, result, reason, evidence: [...evidence] });
-    // Summaries are bounded; durable method aggregates remain available to future decisions.
     this.memory.reviews = this.memory.reviews.slice(-256);
     if (result !== 'success') this.memory.goalCooldowns[goal.key] = at + COOLDOWN_MS;
     delete this.memory.active;
@@ -107,16 +106,13 @@ export class Director {
     for (const step of plan.steps) {
       step.goalKey = goal.key;
       const lineage = step.lineage ?? [goal.target];
-      // An investigative plan has its own target but remains beneath the original objective.
       const chain = lineage[0]?.fact === goal.target.fact && lineage[0]?.minimum === goal.target.minimum ? lineage.slice(1) : lineage;
       let parentId = goal.key;
       for (const target of chain) {
         const id = 'support:'+createHash('sha256').update(key(parentId,target.fact,String(target.minimum))).digest('hex').slice(0,24);
         const node: SupportGoal = { id, parentId, target: { ...target }, purpose,
-          reason: purpose === 'investigate-blocker' ? 'Investigate an alternative while preserving the blocked parent objective.' :
-            `Prepare ${target.fact} >= ${target.minimum} for ${goal.id}.`,
-          evidence: [...(goal.investigation?.evidence ?? goal.evidence)],
-          status: met(view.facts, target) ? 'satisfied' : 'pending' };
+          reason: purpose === 'investigate-blocker' ? 'Investigate an alternative while preserving the blocked parent objective.' : `Prepare ${target.fact} >= ${target.minimum} for ${goal.id}.`,
+          evidence: [...(goal.investigation?.evidence ?? goal.evidence)], status: met(view.facts, target) ? 'satisfied' : 'pending' };
         nodes.set(id, node); parentId = id;
       }
       step.supportGoalId = parentId === goal.key ? undefined : parentId;
@@ -129,17 +125,13 @@ export class Director {
     return { type: 'execute', goal: structuredClone(goal), plan, step: first };
   }
 
-  /** Obsolete scenery goals are retired only when no executor command is pending. */
   retireObsoleteSurveys(routes:Set<string>,at:number):void {
     if(this.memory.pending)return;
     const g=this.memory.active;if(!g)return;
-    if(g.id.startsWith('survey:observed:')&&!routes.has(g.id.slice(7))) {
-      this.review(at,'partial','Retired incidental scenery objective; no arrival or task success inferred.',[]);return;
-    }
+    if(g.id.startsWith('survey:observed:')&&!routes.has(g.id.slice(7))) {this.review(at,'partial','Retired incidental scenery objective; no arrival or task success inferred.',[]);return;}
     g.supportGoals=(g.supportGoals??[]).filter(n=>!n.target.fact.startsWith('visited:observed:')||routes.has(n.target.fact.slice(8))).slice(-20);
     if(g.investigation?.target.fact.startsWith('visited:observed:')&&!routes.has(g.investigation.target.fact.slice(8)))delete g.investigation;
   }
-  /** A failed survey is evidence about that route, not failure of a crafting parent. */
   deferSurvey(routeId:string,at:number,reason:string,evidence:string[]):void {
     if(this.memory.pending)throw new Error('RECONCILE_PENDING_ACTION_FIRST');
     const goal=this.memory.active;if(!goal)return;
@@ -147,15 +139,11 @@ export class Director {
     if(goal.id==='survey:'+routeId)this.review(at,'partial',reason,evidence);
     else if(goal.investigation?.id==='survey:'+routeId)delete goal.investigation;
   }
-
-  /** Retire a bounded attempt that has no executable step in the fresh world state. */
   deferCurrent(at:number,reason:string,evidence:string[]):void {
     if(this.memory.pending)throw new Error('RECONCILE_PENDING_ACTION_FIRST');
     if(!this.memory.active)return;
     this.review(at,'partial',reason,evidence);
   }
-
-  /** Refresh the food dependency, not the strategic objective or a pending receipt. */
   reviseFoodNeed(target:number,at:number):void {
     if(this.memory.pending||!Number.isInteger(target)||target<0)return;
     const g=this.memory.active;if(!g)return;
@@ -165,8 +153,6 @@ export class Director {
     }
     if(g.requestedSupport?.target.fact==='food')g.requestedSupport.target.minimum=target;
   }
-
-  /** Extra preparation is linked to this objective, never installed as a replacement goal. */
   requestSupport(target: Requirement, reason: string, evidence: string[]): void {
     if (this.memory.pending) throw new Error('RECONCILE_PENDING_ACTION_FIRST');
     const goal = this.memory.active;
@@ -180,161 +166,27 @@ export class Director {
     if (this.memory.pending) return { type: 'reconcile', pending: structuredClone(this.memory.pending) };
     const active = this.memory.active;
     if (active) {
-      if (met(view.facts, active.target)) {
-        this.review(view.at, 'success', 'The goal predicate is now satisfied by a fresh own observation.', ['fresh-observation:' + view.at]);
-      } else if (view.at - active.startedAt >= active.budget.maxDurationMs) {
-        this.review(view.at, active.attempts ? 'partial' : 'failure', 'Bounded attempt exhausted; choose an alternative instead of looping.', []);
-      } else {
-        // Newly verified funds can finance preparation. Existing expenditure is never reset,
-        // and bank withdrawal is still required before a shop may spend those coins.
+      if (met(view.facts, active.target)) this.review(view.at, 'success', 'The goal predicate is now satisfied by a fresh own observation.', ['fresh-observation:' + view.at]);
+      else if (view.at - active.startedAt >= active.budget.maxDurationMs) this.review(view.at, active.attempts ? 'partial' : 'failure', 'Bounded attempt exhausted; choose an alternative instead of looping.', []);
+      else {
         if (view.funding?.evidence.length) {
           const f = view.funding;
-          if (![f.carriedGp, f.bankGp, f.reserveGp].every(finiteNonnegative)
-            || view.budget.spendableGp !== Math.max(0, f.carriedGp + f.bankGp - f.reserveGp)) throw new Error('INVALID_FUNDING_EVIDENCE');
+          if (![f.carriedGp, f.bankGp, f.reserveGp].every(finiteNonnegative) || view.budget.spendableGp !== Math.max(0, f.carriedGp + f.bankGp - f.reserveGp)) throw new Error('INVALID_FUNDING_EVIDENCE');
           const ceiling = active.spentGp + view.budget.spendableGp;
-          if (ceiling > active.budget.spendableGp) {
-            active.budget.spendableGp = ceiling;
-            active.fundingGrants = [...(active.fundingGrants ?? []), { at: view.at, ceilingGp: ceiling, evidence: f.evidence }].slice(-64);
-          }
+          if (ceiling > active.budget.spendableGp) {active.budget.spendableGp = ceiling;active.fundingGrants = [...(active.fundingGrants ?? []), { at: view.at, ceilingGp: ceiling, evidence: f.evidence }].slice(-64);}
         }
-        const remaining = { ...view, budget: {
-          spendableGp: Math.min(view.budget.spendableGp, Math.max(0, active.budget.spendableGp - active.spentGp)),
-          maxLossGp: Math.min(view.budget.maxLossGp, Math.max(0, active.budget.maxLossGp - active.lostGp)),
-          maxDeaths: Math.min(view.budget.maxDeaths, Math.max(0, active.budget.maxDeaths - active.deaths)),
-          maxDurationMs: Math.min(view.budget.maxDurationMs, Math.max(0, active.budget.maxDurationMs - (view.at - active.startedAt))),
-        } };
+        const remaining = { ...view, budget: {spendableGp: Math.min(view.budget.spendableGp, Math.max(0, active.budget.spendableGp - active.spentGp)),maxLossGp: Math.min(view.budget.maxLossGp, Math.max(0, active.budget.maxLossGp - active.lostGp)),maxDeaths: Math.min(view.budget.maxDeaths, Math.max(0, active.budget.maxDeaths - active.deaths)),maxDurationMs: Math.min(view.budget.maxDurationMs, Math.max(0, active.budget.maxDurationMs - (view.at - active.startedAt))) } };
         if (active.requestedSupport && met(view.facts, active.requestedSupport.target)) delete active.requestedSupport;
         if (active.investigation && met(view.facts, active.investigation.target)) delete active.investigation;
         const focus: Opportunity = active.requestedSupport ? { ...active, ...active.requestedSupport } : active.investigation ?? active;
         const plan = makePlan(this.memory, remaining, focus, methods);
         if (plan?.steps[0]) return this.attach(active, plan, view, active.investigation ? 'investigate-blocker' : 'prerequisite');
-        // A failed research method may yield to a different lead, but not erase the parent.
         delete active.investigation;
         active.blocker ??= { at: view.at, reason: 'Current methods or prerequisites are unavailable; objective retained.', recheckAt: view.at + 30_000 };
-        const leads = opportunities.filter(g => g.source==='investigation' && g.investigates?.includes(active.target.fact)
-          && outcomeTarget(g.target) && g.evidence.length && g.reason.trim() && !met(view.facts, g.target));
-        for (const lead of leads) {
-          const research = makePlan(this.memory, remaining, lead, methods);
-          if (!research?.steps.length) continue;
-          active.investigation = structuredClone(lead);
-          return this.attach(active, research, view, 'investigate-blocker');
-        }
-        return { type: 'blocked', reason: active.blocker.reason, missingCapabilities:
-          [...new Set(methods.filter(m => !view.capabilities.includes(m.capability)).map(m => m.capability))] };
+        const leads = opportunities.filter(g => g.source==='investigation' && g.investigates?.includes(active.target.fact) && outcomeTarget(g.target) && g.evidence.length && g.reason.trim() && !met(view.facts, g.target));
+        for (const lead of leads) {const research = makePlan(this.memory, remaining, lead, methods);if (!research?.steps.length) continue;active.investigation = structuredClone(lead);return this.attach(active, research, view, 'investigate-blocker');}
+        return { type: 'blocked', reason: active.blocker.reason, missingCapabilities: [...new Set(methods.filter(m => !view.capabilities.includes(m.capability)).map(m => m.capability))] };
       }
     }
-    const ranked = opportunities.filter(goal => outcomeTarget(goal.target) && goal.evidence.length && goal.reason.trim()
-      && Number.isFinite(goal.target.minimum) && !met(view.facts, goal.target)
-      && (this.memory.goalCooldowns[goalKey(view, goal)] ?? 0) <= view.at)
-      .map(goal => {
-        const plan = makePlan(this.memory, view, goal, methods);
-        // Role preference cannot outweigh survival or feasibility, nor mandate a specific target.
-        const role = Math.max(-2, Math.min(2, this.memory.preferences[goal.domain] ?? 0));
-        const need = goal.source === 'need' ? 30 : goal.source === 'unlock' ? 6 : 0;
-        const curiosity = goal.source === 'frontier' || goal.source === 'investigation' ? 2 : 0;
-        const score = (goal.priority === 'maintenance' ? -100 : 0) + need + role + curiosity - (plan ? plan.costGp + 3 * plan.lossBoundGp + plan.durationMs / 1000 : Infinity) / 100;
-        return { goal, plan, score };
-      }).filter(entry => entry.plan?.steps[0]).sort((a, b) => b.score - a.score || a.goal.id.localeCompare(b.goal.id));
-    const selected = ranked[0];
-    if (!selected?.plan) return { type: 'blocked', reason: 'No safe, affordable executable goal; record a capability/research request rather than inventing a command.',
-      missingCapabilities: [...new Set(methods.filter(m => !view.capabilities.includes(m.capability)).map(m => m.capability))] };
-    const goal: Goal = { ...structuredClone(selected.goal), key: goalKey(view, selected.goal), context: view.context,
-      budget: { ...view.budget }, startedAt: view.at, baseline: amount(view.facts, selected.goal.target.fact),
-      spentGp: 0, lostGp: 0, deaths: 0, elapsedMs: 0, attempts: 0, noProgress: 0, strategyId: view.strategy?.id };
-    if (this.memory.currentDomain !== goal.domain) {
-      this.memory.domainChanges.push({ at: view.at, from: this.memory.currentDomain, to: goal.domain, reason: goal.reason, evidence: [...goal.evidence] });
-      this.memory.domainChanges = this.memory.domainChanges.slice(-128);
-      this.memory.currentDomain = goal.domain;
-    }
-    this.memory.active = goal;
-    return this.attach(goal, selected.plan, view);
-  }
-
-  /** An executable method can discover a missing prerequisite without dispatching. */
-  blocked(at: number, reason: string, evidence: string[] = []): void {
-    if (this.memory.pending) throw new Error('RECONCILE_PENDING_ACTION_FIRST');
-    const goal = this.memory.active;
-    if (!goal) return;
-    goal.blocker = { at, reason, recheckAt: at + COOLDOWN_MS };
-    const step = goal.plan?.steps[0];
-    if (step) {
-      const stats = this.memory.methods[methodKey(goal.planContext ?? goal.context, step.methodId)] ??= emptyStats();
-      stats.viability = 'temporarily-poor'; stats.cooldownUntil = at + COOLDOWN_MS;
-      stats.knowledgeRevision = this.memory.learningRevision ?? 0;
-    }
-    // No dispatch occurred. Keep the goal, its budget, and preparation history.
-  }
-
-  /** Save memory AFTER this call and BEFORE handing the command to the live arbiter. */
-  begin(view: Observation, decision: Decision, method: Method, commandId: string): void {
-    validateView(this.memory, view);
-    if (this.memory.pending) throw new Error('RECONCILE_PENDING_ACTION_FIRST');
-    const goal = this.memory.active;
-    if (decision.type !== 'execute' || !goal || decision.goal.key !== goal.key || method.id !== decision.step.methodId || method.capability !== decision.step.capability
-      || (goal.plan?.steps[0]?.methodId !== method.id)
-      || goal.plan?.steps[0]?.supportGoalId !== decision.step.supportGoalId
-      || !outcomeTarget(goal.target) || !commandId.trim() || !available(this.memory, view, method) || !method.prerequisites.every(p => met(view.facts, p))
-      || !Object.entries(method.consumes ?? {}).every(([fact, quantity]) => amount(view.facts, fact) >= quantity)) throw new Error('INVALID_OR_STALE_PLAN');
-    if ((method.risk === 'bounded' && goal.deaths >= goal.budget.maxDeaths) || view.at - goal.startedAt + method.durationMs > goal.budget.maxDurationMs
-      || goal.spentGp + method.costGp > goal.budget.spendableGp || method.costGp > view.budget.spendableGp
-      || goal.lostGp + method.lossBoundGp > goal.budget.maxLossGp || method.lossBoundGp > view.budget.maxLossGp) throw new Error('BUDGET_EXCEEDED');
-    this.memory.pending = { commandId, goalKey: goal.key, context: view.context, method: structuredClone(method),
-      before: { ...view.facts }, status: 'pending', supportGoalId: decision.step.supportGoalId, knowledgeRevision: view.knowledgeRevision ?? 0 };
-  }
-
-  /** Only attributable, terminal outcomes update learning. Unknown is NOT failed. */
-  record(outcome: Outcome): void {
-    if (!['verified', 'progress', 'rejected', 'unknown', 'interrupted'].includes(outcome.status) || !Number.isSafeInteger(outcome.sequence) || outcome.sequence <= 0
-      || ![outcome.at, outcome.spentGp, outcome.lostGp, outcome.deaths, outcome.elapsedMs].every(finiteNonnegative)
-      || !Number.isInteger(outcome.deaths) || !Object.values(outcome.facts).every(Number.isFinite)) throw new Error('INVALID_OUTCOME');
-    if (outcome.sequence <= this.memory.sequence) return;
-    const pending = this.memory.pending, goal = this.memory.active;
-    if (!pending || pending.commandId !== outcome.commandId || !goal || goal.key !== pending.goalKey) throw new Error('OUTCOME_WITHOUT_MATCHING_INTENT');
-    if (outcome.status === 'unknown' || (['verified', 'progress', 'interrupted'].includes(outcome.status) && !outcome.evidence.length)) {
-      pending.status = 'unknown'; return;
-    }
-    const stats = this.memory.methods[methodKey(pending.context, pending.method.id)] ??= emptyStats();
-    const productive = outcome.status === 'verified' && Object.keys(pending.method.effects)
-      .some(fact => amount(outcome.facts, fact) > amount(pending.before, fact));
-    const preparation = outcome.status === 'progress' || outcome.status === 'interrupted';
-    // A verified route leg/interface transition advances a method; it is not
-    // a failed training trial and does not satisfy a quantitative goal.
-    if (preparation) stats.preparationMs = (stats.preparationMs ?? 0) + outcome.elapsedMs;
-    else { stats.attempts++; stats.productive += Number(productive); stats.rejected += Number(outcome.status === 'rejected'); }
-    stats.spentGp += outcome.spentGp; stats.lostGp += outcome.lostGp; stats.elapsedMs += outcome.elapsedMs;
-    if (outcome.status === 'interrupted') {
-      stats.interrupted = (stats.interrupted ?? 0) + 1; stats.viability = 'uncertain';
-      stats.cooldownUntil = outcome.at + Math.min(COOLDOWN_MS, 30_000 * stats.interrupted);
-    } else if (!preparation) {
-      stats.cooldownUntil = productive ? 0 : outcome.at + COOLDOWN_MS;
-      stats.viability = productive ? 'viable' : 'temporarily-poor';
-    }
-    stats.idleObservationMs=outcome.observationOnly&&!productive?(stats.idleObservationMs??0)+outcome.elapsedMs:0;
-    if(stats.idleObservationMs>=60_000){
-      stats.viability='temporarily-poor';stats.cooldownUntil=outcome.at+30_000;
-      goal.blocker={at:outcome.at,reason:'Read-only observations produced no objective effect for 60 seconds; recheck this method after a bounded cooldown.',recheckAt:outcome.at+30_000};
-      stats.idleObservationMs=0;
-    }
-    stats.knowledgeRevision = pending.knowledgeRevision ?? 0;
-    if (productive) {
-      this.memory.learningRevision = (this.memory.learningRevision ?? 0) + 1;
-      if (amount(outcome.facts,goal.target.fact)>amount(pending.before,goal.target.fact)) goal.lastObjectiveProgressAt=outcome.at;
-      else goal.lastSupportProgressAt=outcome.at;
-    }
-    for (const support of goal.supportGoals ?? []) {
-      if (met(outcome.facts, support.target) && outcome.status !== 'rejected' && outcome.status !== 'interrupted') {
-        support.status = 'satisfied'; support.evidence = [...outcome.evidence];
-      }
-    }
-    goal.attempts++; goal.noProgress = productive || outcome.status === 'progress'&&!outcome.observationOnly ? 0 : goal.noProgress + 1;
-    goal.spentGp += outcome.spentGp; goal.lostGp += outcome.lostGp; goal.deaths += outcome.deaths; goal.elapsedMs += outcome.elapsedMs;
-    this.memory.sequence = outcome.sequence;
-    delete this.memory.pending;
-    if (goal.spentGp > goal.budget.spendableGp || goal.lostGp > goal.budget.maxLossGp || goal.deaths > goal.budget.maxDeaths
-      || goal.elapsedMs > goal.budget.maxDurationMs) {
-      this.review(outcome.at, 'failure', 'Observed cost or risk exceeded the experiment budget.', outcome.evidence);
-    } else if (outcome.status === 'verified' && met(outcome.facts, goal.target)) {
-      this.review(outcome.at, 'success', 'The planned goal predicate was verified, not merely an individual click.', outcome.evidence);
-    }
-  }
-}
+    const ranked = opportunities.filter(goal => outcomeTarget(goal.target) && goal.evidence.length && goal.reason.trim() && Number.isFinite(goal.target.minimum) && !met(view.facts, goal.target) && (this.memory.goalCooldowns[goalKey(view, goal)] ?? 0) <= view.at)
+      .map(goal => {const plan = makePlan(this.memory, view, goal, methods);const role = Math.max(-2, Math.min(2, this.memory.preferences[goal.domain]
