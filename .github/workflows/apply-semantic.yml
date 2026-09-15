@@ -58,7 +58,10 @@ jobs:
           git diff --check
           python - <<'PY'
           import pathlib,subprocess
-          paths=pathlib.Path('/tmp/reviewed-paths.txt').read_text().splitlines()+['knowledge/2004scape-drop-leads.json']
+          # Workflow updates are published separately through the authorized connector.
+          # The Actions contents token must not attempt to write workflow files.
+          paths=[p for p in pathlib.Path('/tmp/reviewed-paths.txt').read_text().splitlines() if not p.startswith('.github/workflows/')]
+          paths+=['knowledge/2004scape-drop-leads.json']
           subprocess.run(['git','add','--',*paths],check=True)
           PY
           git config user.name 'github-actions[bot]'
