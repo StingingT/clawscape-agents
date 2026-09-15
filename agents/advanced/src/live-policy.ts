@@ -90,7 +90,7 @@ const LearningSchema = z.strictObject({
   active: z.strictObject({ id: z.string(), context: z.string(), identity: z.string(), enemy: z.string(), index: z.number(),
     name: z.string(), contentId: z.number(), startAt: z.number(), startTick: z.number().nullable(),
     lastAt: z.number(), lastSeq: z.number(), lastXp: z.number(), lastHp: z.number().nullable(), lastFood: z.number(),
-    xp: z.number(), damage: z.number(), food: z.number(), ownPlayerIndex: z.number().nullable() }).nullable(),
+    xp: z.number(), damage: z.number(), food: z.number(), ownPlayerIndex: z.number().nullable(), clearedAt:z.number().optional(), clearedTick:z.number().nullable().optional() }).nullable(),
   methods: z.array(z.strictObject({ context: z.string(), name: z.string(), contentId: z.number(), n: z.number(),
     confirmed: z.number(), uncertain: z.number(), interrupted: z.number(), elapsedMs: z.number(), xp: z.number(), damage: z.number(), food: z.number(),
     samples: z.array(SampleSchema).max(20) })).max(2048),
@@ -188,6 +188,8 @@ export class LivePolicy {
     }
     if (o.danger.active === true || o.activity?.target_type === "player")
       return block("recover", "UNRESOLVED_THREAT", "Do not start another action while a threat lacks an observed safe response.");
+    if (this.state.learning.active?.clearedAt!==undefined)
+      return this.finish(o,{goal:"combat:verify-ended",reason:"Briefly observe target-specific kill evidence; XP is not a kill receipt.",wait:true});
     if (!o.activity) return block("observe", "ACTIVITY_UNAVAILABLE", "Combat/interaction activity is required to avoid interrupting an unseen fight.");
     if (o.activity.target_type === "npc" && !target(o))
       return block("observe", "TARGET_NOT_OBSERVED", "The active NPC target is absent; reobserve before changing activities.");
@@ -336,6 +338,9 @@ export class LivePolicy {
       active = this.state.learning.active;
     }
     if (!active || after.seq <= active.lastSeq || after.observed_at <= active.lastAt) return;
+    const replacement=after.entities.find(e=>e.kind==='npc'&&e.index===active!.index&&e.content_id!==active!.contentId);
+    const otherTarget=after.activity?.target_type==='npc'&&after.activity.target_index!==active.index;
+    if(replacement||otherTarget){this.endEncounter("INTERRUPTED","Encounter identity changed; do not attribute another target's XP or kill.");return;}
     const priorXp = active.lastXp, gain = Math.max(0, meleeXp(after) - priorXp);
     active.xp += gain;
     active.damage += active.lastHp !== null && after.hp !== null ? Math.max(0, active.lastHp - after.hp) : 0;
@@ -348,17 +353,29 @@ export class LivePolicy {
     // do not treat an arbitrary source_type=player kill as self-identifying.
     const sources = [...new Set(events.filter(e => e.type === "damage_dealt" && e.source_type === "player"
       && e.target_type === "npc" && e.target_index === active!.index).map(e => e.source_index))];
-    if (gain > 0 && sources.length === 1) active.ownPlayerIndex ??= sources[0]!;
+    if (after.own_player_index != null) {
+      if(active.ownPlayerIndex!==null&&active.ownPlayerIndex!==after.own_player_index){this.endEncounter("INTERRUPTED","Observed own-player identity changed.");return;}
+      active.ownPlayerIndex=after.own_player_index;
+    }
+    if (gain > 0 && sources.length === 1 && active.clearedAt===undefined) active.ownPlayerIndex ??= sources[0]!;
     const ownKill = active.ownPlayerIndex !== null && events.some(e => e.type === "kill"
       && e.source_type === "player" && e.source_index === active!.ownPlayerIndex
-      && e.target_type === "npc" && e.target_index === active!.index);
+      && e.target_type === "npc" && e.target_index === active!.index
+      && (active!.clearedTick==null || e.tick<=active!.clearedTick+3)
+      && (active!.clearedAt===undefined || after.observed_at-active!.clearedAt<=2500));
     if (!after.connected || after.hp === 0) { this.endEncounter("INTERRUPTED", "Disconnected or died."); return; }
     if (ownKill) { this.endEncounter("CONFIRMED_KILL", "Own damage/XP identity and a target-specific public kill event."); return; }
     const current = fighting(after), observedEnemy = after.entities.find(e => entityKey(e) === active!.enemy);
     if (!current || entityKey(current) !== active.enemy) {
+      // Allow a short read-only attribution window for an event published after target clearing.
+      // XP remains measured progress, never an inferred kill. No new encounter is started here.
+      active.clearedAt??=after.observed_at;active.clearedTick??=after.tick;
+      if(after.observed_at-active.clearedAt<2500 && (active.clearedTick===null||after.tick===null||after.tick-active.clearedTick<3))return;
       if (after.activity?.target_type === "none" && active.xp > 0 && (!observedEnemy || observedEnemy.hp === 0))
         this.endEncounter("COMPLETED_UNCERTAIN", "Own target cleared with melee XP; no unambiguous own kill event. Not counted as a confirmed kill.");
       else this.endEncounter("INTERRUPTED", "Target changed/lost without sufficient completion evidence.");
+    } else if(active.clearedAt!==undefined) {
+      this.endEncounter("INTERRUPTED","Target reappeared after clearing; spawn generation is unavailable.");
     } else if (after.observed_at - active.startAt > 60000)
       this.endEncounter("INTERRUPTED", "Encounter exceeded the sixty-second observation budget.");
   }
@@ -390,7 +407,7 @@ export class LivePolicy {
     this.state.learning.active = { id, context: encounterContext(o, e), identity: identity(o), enemy: entityKey(e),
       index: e.index, name: e.name, contentId: e.content_id, startAt: o.observed_at, startTick: o.tick,
       lastAt: o.observed_at, lastSeq: o.seq, lastXp: meleeXp(o), lastHp: o.hp, lastFood: foodTotal(o),
-      xp: 0, damage: 0, food: 0, ownPlayerIndex: null };
+      xp: 0, damage: 0, food: 0, ownPlayerIndex: o.own_player_index??null };
     this.state.counters.encountersStarted++;
   }
 

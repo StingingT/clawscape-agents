@@ -12,7 +12,7 @@ import { dialogueOption, bankOption, bowArrowCap, hasUsableArrows, isFood, isThr
 import { bankAt, economyNext, productionDialog, shouldHeal, combatDisposition, meleeTrainingSkill, nearbyAmmoRecovery, quiverRefill, activeOpponent, isApprovedNpcTarget, foodCount, type EconomyMemory } from './progression-policy';
 import { loadCatalog } from './training/catalog';
 import { loadBuildRules } from './agency/build-rules.ts';
-import { TrainingDiscovery } from './training/discovery';
+import { TrainingDiscovery, trainingReadiness } from './training/discovery';
 import { acquireController } from './controller-lease';
 import { callSkill } from './skill-cli';
 import { actionReady } from './action-cooldown';
@@ -41,6 +41,9 @@ import { observeWorld, recordRouteResult } from './shared-world';
 import { recoverLegacyJournals } from './agency/journal-recovery.ts';
 import { LiveAgency, isSelection, type Selection, type Verification } from './agency/live-adapter.ts';
 import type { Task, TaskKind, Route } from './agency/world-model.ts';
+import { acquisitionActions, type AcquisitionHint } from './agency/acquisition.ts';
+import { loadDropIndex } from './agency/drop-leads.ts';
+import { bindItems, resolveItems, MissingItem, type ItemRef } from './agency/item-intents.ts';
 import { randomUUID } from 'node:crypto';
 
 type Json = Record<string, unknown>;
@@ -61,7 +64,7 @@ type GameState = {
   modalOpen?: boolean;
   inGame?: boolean;
 };
-type Candidate = { id: string; type: string; fields?: Json; waitTicks: number };
+type Candidate = { itemRefs?:ItemRef[]; id: string; type: string; fields?: Json; waitTicks: number };
 type QTable = Record<string, Record<string, number>>;
 type ForumState = {
   sent?: Record<string, string>;
@@ -1202,10 +1205,28 @@ async function actionsForTask(state: GameState, task: Task): Promise<Candidate[]
     const row=(state.bank.items??[]).find((i:any)=>(Number(i.id)===995||/^coins$/i.test(String(i.name)))&&Number.isInteger(i.slot)&&Number(i.count)>=required);
     return row?[{id:'withdraw-planned-funds',type:'bankWithdraw',fields:{slot:row.slot,amount:required},waitTicks:2}]:[];
   }
+  if(task.kind==='acquisition') {
+    const result=await acquisitionActions(state,task,{bank:bankAt,route:p=>navigator!.assessApproach(position(state),p),canFight:n=>{
+      const monster=training?.catalog.monsters.find(m=>m.id===n.id&&m.name.toLowerCase()===String(n.name).toLowerCase());
+      return !!monster&&isApprovedNpcTarget(n)&&!trainingReadiness(state,monster,build==='ranged-magic',agency!.tripPreparation(state,'combat').foodTarget);
+    }});
+    if(result.reason)agency!.blocked(result.reason);
+    return result.actions as Candidate[];
+  }
   if (state.bank?.isOpen === true) { const transaction=bankingCandidates(state,task);return transaction.length?transaction:[{id:'close-bank',type:'closeModal',waitTicks:1}]; }
   switch(task.kind) {
     case 'food': return productionCandidates(state,true,task.target?.minimum);
-    case 'ammunition': return [...quiverRefill(state), ...ammoCandidates(state,task.target?.minimum), ...arrowProductionCandidates(state), ...safeAmmoSupplyCandidates(state)];
+    case 'ammunition': {
+      const immediate=[...quiverRefill(state),...arrowProductionCandidates(state),...ammoCandidates(state,task.target?.minimum)];
+      if(immediate.some(a=>['useItemOnItem','shopBuy','useInventoryItem'].includes(a.type)))return immediate;
+      const inv=state.inventory??[],has=(name:RegExp)=>inv.some(i=>name.test(String(i.name)));
+      // Missing ingredients become item requirements, not commands to click a remembered slot.
+      const need=has(/^arrow shafts?$/i)&&!has(/^feathers?$/i)?{name:'Feather',minimum:15}
+        :has(/^headless arrows?$/i)&&!has(/arrowtips?|arrowheads?/i)?{name:'Bronze arrow',minimum:Math.max(1,task.target?.minimum??15)}
+        :has(/^logs$/i)&&!has(/^knife$/i)?{name:'Knife',minimum:1}:undefined;
+      if(need){agency!.requestItem(need,state,'Obtain the missing ammunition input or a finished-arrow alternative for the parent objective.');return [];}
+      return [...immediate,...safeAmmoSupplyCandidates(state)];
+    }
     case 'bank': return bankingCandidates(state,task);
     case 'equipment': return gearCandidates(state);
     case 'combat': {
@@ -1232,10 +1253,10 @@ async function actionsForTask(state: GameState, task: Task): Promise<Candidate[]
     }
     case 'exploration': {
       if(!task.route)return [];
-      const route=await navigator!.assess(position(state),task.route);
+      const route=await navigator!.assessApproach(position(state),task.route);
       if(route.status==='loading-map')return [{id:'observe-map-load',type:'wait',waitTicks:2}];
-      if(route.status!=='ready')return [];
-      return [{id:task.id,type:'walkTo',fields:{...task.route,running:true,reason:task.route.evidence},waitTicks:2}];
+      if(route.status!=='ready') {agency!.deferSurvey(task.route,state,route.reason??'No verified survey approach');return [];}
+      return [{id:task.id,type:'walkTo',fields:{...route.destination,running:true,reason:task.route.evidence},waitTicks:2}];
     }
   }
 }
@@ -1339,12 +1360,23 @@ async function runEpisode(): Promise<void> {
     training?.beginTrial?.(state,planned.decision.goal);
     const committedRoute=agency.routeStep(planned,state);
     const options=available(committedRoute?[committedRoute as Candidate]:await actionsForTask(state,planned.task)).filter(a=>agency!.eligible(a,state));
-    if(!options.length){agency.blocked('Selected task has no feasible current executor step: '+planned.task.id);continue;}
-    const action=choose(stateKey(state),options);
+    if(!options.length){if(!agency.summary().blocked && !agency.summary().acquisition?.need)agency.blocked('Selected task has no feasible current executor step: '+planned.task.id);await cliCall(['wait','2']);continue;}
+    let action:Candidate;
+    try {
+      const candidate=choose(stateKey(state),options);
+      action=bindItems(candidate.type==='shopBuy'?{...candidate,fields:{...candidate.fields,amount:1}}:candidate,state);
+    }
+    catch(error){agency.blocked('Invalid item candidate: '+String(error));continue;}
     // One-item purchases use the current quoted price; no unbounded bulk purchase estimate.
     if(action.type==='shopBuy')action.fields={...action.fields,amount:1};
     const fresh=stateFrom(await cliCall(['state']));
     if(urgentAgencyAction(fresh)){state=fresh;continue;}
+    try{action=resolveItems(action,fresh);}
+    catch(error){
+      if(error instanceof MissingItem)agency.requestItem(error.need,fresh,'Required input disappeared before dispatch; find an acquisition method.');
+      else agency.blocked('Fresh item validation: '+String(error));
+      state=fresh;continue;
+    }
     if(action.fields?.trainingSite&&!training?.validateAction(fresh,action)){state=fresh;continue;}
     if(action.id.startsWith('goal-')&&!equipmentGoals.validate(fresh,action)){state=fresh;continue;}
     if(!validateMetal(fresh,action,state)||!validateBow(fresh,action,state)||!validateFishing(fresh,action,state)){state=fresh;continue;}
@@ -1385,8 +1417,17 @@ async function main(): Promise<void> {
   const policy=existsSync(policyPath)?JSON.parse(readFileSync(policyPath,'utf8')):{};
   agency = new LiveAgency(resolve(dataDir,'agency-v2.json'), {agent:character,world:process.env.CLAWSCAPE_SERVER??'clawscape',revision:gearCatalog.namespace}, {
     policy,
-    supported:['food','ammunition','equipment','bank','combat','production','gathering','exploration','funds','prayer'],
+    supported:['food','ammunition','equipment','bank','combat','production','gathering','exploration','funds','prayer','acquisition'],
     developmentHint:build,
+    dropLeads:loadDropIndex(existsSync(resolve(root,'data/shared/drop-leads.json'))?resolve(root,'data/shared/drop-leads.json'):resolve(root,'knowledge/2004scape-drop-leads.json')),
+    acquisitionHints:[
+      {key:'bundled-knife',kind:'ground',item:{name:'Knife',minimum:1},position:{...WORLD_ROUTES.lumbridgeKnife,level:0},confidence:'unverified',evidence:'existing bundled ground-knife lead; must observe item before pickup'},
+      {key:'bundled-logs',kind:'gather',item:{name:'Logs',minimum:1},position:{...WORLD_ROUTES.lumbridgeTrees,level:0},confidence:'unverified',evidence:'existing bundled tree approach; must observe resource and tool'},
+      {key:'bundled-arrow-shop',kind:'shop',item:{name:'Bronze arrow',minimum:1},entityName:'Lowe',position:{...WORLD_ROUTES.lowesArchery,level:0},confidence:'unverified',evidence:'existing bundled archery-shop lead; current stock and price required'},
+      {key:'bundled-feather-shop',kind:'shop',item:{name:'Feather',minimum:1},entityName:'Gerrant',position:{...WORLD_ROUTES.gerrantsFishingShop,level:0},confidence:'unverified',evidence:'investigate the existing fishing-shop lead for bait/materials; stock unknown'},
+      ...(training?.catalog.sites??[]).map(site=>({key:'catalogue:'+site.id,kind:'drop' as const,item:{name:'unknown',minimum:1},entityName:site.monster.name,entityId:site.monster.id,
+        position:site.points[0]!,confidence:'unverified' as const,evidence:site.source+'; source spawn is not proof of a drop'})),
+    ],
     buildRules:loadBuildRules(resolve(dataDir,'build-rules.json'),{world:process.env.CLAWSCAPE_SERVER??'clawscape',revision:gearCatalog.namespace}),
     preferences:role==='economy'?{crafting:2,gathering:1}:role==='resource'?{gathering:2}:{combat:2},
     routes:Object.entries(WORLD_ROUTES).map(([id,p])=>({id,...p,level:0,evidence:'bundled route lead; arrival not yet personally verified'})),

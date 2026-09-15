@@ -54,7 +54,7 @@ export function lobsterPreparation(s:any,m:FishingPreparation,bankMemory:any[],g
 export function validateFishing(s:any,a:Action,before:any):boolean {
   if(!a.id.startsWith('lobster-'))return true;
   if(a.type==='bankWithdraw'){
-    const intended=before.bank?.items?.find((i:any)=>i.slot===a.fields?.slot);
+    const intended=(a as any).itemRefs?.find((r:any)=>r.field==='slot'&&r.container==='bank')??before.bank?.items?.find((i:any)=>i.slot===a.fields?.slot);
     return !!intended&&s.bank?.isOpen===true&&s.bank.items?.some((i:any)=>i.slot===a.fields?.slot&&i.id===intended.id&&i.count>=a.fields.amount);
   }
   if(a.type==='shopBuy')return s.shop?.isOpen===true&&s.shop.shopItems?.some((i:any)=>i.slot===a.fields.slot&&i.id===301&&i.count>0&&i.buyPrice===a.fields.expectedPrice)&&count(s.inventory??[],995)>=a.fields.expectedPrice+60;

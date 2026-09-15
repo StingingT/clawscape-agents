@@ -30,7 +30,7 @@ export const Observation = z.strictObject({
   schema_version: version, character: id, world: id, world_epoch: id.nullable(), session_id: id,
   profile_id: id, seq: nat, tick: nat.nullable(), observed_at: nat, fresh_at: nat.nullable(),
   provenance: z.enum(["simulation", "cli-player-observation"]),
-  connected: z.boolean(), position: Tile.nullable(),
+  connected: z.boolean(), position: Tile.nullable(), own_player_index: nat.nullable().optional(),
   hp: nat.nullable(), max_hp: nat.nullable(), life_id: nat.nullable(), respawns: nat.nullable(),
   skills: z.array(z.strictObject({ name: text, current: nat, base: nat, xp: nat })),
   capacity: nat.nullable(), inventory: z.array(Item), equipment: z.array(Item),

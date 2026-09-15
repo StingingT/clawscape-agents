@@ -37,9 +37,9 @@ test('one goal survives a bank step, partial food production, serialization and 
   assert.equal(Object.values(a.director.memory.methods)[0]?.rejected,0);
   a=new LiveAgency(f.file,identity,f.config);
   for(let n=1;n<=8;n++){
-    const pre=s({tick:n+2,inventory:Array.from({length:n-1},(_,i)=>shrimp(i))});const chosen=select(a,pre);
+    const pre=s({tick:n+2,inventory:[...Array.from({length:n-1},(_,i)=>shrimp(i)),{id:317,name:'Raw shrimps',slot:20,count:1}]});const chosen=select(a,pre);
     assert.equal(chosen.decision.goal.key,p.decision.goal.key);
-    a.begin(chosen,{id:'cook',type:'useItemOnItem',fields:{sourceSlot:20,targetSlot:21}},pre,'cook-'+n);
+    a.begin(chosen,{id:'cook',type:'useItemOnLoc',fields:{itemSlot:20,locId:1,x:1,z:1}},pre,'cook-'+n);
     f.advance();a.record('cook-'+n,s({tick:n+3,inventory:Array.from({length:n},(_,i)=>shrimp(i))}),verified);
   }
   assert.equal(a.director.memory.active,undefined);assert.equal(a.director.memory.reviews.length,1);

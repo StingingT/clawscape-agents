@@ -1,3 +1,5 @@
+import { itemFact, itemName } from './item-intents.ts';
+import type { NeededItem, AcquisitionSource } from './acquisition.ts';
 import { allowedTraining, guideTrainingTarget, strategyView, type Development } from './development.ts';
 import type { BuildRules } from './build-rules.ts';
 import { meaningfulFrontierRoute } from './reconciliation.ts';
@@ -5,9 +7,9 @@ import { preparation, emptyTrips, type TripLearning } from './trip-logistics.ts'
 import type { Domain, Facts, Identity, Memory, Method, Observation, Opportunity } from './types.ts';
 
 export type LiveState = Record<string, any>;
-export type TaskKind = 'food' | 'ammunition' | 'equipment' | 'bank' | 'combat' | 'production' | 'gathering' | 'exploration' | 'funds' | 'prayer';
+export type TaskKind = 'food' | 'ammunition' | 'equipment' | 'bank' | 'combat' | 'production' | 'gathering' | 'exploration' | 'funds' | 'prayer' | 'acquisition';
 export type Route = { id: string; x: number; z: number; level: number; evidence: string };
-export type Task = { foodTarget?:number; id: string; kind: TaskKind; skill?: string; guideLeadIds?: string[]; route?: Route; target?: { fact: string; minimum: number } };
+export type Task = { acquisition?:{need:NeededItem;source:AcquisitionSource}; foodTarget?:number; id: string; kind: TaskKind; skill?: string; guideLeadIds?: string[]; route?: Route; target?: { fact: string; minimum: number } };
 export type Policy = {
   reserveCoins: number; maxLossGp: number; maxDeaths: number; maxDurationMs: number;
   foodTarget: number; ammoTarget: number;
@@ -19,7 +21,8 @@ export const defaultPolicy: Policy = {
   foodTarget: 0, ammoTarget: 50,
 };
 export type Catalogue = { view: Observation; opportunities: Opportunity[]; methods: Method[]; tasks: Map<string, Task> };
-export type Knowledge = { bank: any[]; bankCheckedAt: number; routes: Record<string, Route>; visited: Record<string, string> };
+export type RouteFailure = {at:number;retryAt:number;attempts:number;context:string;learningRevision:number;reason:string};
+export type Knowledge = { routeFailures?:Record<string,RouteFailure>; bank: any[]; bankCheckedAt: number; routes: Record<string, Route>; visited: Record<string, string> };
 export const emptyKnowledge = (): Knowledge => ({ bank: [], bankCheckedAt: 0, routes: {}, visited: {} });
 const quantity = (i: any) => { const n = Number(i.count ?? 1); return Number.isSafeInteger(n) && n >= 0 ? n : NaN; };
 const edible = (i: any) => (i.optionsWithIndex ?? []).some((o: any) => /^eat$/i.test(String(o.text)));
@@ -44,6 +47,10 @@ export function observeFacts(state: LiveState, knowledge: Knowledge): Facts {
     axe: Number([...inv,...equipped].some((i:any) => / axe$/i.test(String(i.name)) && !/pickaxe|battleaxe/i.test(String(i.name)))),
     'xp:production': ['smithing','fletching','crafting'].reduce((n,k) => n + XP(state,k), 0),
     'xp:gathering': ['woodcutting','mining','fishing'].reduce((n,k) => n + XP(state,k), 0) };
+  for(const i of inv){
+    const n=quantity(i);facts[itemFact({id:i.id,name:i.name,minimum:1})]=(facts[itemFact({id:i.id,name:i.name,minimum:1})]??0)+n;
+    const key='carried:name:'+itemName(i.name);facts[key]=(facts[key]??0)+n;
+  }
   for (const s of state.skills ?? []) {
     const key = String(s.name).toLowerCase();
     facts['xp:' + key] = Number(s.experience ?? s.xp ?? 0);
@@ -143,7 +150,7 @@ export function buildCatalogue(identity: Identity, state: LiveState, k: Knowledg
       'Gather a cargo-sized batch and bank the verified outputs; reserve tools and learned food, not arbitrary empty slots.', 'collection');
   } else add({id:'gathering-batch',kind:'gathering'},'gathering','xp:gathering',Math.floor(facts['xp:gathering']!/100)*100+100,100,
     'Measure a complete gathering batch as an alternative to my previous activities.', 'collection', [{fact:'free-slots',minimum:1}]);
-  for (const route of Object.values(k.routes).filter(r => meaningfulFrontierRoute(r) && r.level === Number(state.player?.level ?? 0) && !k.visited[r.id]).slice(0,64))
+  for (const route of Object.values(k.routes).filter(r => meaningfulFrontierRoute(r) && r.level === Number(state.player?.level ?? 0) && !k.visited[r.id] && (!k.routeFailures?.[r.id] || k.routeFailures[r.id]!.retryAt<=now || k.routeFailures[r.id]!.context!==capabilityContext(state) || k.routeFailures[r.id]!.learningRevision<(memory.learningRevision??0))).slice(0,64))
     add({id:'survey:'+route.id,kind:'exploration',route},'exploration','visited:'+route.id,1,1,
       'Visit a sourced lead and verify it personally; path assessment and arrival are required.', 'frontier');
   const completed=memory.reviews.filter(r=>r.result==='success').slice(-5);

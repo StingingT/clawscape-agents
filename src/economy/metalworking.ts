@@ -340,7 +340,7 @@ export function validateMetal(s:any,a:Action,before?:any){
   if(!a.id.startsWith('economy-metal-'))return true;
   if(before&&/^bank(Withdraw|Deposit)$/.test(a.type)){
     const old=a.type==='bankWithdraw'?before.bank?.items:before.inventory,live=a.type==='bankWithdraw'?s.bank?.items:s.inventory;
-    const id=old?.find((i:any)=>i.slot===a.fields!.slot)?.id;
+    const id=(a as any).itemRefs?.find((r:any)=>r.field==='slot')?.id??old?.find((i:any)=>i.slot===a.fields!.slot)?.id;
     return s.bank?.isOpen===true&&id!==undefined&&live?.some((i:any)=>i.slot===a.fields!.slot&&i.id===id)&&total(live??[],id)>=a.fields!.amount;
   }
   if(a.type==='interactLoc'){
@@ -350,7 +350,7 @@ export function validateMetal(s:any,a:Action,before?:any){
   if(before&&a.type==='clickDialogOption')return s.dialog?.isOpen&&s.dialog.options?.some((o:any)=>o.index===a.fields!.optionIndex&&o.text===before.dialog?.options?.find((p:any)=>p.index===o.index)?.text);
   if(a.type==='shopBuy')return s.shop?.isOpen===true&&s.shop.shopItems?.some((i:any)=>i.id===a.fields!.itemId&&i.slot===a.fields!.slot&&i.count>0&&i.buyPrice===a.fields!.expectedPrice)
     &&total(s.inventory??[],995)>=a.fields!.expectedPrice+5;
-  if(a.type==='useItemOnLoc')return s.inventory?.some((i:any)=>i.slot===a.fields!.itemSlot&&[436,438,440,447,449,451,453,2349,2351,2353,2359,2361,2363].includes(i.id)&&(!before||i.id===before.inventory?.find((b:any)=>b.slot===i.slot)?.id))
+  if(a.type==='useItemOnLoc')return s.inventory?.some((i:any)=>i.slot===a.fields!.itemSlot&&[436,438,440,447,449,451,453,2349,2351,2353,2359,2361,2363].includes(i.id)&&(!before||i.id===((a as any).itemRefs?.find((r:any)=>r.field==='itemSlot')?.id??before.inventory?.find((b:any)=>b.slot===i.slot)?.id)))
     &&s.nearbyLocs?.some((l:any)=>l.id===a.fields!.locId&&l.x===a.fields!.x&&l.z===a.fields!.z&&l.reachable===true);
   return true;
 }

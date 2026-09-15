@@ -164,7 +164,7 @@ export function bowNext(s:any,m:EconomyMemory,blocked:(id:string)=>boolean=()=>f
 export function validateBow(s:any,a:Action,before:any):boolean {
   if(!a.id.startsWith('economy-bow-'))return true;
   const f=a.fields??{},inv=s.inventory??[];
-  const same=(slot:number)=>inv.find((i:any)=>i.slot===slot)?.id===before.inventory?.find((i:any)=>i.slot===slot)?.id;
+  const same=(slot:number)=>{const ref=(a as any).itemRefs?.find((r:any)=>r.container==='inventory'&&f[r.field]===slot);return inv.find((i:any)=>i.slot===slot)?.id===(ref?.id??before.inventory?.find((i:any)=>i.slot===slot)?.id);};
   if(a.type==='useItemOnNpc')return same(f.itemSlot)&&inv.some((i:any)=>i.slot===f.itemSlot&&i.id===1735)&&s.nearbyNpcs?.some((n:any)=>n.index===f.npcIndex&&n.id===43&&n.reachable===true&&n.distance<=8&&n.z<3520);
   if(a.type==='useItemOnItem')return same(f.sourceSlot)&&same(f.targetSlot)&&inv.some((i:any)=>i.slot===f.sourceSlot&&i.id===1777)&&BOWS.some(r=>r.input===inv.find((i:any)=>i.slot===f.targetSlot)?.id&&skillLevel(s,'fletching')>=r.level);
   if(a.type==='clickComponent')return s.interface?.isOpen===true&&before.interface?.options?.some((o:any)=>o.componentId===f.componentId&&/^make 10/i.test(o.text));
@@ -174,7 +174,7 @@ export function validateBow(s:any,a:Action,before:any):boolean {
   if(a.type==='shopBuy')return s.shop?.isOpen===true&&s.shop.shopItems?.some((i:any)=>i.id===1735&&i.slot===f.slot&&i.count>0&&i.buyPrice===f.expectedPrice)&&total(inv,995)>=f.expectedPrice+5;
   if(/^bank(Withdraw|Deposit)$/.test(a.type)){
     const old=a.type==='bankWithdraw'?before.bank?.items:before.inventory,live=a.type==='bankWithdraw'?s.bank?.items:inv;
-    const id=old?.find((i:any)=>i.slot===f.slot)?.id;
+    const id=(a as any).itemRefs?.find((r:any)=>r.field==='slot')?.id??old?.find((i:any)=>i.slot===f.slot)?.id;
     return s.bank?.isOpen===true&&id!==undefined&&live?.some((i:any)=>i.slot===f.slot&&i.id===id)&&total(live??[],id)>=f.amount;
   }
   return true;

@@ -1,3 +1,4 @@
+import { combatEvents, observedPlayerIndex, ownKill } from '../combat-evidence.ts';
 import { guidePrior, inspectTrainingLeads } from './guide-leads.ts';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { distance, validTile, type Tile } from '../navigation/geometry';
@@ -11,7 +12,7 @@ type Outcomes = { encounters: number; kills: number; productive: number; xp: num
 type TripStats={trips:number;xp:number;ticks:number;food:number;ammo:number;spentGp:number};
 type Trip={goalKey:string;skill:string;life:number;startTick:number;lastTick:number;startedAt:number;siteId?:string;context?:string;xp:number;food:number;ammo:number;spentGp:number;mixed:boolean;checkpoint?:string};
 type Site = { id: string; name: string; monsterId: number; combatLevel: number; points: Tile[]; source: 'guide' | 'observed'; evidence: string; guideIds: string[]; firstSeen?: string; lastSeen?: string; sightings: number; cooldownUntil: number; failures: number; stats: Record<string, Outcomes>; tripStats?:Record<string,TripStats>; observationPasses: number; lastObservationTick?: number; emptySinceTick?: number };
-type Encounter = { siteId: string; index: number; monsterId: number; life: number; tick: number; context: string; xp: number; ticks: number; damage: number; food: number; ammo: number; confirmedKill: boolean };
+type Encounter = { siteId: string; index: number; monsterId: number; life: number; tick: number; context: string; xp: number; ticks: number; damage: number; food: number; ammo: number; confirmedKill: boolean; ownPlayerIndex?:number|null; clearedTick?:number; lastObservedTick?:number };
 type Knowledge = { trip?:Trip; completedTrips?:Array<Trip & {endTick:number;result:'returned-to-bank'|'interrupted'}>; sites: Record<string, Site>; observations: Record<string, any>; commitment?: { siteId: string; since: number; encounters: number; approaches?: Tile[] }; exploration: { window: number; trips: number }; pending?: Encounter; status?: any; lastObserved?: string; retryAt?: number };
 const fresh = (): Knowledge => ({ sites: {}, observations: {}, exploration: { window: 0, trips: 0 } });
 const outcomes = (): Outcomes => ({ encounters: 0, kills: 0, productive: 0, xp: 0, ticks: 0, damage: 0, food: 0, ammo: 0, escapes: 0, deaths: 0 });
@@ -174,12 +175,13 @@ export class TrainingDiscovery {
     if (this.memory.pending) this.finish(false, false);
     const n = s.nearbyNpcs?.find((n: any) => n.index === action.fields?.npcIndex), siteId = action.fields?.trainingSite;
     if (!n || !this.monster(n) || !this.memory.sites[siteId]) return;
-    this.memory.pending = { siteId, index: n.index, monsterId: n.id, life: s.player.lifeId, tick: s.tick, context: context(s, this.ranged), xp: 0, ticks: 0, damage: 0, food: 0, ammo: 0, confirmedKill: false };
+    this.memory.pending = { siteId, index: n.index, monsterId: n.id, life: s.player.lifeId, tick: s.tick, context: context(s, this.ranged), xp: 0, ticks: 0, damage: 0, food: 0, ammo: 0, confirmedKill: false, ownPlayerIndex:observedPlayerIndex(s.player?.index),lastObservedTick:s.tick };
   }
   afterAction(before: any, after: any, action: Action) {
     this.recordTrip(before,after,action);
     const e = this.memory.pending;
-    if (e) {
+    if (e && after.tick>(e.lastObservedTick??e.tick)) {
+      e.lastObservedTick=after.tick;
       const dead = after.player?.isDead || after.player?.lifeId !== e.life || Number(after.player?.respawnCount ?? 0) > Number(before.player?.respawnCount ?? 0);
       const reset = after.tick < before.tick;
       if (!dead && !reset) {
@@ -189,9 +191,16 @@ export class TrainingDiscovery {
         e.food += Math.max(0, foodCount(before) - foodCount(after)); e.ammo += Math.max(0, ammo(before) - ammo(after));
       }
       const target = after.nearbyNpcs?.find((n: any) => n.index === e.index && n.id === e.monsterId);
-      e.confirmedKill ||= target?.hp === 0;
+      const events=combatEvents(after.combatEvents),gain=Math.max(0,xp(after)-xp(before));
+      const self=observedPlayerIndex(after.player?.index);
+      if(self!==null)e.ownPlayerIndex=self;
+      const sources=[...new Set(events.filter(v=>v.tick>before.tick&&v.tick<=after.tick&&v.type==='damage_dealt'&&v.source_type==='player'&&v.target_type==='npc'&&v.target_index===e.index).map(v=>v.source_index))];
+      if(e.ownPlayerIndex==null&&gain>0&&sources.length===1)e.ownPlayerIndex=sources[0];
+      const reused=after.nearbyNpcs?.some((n:any)=>n.index===e.index&&n.id!==e.monsterId);
+      e.confirmedKill ||= !dead&&!reset&&!reused&&ownKill(events,e.ownPlayerIndex,e.index,e.tick,Math.min(after.tick,(e.clearedTick??after.tick)+3));
       const fighting = after.player?.combat?.inCombat && after.player.combat.targetType === 'npc' && after.player.combat.targetIndex === e.index;
-      if (dead || reset || action.type === 'retreat' || e.confirmedKill || (!fighting && after.tick > e.tick + 4)) this.finish(action.type === 'retreat', !!dead);
+      if(!fighting)e.clearedTick??=after.tick;
+      if (dead || reset || reused || action.type === 'retreat' || e.confirmedKill || (!fighting && after.tick >= (e.clearedTick??after.tick) + 3)) this.finish(action.type === 'retreat', !!dead);
     }
     this.observe(after); this.save();
   }

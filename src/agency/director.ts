@@ -139,6 +139,15 @@ export class Director {
     g.supportGoals=(g.supportGoals??[]).filter(n=>!n.target.fact.startsWith('visited:observed:')||routes.has(n.target.fact.slice(8))).slice(-20);
     if(g.investigation?.target.fact.startsWith('visited:observed:')&&!routes.has(g.investigation.target.fact.slice(8)))delete g.investigation;
   }
+  /** A failed survey is evidence about that route, not failure of a crafting parent. */
+  deferSurvey(routeId:string,at:number,reason:string,evidence:string[]):void {
+    if(this.memory.pending)throw new Error('RECONCILE_PENDING_ACTION_FIRST');
+    const goal=this.memory.active;if(!goal)return;
+    this.blocked(at,reason,evidence);
+    if(goal.id==='survey:'+routeId)this.review(at,'partial',reason,evidence);
+    else if(goal.investigation?.id==='survey:'+routeId)delete goal.investigation;
+  }
+
   /** Refresh the food dependency, not the strategic objective or a pending receipt. */
   reviseFoodNeed(target:number,at:number):void {
     if(this.memory.pending||!Number.isInteger(target)||target<0)return;

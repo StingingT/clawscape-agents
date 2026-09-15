@@ -62,31 +62,55 @@ export class Navigator {
     if (!Array.isArray(plan?.legs) || !plan.legs.length || distance(plan.legs.at(-1)!.target, to) !== 0) return;
     this.routes[this.routeKey(from, to)] = { from, to, legs: structuredClone(plan.legs), hash: plan.hash, savedAt: Date.now() };
   }
-  private async plan(from: Tile, to: Tile) {
+  private async plan(from: Tile, to: Tile, timeoutMs=15_000) {
     const id = ++this.sequence;
     this.doors = this.doors.filter(d => d.until > Date.now());
     let timer: ReturnType<typeof setTimeout>;
     try {
       return await Promise.race([
         this.planner ? this.planner(from, to, this.doors.map(d => d.door)) : new Promise<any>((resolve, reject) => { this.pending.set(id, { resolve, reject }); this.worker!.postMessage({ id, from, to, blocked: this.doors.map(d => d.door), questTravel:this.questTravel }); }),
-        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('planner-timeout')), 15_000); timer.unref(); }),
+        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('planner-timeout')), timeoutMs); timer.unref(); }),
       ]);
     } finally { clearTimeout(timer!); this.pending.delete(id); }
   }
   // Read-only feasibility for semantic goal selection. It never declares live
   // arrival, mutates the active trip, or sends a game command.
-  async assess(from: Tile, to: Tile) {
+  async assess(from: Tile, to: Tile, timeoutMs=15_000) {
     if (this.fatal) return { status: 'blocked', reason: this.fatal };
     if (!this.ready) return Date.now()-this.startupAt>60_000?{status:'blocked',reason:'map-initialization-timeout'}:{ status: 'loading-map' };
     if (this.blockedUntil(to) > Date.now()) return { status: 'blocked', reason: 'route-cooldown' };
     try {
-      const plan = await this.plan(from, to);
+      const plan = await this.plan(from, to, timeoutMs);
       if (distance(plan.legs.at(-1)?.target ?? from, to) !== 0) return { status: 'blocked', reason: 'partial-path' };
       if (plan.unmappedTiles > 0) return { status: 'blocked', reason: 'unverified-collision-coverage' };
       let previous = from, cost = 0;
       for (const leg of plan.legs) { cost += distance(previous, leg.target); previous = leg.target; }
       return { status: 'ready', cost, conditionalDoors: plan.legs.reduce((n: number, l: Leg) => n + l.doors.length, 0), hash: plan.hash };
     } catch (error) { return { status: 'blocked', reason: String(error) }; }
+  }
+  /** A survey visits an observation side, not an object's impassable footprint.
+   * Each candidate still passes the exact collision/coverage checks. No partial path
+   * is relabelled as arrival, and the whole search has a bounded time budget. */
+  async assessApproach(from: Tile, target: Tile, radius = 1) {
+    if (![from.x,from.z,target.x,target.z,from.level,target.level].every(Number.isInteger)
+      || from.level !== target.level || ![0,1].includes(radius))
+      return {status:'blocked' as const,reason:'invalid-survey-destination-or-plane'};
+    const candidates:Tile[]=[];
+    for(let dx=-radius;dx<=radius;dx++)for(let dz=-radius;dz<=radius;dz++) {
+      const tile={x:target.x+dx,z:target.z+dz,level:target.level};
+      if(tile.x>=0&&tile.z>=0&&tile.x<=16383&&tile.z<=16383)candidates.push(tile);
+    }
+    candidates.sort((a,b)=>distance(from,a)-distance(from,b)||a.x-b.x||a.z-b.z);
+    const deadline=Date.now()+15_000, failures:string[]=[];
+    for(const destination of candidates) {
+      if(Date.now()>=deadline){failures.push('survey-assessment-time-budget');break;}
+      const result=await this.assess(from,destination,Math.max(1,deadline-Date.now()));
+      if(result.status==='ready')return {...result,destination,approachOnly:distance(destination,target)>0};
+      if(result.status==='loading-map')return result;
+      failures.push(String(result.reason??'route-unavailable'));
+      if(result.reason==='map-initialization-timeout'||this.fatal)break;
+    }
+    return {status:'blocked' as const,reason:'No verified survey approach: '+[...new Set(failures)].join('; ')};
   }
   private record(status: string, state: any, extra: any = {}) {
     const record = { time: new Date().toISOString(), status, position: position(state), tick: state.tick, destination: this.destination, nextWaypoint: this.legs[0]?.target, blocked: this.blocked, routes: this.routes, doors: this.doors, escapeTarget: this.escapeTarget, escapeLife: this.escapeLife, recoveries: this.recoveries, ...extra };
