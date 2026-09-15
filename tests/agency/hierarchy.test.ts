@@ -69,6 +69,25 @@ test('partial movement cannot complete production or refill an economic budget',
   assert.equal(d.memory.active!.lastObjectiveProgressAt,undefined);
 });
 
+test('repeated non-exploration preparation is not mistaken for productive progress',()=>{
+  const d=new Director(createMemory(id));
+  let p=d.next(view(),[goal],methods);assert.equal(p.type,'execute');
+  for(let n=1;n<=3;n++) {
+    if(p.type!=='execute')break;
+    d.begin(view({},1000+n*1000),p,methods[0]!,`prep-${n}`);
+    d.record({commandId:`prep-${n}`,sequence:n,at:1000+n*1000,status:'progress',facts:{},spentGp:0,lostGp:0,deaths:0,elapsedMs:1000,evidence:['preparation-observed']});
+    if(n<3)p=d.next(view({},2000+n*1000),[goal],methods);
+  }
+  assert.ok(d.memory.active?.blocker);
+  d.memory.active!.budget.maxDurationMs=200_000;
+  assert.equal(d.next(view({},34001),[goal],methods).type,'blocked');
+  assert.equal(d.next(view({},64001),[goal],methods).type,'blocked');
+  d.next(view({},94001),[goal],methods);
+  assert.equal(d.memory.active,undefined);
+  assert.equal(d.memory.reviews.at(-1)?.result,'partial');
+  assert.match(d.memory.reviews.at(-1)?.reason??'',/preparation chain remained non-productive/);
+});
+
 test('an interrupted method is uncertain, not disproven, and can be tested again',()=>{
   const d=new Director(createMemory(id));const p=d.next(view(),[goal],methods);d.begin(view(),p,methods[0]!,'leg');
   recorded(d,'leg',1,{},'interrupted');

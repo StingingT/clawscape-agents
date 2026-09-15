@@ -1188,6 +1188,24 @@ function incidentalProcessingCandidates(state:GameState):Candidate[] {
   return heat?[{id:`incidental-process-${raw.id}-${heat.id}`,type:'useItemOnLoc',fields:{itemSlot:raw.slot,x:heat.x,z:heat.z,locId:heat.id,reason:'process a useful incidental raw resource at a freshly observed heat source'},waitTicks:4}]:[];
 }
 
+/** A navigation dead-end is an opportunity for a bounded local experiment.
+ * The candidate is selected entirely from the current observation: no door,
+ * gate, ladder, coordinate or object identity is seeded in the controller. */
+function localNavigationExperiments(state:GameState):Candidate[] {
+  if(state.player?.combat?.inCombat===true)return [];
+  const p=state.player??{};
+  const candidates=(state.nearbyLocs??[]).flatMap((loc:any)=>{
+    if(loc.reachable!==true||!Number.isInteger(loc.x)||!Number.isInteger(loc.z)||!Number.isInteger(loc.id))return [];
+    const option=(loc.optionsWithIndex??[]).find((o:any)=>/^(open|climb(?:-up|-down)?|enter|cross|use)$/i.test(String(o.text)));
+    if(!option)return [];
+    return [{loc,option,distance:Math.max(Math.abs(Number(p.worldX)-loc.x),Math.abs(Number(p.worldZ)-loc.z))}];
+  }).filter(v=>v.distance<=3).sort((a,b)=>a.distance-b.distance||a.loc.id-b.loc.id||a.loc.x-b.loc.x||a.loc.z-b.loc.z);
+  const chosen=candidates[0];if(!chosen)return [];
+  return [{id:`navigation-experiment-${chosen.loc.id}-${chosen.loc.x}-${chosen.loc.z}-${chosen.option.opIndex}`,type:'interactLoc',
+    fields:{x:chosen.loc.x,z:chosen.loc.z,locId:chosen.loc.id,optionIndex:chosen.option.opIndex,
+      reason:'test a nearby observed transition or obstruction before abandoning the route'},waitTicks:2}];
+}
+
 /** Task-specific executors are asked for actions only AFTER the Director chooses a goal. */
 async function actionsForTask(state: GameState, task: Task): Promise<Candidate[]> {
   if (state.player?.isDead === true) return [];
@@ -1269,8 +1287,16 @@ async function actionsForTask(state: GameState, task: Task): Promise<Candidate[]
       if(!task.route)return [];
       const route=await navigator!.assessApproach(position(state),task.route);
       if(route.status==='loading-map')return [{id:'observe-map-load',type:'wait',waitTicks:2}];
-      if(route.status!=='ready') {agency!.deferSurvey(task.route,state,route.reason??'No verified survey approach');return [];}
+      if(route.status!=='ready') {
+        const experiment=localNavigationExperiments(state);
+        if(experiment.length)return experiment;
+        agency!.deferSurvey(task.route,state,route.reason??'No verified survey approach');return [];
+      }
       return [{id:task.id,type:'walkTo',fields:{...route.destination,running:true,reason:task.route.evidence},waitTicks:2}];
+    }
+    case 'discovery': {
+      const experiment=localNavigationExperiments(state);
+      return experiment.length?experiment:[{id:'discover-local-observation',type:'scanNearbyLocs',fields:{radius:12,reason:'inspect the current area for a safe interaction hypothesis'},waitTicks:2}];
     }
   }
 }
@@ -1390,7 +1416,7 @@ async function runEpisode(): Promise<void> {
     if(!options.length){
       if(planned.task.kind==='exploration'&&planned.task.route){
         agency.deferSurvey(planned.task.route,state,'Selected survey has no feasible executor step from the current context.');
-      } else if(!agency.summary().acquisition?.need) {
+      } else if(!agency.summary().acquisition?.need || agency.summary().acquisition?.need?.optional) {
         agency.deferCurrent(state,'Selected task has no feasible current executor step: '+planned.task.id);
       }
       await cliCall(['wait','2']);continue;
@@ -1451,7 +1477,7 @@ async function main(): Promise<void> {
   const policy=existsSync(policyPath)?JSON.parse(readFileSync(policyPath,'utf8')):{};
   agency = new LiveAgency(resolve(dataDir,'agency-v2.json'), {agent:character,world:process.env.CLAWSCAPE_SERVER??'clawscape',revision:gearCatalog.namespace}, {
     policy,
-    supported:['food','ammunition','equipment','bank','combat','production','gathering','exploration','funds','prayer','acquisition'],
+     supported:['food','ammunition','equipment','bank','combat','production','gathering','exploration','discovery','funds','prayer','acquisition'],
     developmentHint:build,
     dropLeads:loadDropIndex(existsSync(resolve(root,'data/shared/drop-leads.json'))?resolve(root,'data/shared/drop-leads.json'):resolve(root,'knowledge/2004scape-drop-leads.json')),
     acquisitionHints:[

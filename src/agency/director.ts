@@ -184,6 +184,18 @@ export class Director {
         this.review(view.at, 'success', 'The goal predicate is now satisfied by a fresh own observation.', ['fresh-observation:' + view.at]);
       } else if (view.at - active.startedAt >= active.budget.maxDurationMs) {
         this.review(view.at, active.attempts ? 'partial' : 'failure', 'Bounded attempt exhausted; choose an alternative instead of looping.', []);
+      } else if (active.blocker?.reason.startsWith('The same strategic method repeated preparation')) {
+        // A causal-chain blocker is deliberately held out of the same plan
+        // until a fresh observation/recheck. Reopening that plan immediately
+        // would recreate the bank/interface loop we just diagnosed.
+        if (view.at < active.blocker.recheckAt) return { type: 'blocked', reason: active.blocker.reason, missingCapabilities: [] };
+        active.blocker.attempts=(active.blocker.attempts??0)+1;
+        active.blocker.at=view.at;active.blocker.recheckAt=view.at+30_000;
+        if ((active.blocker.attempts??0)>=3) {
+          this.review(view.at,'partial','The preparation chain remained non-productive after bounded rechecks; select a fresh method from current evidence.',[active.blocker.reason]);
+          return this.next(view,opportunities,methods);
+        }
+        return { type: 'blocked', reason: active.blocker.reason, missingCapabilities: [] };
       } else {
         // Newly verified funds can finance preparation. Existing expenditure is never reset,
         // and bank withdrawal is still required before a shop may spend those coins.
@@ -210,7 +222,18 @@ export class Director {
         if (plan?.steps[0]) return this.attach(active, plan, view, active.investigation ? 'investigate-blocker' : 'prerequisite');
         // A failed research method may yield to a different lead, but not erase the parent.
         delete active.investigation;
-        active.blocker ??= { at: view.at, reason: 'Current methods or prerequisites are unavailable; objective retained.', recheckAt: view.at + 30_000 };
+         const previousBlocker=active.blocker;
+         if(!previousBlocker) active.blocker={at:view.at,reason:'Current methods or prerequisites are unavailable; objective retained.',recheckAt:view.at+30_000,attempts:0};
+         else if(view.at>=previousBlocker.recheckAt) {
+           previousBlocker.attempts=(previousBlocker.attempts??0)+1;
+           previousBlocker.at=view.at;previousBlocker.recheckAt=view.at+30_000;
+           // A blocked method is a bounded experiment, not a permanent session
+           // state. Reconsider the normal opportunity set after three rechecks.
+           if((previousBlocker.attempts??0)>=3) {
+             this.review(view.at,'partial','The current plan remained non-executable after bounded rechecks; reconsider goals from fresh evidence.',[previousBlocker.reason]);
+             return this.next(view,opportunities,methods);
+           }
+         }
         const leads = opportunities.filter(g => g.source==='investigation' && g.investigates?.includes(active.target.fact)
           && outcomeTarget(g.target) && g.evidence.length && g.reason.trim() && !met(view.facts, g.target));
         for (const lead of leads) {
@@ -219,7 +242,7 @@ export class Director {
           active.investigation = structuredClone(lead);
           return this.attach(active, research, view, 'investigate-blocker');
         }
-        return { type: 'blocked', reason: active.blocker.reason, missingCapabilities:
+        return { type: 'blocked', reason: active.blocker?.reason ?? 'Current methods or prerequisites are unavailable; objective retained.', missingCapabilities:
           [...new Set(methods.filter(m => !view.capabilities.includes(m.capability)).map(m => m.capability))] };
       }
     }
@@ -297,6 +320,23 @@ export class Director {
     const productive = outcome.status === 'verified' && Object.keys(pending.method.effects)
       .some(fact => amount(outcome.facts, fact) > amount(pending.before, fact));
     const preparation = outcome.status === 'progress' || outcome.status === 'interrupted';
+    // A bank-open, route, or interface step is only preparation. Repeated
+    // preparation under the same strategic method must eventually yield the
+    // method's measurable target, otherwise the controller is likely circling
+    // a prerequisite instead of making causal progress. Exploration legs are
+    // exempt because movement itself is the selected measurable result.
+    const measurableIntermediate=Object.entries(outcome.facts).some(([fact,value])=>
+      !['hp','free-slots'].includes(fact)&&Number(value)>amount(pending.before,fact));
+    const preparationAction=outcome.actionType===undefined
+      || ['interactNpc','closeModal','closeShop','bankDeposit','bankWithdraw','clickDialogOption','useItemOnItem','useItemOnLoc'].includes(outcome.actionType);
+    if (outcome.status === 'progress' && !productive && !measurableIntermediate && preparationAction && pending.method.capability !== 'exploration') {
+      goal.preparationOnlyStreak = goal.lastPreparationMethodId === pending.method.id
+        ? (goal.preparationOnlyStreak ?? 0) + 1 : 1;
+      goal.lastPreparationMethodId = pending.method.id;
+    } else if (productive || measurableIntermediate || outcome.status !== 'progress') {
+      goal.preparationOnlyStreak = 0;
+      goal.lastPreparationMethodId = undefined;
+    }
     // A verified route leg/interface transition advances a method; it is not
     // a failed training trial and does not satisfy a quantitative goal.
     if (preparation) stats.preparationMs = (stats.preparationMs ?? 0) + outcome.elapsedMs;
@@ -321,15 +361,32 @@ export class Director {
       if (amount(outcome.facts,goal.target.fact)>amount(pending.before,goal.target.fact)) goal.lastObjectiveProgressAt=outcome.at;
       else goal.lastSupportProgressAt=outcome.at;
     }
+    let supportSatisfied=false;
+    const newlySatisfiedPrerequisite=(pending.method.prerequisites??[]).some(p=>met(outcome.facts,p)&&!met(pending.before,p));
     for (const support of goal.supportGoals ?? []) {
       if (met(outcome.facts, support.target) && outcome.status !== 'rejected' && outcome.status !== 'interrupted') {
+        supportSatisfied = supportSatisfied || support.status !== 'satisfied';
         support.status = 'satisfied'; support.evidence = [...outcome.evidence];
       }
+    }
+    // Reaching a prerequisite is causal progress, even though the parent
+    // outcome is not complete yet. Start the preparation watchdog again for
+    // the next dependency rather than counting the old support chain.
+    if (supportSatisfied || newlySatisfiedPrerequisite) {
+      goal.preparationOnlyStreak = 0;
+      goal.lastPreparationMethodId = undefined;
     }
     goal.attempts++; goal.noProgress = productive || outcome.status === 'progress'&&!outcome.observationOnly ? 0 : goal.noProgress + 1;
     goal.spentGp += outcome.spentGp; goal.lostGp += outcome.lostGp; goal.deaths += outcome.deaths; goal.elapsedMs += outcome.elapsedMs;
     this.memory.sequence = outcome.sequence;
     delete this.memory.pending;
+    if ((goal.preparationOnlyStreak ?? 0) >= 3 && !met(outcome.facts, goal.target)
+      && !supportSatisfied && !newlySatisfiedPrerequisite) {
+      goal.blocker={at:outcome.at,
+        reason:'The same strategic method repeated preparation without measurable target progress; replan its causal chain instead of repeating the setup.',
+        recheckAt:outcome.at+30_000,attempts:0};
+      delete goal.plan;goal.planContext=undefined;
+    }
     if (goal.spentGp > goal.budget.spendableGp || goal.lostGp > goal.budget.maxLossGp || goal.deaths > goal.budget.maxDeaths
       || goal.elapsedMs > goal.budget.maxDurationMs) {
       this.review(outcome.at, 'failure', 'Observed cost or risk exceeded the experiment budget.', outcome.evidence);

@@ -47,6 +47,7 @@ const pickupAvailable = (e: Entity) => !!option(e, /^(take|pick-up|pick up)$/)
   || (e.options.length === 0 && e.reachable === true);
 const bankOption = (e: Entity) => option(e, e.kind === "object" && normalize(e.name) === "bank booth"
   ? /^(bank|use-bank|use bank|use-quickly)$/ : /^(bank|use-bank|use bank)$/);
+const transitionOption = (e: Entity) => option(e, /^(open|climb(?:-up|-down)?|enter|cross|use)$/);
 
 // Conservative policy ceilings, NOT deployed-server measurements. Exact low-level variants only.
 // Modern public guides are dated hints; the main supervisor/profile must validate compatibility.
@@ -239,6 +240,8 @@ export class LivePolicy {
           if (!task.route) return block(task.id, 'NO_SOURCED_ROUTE', 'No personal observation or documented lead supports this route.');
           return this.finish(o, {goal:task.id,reason:task.route.evidence,
             destination:{x:task.route.x,z:task.route.z,plane:task.route.level}});
+        case 'discovery':
+          return this.localDiscovery(o, task.id);
         default: return block(task.id, 'UNSUPPORTED_TASK_EXECUTOR', 'This controller does not implement the selected capability.');
       }
     }
@@ -467,6 +470,23 @@ export class LivePolicy {
     return { goal, reason: `Use the currently observed ${e.name} and its published option/item reference.`, intent };
   }
 
+  /**
+   * Generic local recovery. It deliberately knows nothing about gates,
+   * ladders, towns, coordinates or item identities: the current observation
+   * supplies the candidate and its menu option. A verified result is recorded
+   * by the caller as reusable world knowledge.
+   */
+  private localDiscovery(o: Observation, goal: string): LiveDecision {
+    const candidate=o.entities
+      .filter(e=>e.kind==='object'&&e.reachable===true&&!!transitionOption(e))
+      .sort((a,b)=>distance(o.position!,a.position)-distance(o.position!,b.position)
+        ||a.content_id-b.content_id||(a.index??-1)-(b.index??-1)||a.ref.localeCompare(b.ref))[0];
+    if(!candidate)return block(goal,'NO_LOCAL_RECOVERY_EXPERIMENT',
+      'No nearby reachable transition with a published safe interaction option is observed.');
+    const selected=transitionOption(candidate)!;
+    return this.entityAction(o,candidate,goal,{operation:'interact',entity_ref:candidate.ref,option_index:selected.index});
+  }
+
   private tutorial(o: Observation): LiveDecision | undefined {
     const guide = this.nearest(o, e => e.kind === "npc" && normalize(e.name) === "runescape guide" && !!option(e, /^talk(?:-to| to)?$/));
     const p = o.position!, text = normalize(o.dialog.text);
@@ -560,16 +580,13 @@ export class LivePolicy {
   }
 
   public replanAfterBlock(o: Observation, blocked: string): LiveDecision {
-    // A blocked prerequisite is a reason to choose a different supported
-    // activity, not a terminal session state. Clear only transient watches;
-    // durable learning remains in the policy checkpoint.
+    // A blocked prerequisite is a reason to run a bounded, observation-driven
+    // experiment or reselect through the Director, not to jump to a fixed map
+    // fallback. Durable learning remains in the policy checkpoint.
     this.state.watch = null;
-    if (/MISSING_TOOL_ROUTE|MISSING_TOOL_OR_SUPPLY_ROUTE|PUBLIC_LEAD_NOT_CONFIRMED|REPEATED_NO_EFFECT|ROUTE_OSCILLATION|TRAINING_LEADS_EXHAUSTED/.test(blocked)) {
-      const local = this.training(o);
-      if (!local.blocked) return local;
-      return this.trainingLead(o);
-    }
-    return this.next(o);
+    const local = this.localDiscovery(o, `recover:${blocked}`);
+    return local.blocked ? block('replan', 'NO_LOCAL_RECOVERY_EXPERIMENT',
+      `${blocked}: no safe, reachable transition is currently observed; preserve the goal and wait for a new observation or Director replanning.`) : local;
   }
 
   private supplyOrTrain(o: Observation): LiveDecision {

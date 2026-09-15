@@ -157,7 +157,7 @@ export async function main(context:StartupContext){
     if(mode==='run'||mode==='reconcile') {
       const settings=join(data,'agency-policy.json');
       agency=new LiveAgency(join(data,'agency-v2.json'),{agent:latest.character,world:latest.world,revision:profile.profile_id},{
-        supported:['food','bank','equipment','combat','exploration'],preferences:{exploration:2,combat:1},
+        supported:['food','bank','equipment','combat','exploration','discovery'],preferences:{exploration:2,combat:1},
         policy:existsSync(settings)?readRequiredJson(settings,'AGENCY_POLICY_MISSING','AGENCY_POLICY_INVALID'):{},
         routes:[{id:'documented-draynor-approach',x:3088,z:3226,level:0,evidence:'documented lead; still requires collision-safe travel and own arrival'},
           {id:'documented-goblin-area',x:3252,z:3230,level:0,evidence:'documented lead; no encounter claimed before observation'},

@@ -11,7 +11,7 @@ import { randomUUID } from 'node:crypto';
 import { emptyTrips, preparation, observeTrip, recordTripEffect, type TripLearning, type TripPreparation } from './trip-logistics.ts';
 import { Director, createMemory } from './director.ts';
 import type { Decision, Identity, Memory, Method, Observation, Outcome } from './types.ts';
-import { buildCatalogue, capabilityContext, cash, defaultPolicy, emptyKnowledge, observeFacts, observeKnowledge,
+import { buildCatalogue, capabilityContext, cash, defaultPolicy, emptyKnowledge, observeFacts, observeKnowledge, discoveryFact,
   type Catalogue, type Knowledge, type LiveState, type Policy, type Route, type Task, type TaskKind } from './world-model.ts';
 
 export type LiveCandidate = { itemRefs?:ItemRef[]; id: string; type: string; fields?: Record<string, any>; waitTicks?: number };
@@ -59,6 +59,8 @@ export class LiveAgency {
       if(saved.version!==2)throw new Error('LEGACY_AGENCY_MEMORY_REQUIRES_RECONCILIATION_AND_MIGRATION');
       this.document=saved;
     } else this.document={version:2,memory:createMemory(identity,options.preferences),knowledge:emptyKnowledge(),lastCommands:[]};
+    this.document.knowledge.discovered??={};
+    this.document.knowledge.interactions??={};
     const memory=this.document.memory;
     if(memory.agent!==identity.agent||memory.world!==identity.world||memory.revision!==identity.revision)throw new Error('AGENCY_IDENTITY_MISMATCH');
     if (!!memory.pending!==!!this.document.receipt || (memory.pending && memory.pending.commandId!==this.document.receipt?.commandId))
@@ -100,7 +102,7 @@ export class LiveAgency {
       this.document.acquisition??=emptyAcquisition();
       observeAcquisitionSources(this.document.acquisition,state,this.clock());
       const need=this.document.acquisition.need,goal=this.director.memory.active;
-      if(need&&goal?.key===need.parentKey&&!this.document.receipt&&!this.document.safetyReceipt
+      if(need&&!need.optional&&goal?.key===need.parentKey&&!this.document.receipt&&!this.document.safetyReceipt
         && itemCount(state.inventory,need)<need.minimum && (!goal.requestedSupport||catalogue.view.facts[goal.requestedSupport.target.fact]!>=goal.requestedSupport.target.minimum))
         this.director.requestSupport({fact:itemFact(need),minimum:need.minimum},need.reason,[`own-missing-item:${need.at}`]);
       addAcquisition(catalogue,state,this.document.knowledge.bank,this.document.acquisition,this.director.memory,
@@ -273,7 +275,19 @@ export class LiveAgency {
     const receipt=safety?this.document.safetyReceipt:this.document.receipt;
     if(!receipt && this.document.lastCommands.includes(commandId))return;
     if(!receipt||receipt.commandId!==commandId)throw new Error('OUTCOME_WITHOUT_MATCHING_INTENT');
-    if(verification.status==='verified') {this.document.acquisition??=emptyAcquisition();rememberAcquisitionSources(this.document.acquisition,receipt.before,after,receipt.action,this.clock());}
+    if(verification.status==='verified') {
+      this.document.acquisition??=emptyAcquisition();rememberAcquisitionSources(this.document.acquisition,receipt.before,after,receipt.action,this.clock());
+      if(receipt.action.type==='interactLoc') {
+        const loc=(receipt.before.nearbyLocs??[]).find((l:any)=>l.id===receipt.action.fields?.locId&&l.x===receipt.action.fields?.x&&l.z===receipt.action.fields?.z);
+        const option=(loc?.optionsWithIndex??[]).find((o:any)=>o.opIndex===receipt.action.fields?.optionIndex);
+        if(loc&&option&&/^(open|climb(?:-up|-down)?|enter|cross|use)$/i.test(String(option.text))) {
+          const fact=discoveryFact(loc,Number(option.opIndex));
+          this.document.knowledge.discovered[fact]=`own-interaction:${receipt.before.player?.lifeId}:${receipt.before.tick}->${after.tick}`;
+          const key=`${Number(loc.id)}:${Number(loc.x)}:${Number(loc.z)}:${Number(loc.level??receipt.before.player?.level??0)}:${Number(option.opIndex)}`;
+          this.document.knowledge.interactions[key]={name:String(loc.name),id:Number(loc.id),x:Number(loc.x),z:Number(loc.z),level:Number(loc.level??receipt.before.player?.level??0),option:String(option.text),at:this.clock(),evidence:`own-interaction:${receipt.before.tick}->${after.tick}`};
+        }
+      }
+    }
     if(verification.status==='interrupted')this.document.interruptions=[...(this.document.interruptions??[]),{at:this.clock(),receipt:structuredClone(receipt),reason:verification.reason??'interrupted'}].slice(-16);
     this.document.trips??=emptyTrips();
     recordTripEffect(this.document.trips,commandId,receipt.before,after,receipt.action,verification.status==='verified');
@@ -307,7 +321,8 @@ export class LiveAgency {
       const productive=Object.keys(pending.method.effects).some(k=>(state.facts[k]??0)>(pending.before[k]??0));
       const status:Outcome['status']=verification.status==='verified'&&!productive?'progress':verification.status;
       this.director.record({commandId,sequence:this.director.memory.sequence+1,status,at:state.at,facts:state.facts,
-        ...deltas,evidence:verification.evidence,observationOnly:['wait','scanNearbyLocs'].includes(receipt.action.type)});
+        ...deltas,evidence:verification.evidence,actionType:receipt.action.type,
+        observationOnly:['wait','scanNearbyLocs'].includes(receipt.action.type)});
       if(!this.director.memory.pending)delete this.document.receipt;
     }
     if(!this.document.receipt || this.document.receipt.commandId!==commandId)
@@ -323,8 +338,22 @@ export class LiveAgency {
   }
   summary() {
     const brief=(r:Receipt|undefined)=>r?{commandId:r.commandId,action:r.action,startedAt:r.startedAt}:undefined;
+    const observation=this.document.lastObservation;
+    const verifiedAt=this.document.lastOutcome?.status==='verified'?this.document.lastOutcome.at:null;
+    const objectiveAt=this.director.memory.active?.lastObjectiveProgressAt??null;
+    const supportAt=this.director.memory.active?.lastSupportProgressAt??null;
+    const measurableAt=Math.max(objectiveAt??0,supportAt??0)||null;
+    const ageMs=observation?.at===undefined?null:Math.max(0,this.clock()-observation.at);
+    const stage=measurableAt!==null&&(!verifiedAt||measurableAt>=verifiedAt)?'measurable-progress'
+      :verifiedAt!==null?'verified'
+      :this.document.receipt||this.document.safetyReceipt?'executing'
+      :observation?.connected===true&&ageMs!==null&&ageMs<=120_000?'observing':'alive';
     return {source:'agency-v2.json',acquisition:this.document.acquisition,routeFailures:this.document.knowledge.routeFailures,preparation:this.document.preparation,updatedAt:this.document.updatedAt,buildReadiness:this.document.buildReadiness,development:this.document.development,
       lastObservation:this.document.lastObservation,lastOutcome:this.document.lastOutcome,losses:(this.document.losses??[]).slice(-8),
+      progressHealth:{stage,connected:observation?.connected===true,ageMs,lastObservationAt:observation?.at??null,
+        lastVerifiedOutcomeAt:verifiedAt,lastObjectiveProgressAt:objectiveAt,lastSupportProgressAt:supportAt,
+        noProgressAttempts:this.director.memory.active?.noProgress??0,
+        preparationOnlyStreak:this.director.memory.active?.preparationOnlyStreak??0},
       goal:this.director.memory.active,pending:brief(this.pending()),safetyPending:brief(this.pending('safety')),blocked:this.document.blocked};
   }
 }

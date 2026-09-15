@@ -34,6 +34,12 @@ test('unsupported task does not silently fall back to the old training policy',(
 test('a selected supply task cannot default to a monster when its supply is already satisfied',()=>{
   const d=new LivePolicy().next(observed(),{id:'food',kind:'food'});expect(d.wait).toBe(true);expect(d.intent).toBeUndefined();
 });
+test('discovery uses only a currently observed reachable transition option',()=>{
+  const o=observed();o.entities.push({kind:'object',ref:'object-44',index:44,content_id:901,name:'Unnamed object',position:{x:3232,z:3230,plane:0},reachable:true,
+    options:[{index:7,text:'Open'}]});
+  const d=new LivePolicy().next(o,{id:'discover-local',kind:'discovery'});
+  expect(d.blocked).toBeUndefined();expect(d.intent).toEqual({operation:'interact',entity_ref:'object-44',option_index:7});
+});
 
 test('Astra partial movement completes the action observation without losing its exploration task',()=>{
   const before=observed(),policy=new LivePolicy(),task={id:'survey:site',kind:'exploration' as const,route:{id:'site',x:3240,z:3240,level:0,evidence:'own observed site'}};

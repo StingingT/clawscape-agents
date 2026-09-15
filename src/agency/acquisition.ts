@@ -9,7 +9,7 @@ export type AcquisitionSource={key:string;kind:'bank'|'shop'|'ground'|'gather'|'
   position?:{x:number;z:number;level:number};entityId?:number;entityName?:string;at?:number;
   evidence:string;confidence:'observed'|'remembered'|'unverified';cost?:number};
 export type AcquisitionHint=AcquisitionSource;
-export type NeededItem=ItemNeed & {parentKey:string;reason:string;at:number};
+export type NeededItem=ItemNeed & {parentKey:string;reason:string;at:number;optional?:boolean};
 export type AcquisitionMemory={need?:NeededItem;shops:AcquisitionSource[];sightings:AcquisitionSource[];
   incidental?:{lastAt?:number;cooldowns:Record<string,number>;ids:Record<string,number>};
   lastResolution?:{at:number;item:ItemNeed;evidence:string};leads?:AcquisitionSource[];blocker?:string};
@@ -84,12 +84,22 @@ export function addAcquisition(c:Catalogue,state:LiveState,bank:any[],m:Acquisit
     if(choice) {
       m.incidental.lastAt=now;m.incidental.cooldowns[choice.key]=now+120_000;
       if(choice.need.id!==undefined)m.incidental.ids[String(choice.need.id)]=now;
-      m.need={...choice.need,parentKey:memory.active.key,reason:choice.reason,at:now};
-      memory.active.requestedSupport={target:{fact:itemFact(choice.need),minimum:choice.need.minimum},reason:choice.reason,evidence:choice.evidence};
+      // An incidental opportunity is never a prerequisite for the parent goal.
+      // It may be collected when deliberately selected, but failure to obtain it
+      // must not make navigation, combat or production infeasible.
+      m.need={...choice.need,parentKey:memory.active.key,reason:choice.reason,at:now,optional:true};
     }
   }
   const need=m.need;if(!need||need.parentKey!==memory.active?.key){delete m.need;return;}
   c.view.facts[itemFact(need)]=itemCount(state.inventory,need);
+  // Incidental choices are informational side opportunities only. They never
+  // enter source search or prerequisite planning for the active objective.
+  if(need.optional) {
+    if(c.view.facts[itemFact(need)]!>=need.minimum) {
+      m.lastResolution={at:now,item:need,evidence:`fresh-carried-incidental:${state.tick}`};delete m.need;delete m.blocker;
+    }
+    return;
+  }
   if(c.view.facts[itemFact(need)]!>=need.minimum){m.lastResolution={at:now,item:need,evidence:`fresh-carried-items:${state.tick}`};delete m.need;delete m.blocker;return;}
   const sources=acquisitionSources(state,bank,m,need,drops,hints,now);m.leads=sources;
   m.blocker=sources.length?undefined:'No supported source located yet; retain the item requirement and research/discover a source. No item or route is invented.';

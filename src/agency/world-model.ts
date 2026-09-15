@@ -7,7 +7,7 @@ import { preparation, emptyTrips, type TripLearning } from './trip-logistics.ts'
 import type { Domain, Facts, Identity, Memory, Method, Observation, Opportunity } from './types.ts';
 
 export type LiveState = Record<string, any>;
-export type TaskKind = 'food' | 'ammunition' | 'equipment' | 'bank' | 'combat' | 'production' | 'gathering' | 'exploration' | 'funds' | 'prayer' | 'acquisition';
+export type TaskKind = 'food' | 'ammunition' | 'equipment' | 'bank' | 'combat' | 'production' | 'gathering' | 'exploration' | 'discovery' | 'funds' | 'prayer' | 'acquisition';
 export type Route = { id: string; x: number; z: number; level: number; evidence: string };
 export type Task = { acquisition?:{need:NeededItem;source:AcquisitionSource}; foodTarget?:number; id: string; kind: TaskKind; skill?: string; guideLeadIds?: string[]; route?: Route; target?: { fact: string; minimum: number } };
 export type Policy = {
@@ -22,8 +22,11 @@ export const defaultPolicy: Policy = {
 };
 export type Catalogue = { view: Observation; opportunities: Opportunity[]; methods: Method[]; tasks: Map<string, Task> };
 export type RouteFailure = {at:number;retryAt:number;attempts:number;context:string;learningRevision:number;reason:string};
-export type Knowledge = { routeFailures?:Record<string,RouteFailure>; bank: any[]; bankCheckedAt: number; routes: Record<string, Route>; visited: Record<string, string> };
-export const emptyKnowledge = (): Knowledge => ({ bank: [], bankCheckedAt: 0, routes: {}, visited: {} });
+export type Knowledge = { routeFailures?:Record<string,RouteFailure>; bank: any[]; bankCheckedAt: number; routes: Record<string, Route>; visited: Record<string, string>;
+  /** Local, verified environmental discoveries. These are learned facts, not seed routes. */
+  discovered: Record<string,string>;
+  interactions: Record<string,{name:string;id:number;x:number;z:number;level:number;option:string;at:number;evidence:string}> };
+export const emptyKnowledge = (): Knowledge => ({ bank: [], bankCheckedAt: 0, routes: {}, visited: {}, discovered: {}, interactions: {} });
 const quantity = (i: any) => { const n = Number(i.count ?? 1); return Number.isSafeInteger(n) && n >= 0 ? n : NaN; };
 const edible = (i: any) => (i.optionsWithIndex ?? []).some((o: any) => /^eat$/i.test(String(o.text)));
 export const cash = (items: any[]) => items.filter(i => Number(i.id) === 995 || /^coins$/i.test(String(i.name)))
@@ -36,6 +39,12 @@ const base = (state: LiveState, skill: string) => Number((state.skills ?? []).fi
   ?? (state.skills ?? []).find((s: any) => String(s.name).toLowerCase() === skill)?.level ?? 1);
 const at = (state: LiveState, route: Route) => Number(state.player?.level) === route.level &&
   Math.max(Math.abs(Number(state.player?.worldX) - route.x), Math.abs(Number(state.player?.worldZ) - route.z)) <= 1;
+export const discoveryFact = (loc:any, optionIndex:number) => `discovered:interaction:${Number(loc?.id)}:${Number(loc?.x)}:${Number(loc?.z)}:${Number(loc?.level??0)}:${optionIndex}`;
+const discoveryCandidate = (state:LiveState,k:Knowledge) => (state.nearbyLocs??[])
+  .filter((loc:any)=>loc?.reachable===true&&Number.isInteger(loc.id)&&Number.isInteger(loc.x)&&Number.isInteger(loc.z)
+    &&(loc.optionsWithIndex??[]).some((o:any)=>/^(open|climb(?:-up|-down)?|enter|cross|use)$/i.test(String(o.text)))
+    &&!(k.discovered??{})[discoveryFact(loc,(loc.optionsWithIndex??[]).find((o:any)=>/^(open|climb(?:-up|-down)?|enter|cross|use)$/i.test(String(o.text)))!.opIndex)])
+  .sort((a:any,b:any)=>Number(a.distance??0)-Number(b.distance??0)||a.x-b.x||a.z-b.z)[0];
 
 /** Actual personal state only. Duplicate unstackable inventory entries are summed. */
 export function observeFacts(state: LiveState, knowledge: Knowledge): Facts {
@@ -58,6 +67,7 @@ export function observeFacts(state: LiveState, knowledge: Knowledge): Facts {
   }
   for (const i of [...inv,...equipped,...bank]) facts['owned:' + i.id] = (facts['owned:' + i.id] ?? 0) + quantity(i);
   for (const [id] of Object.entries(knowledge.visited)) facts['visited:' + id] = 1;
+  for (const id of Object.keys(knowledge.discovered??{})) facts[id] = 1;
   return facts;
 }
 
@@ -158,7 +168,16 @@ export function buildCatalogue(identity: Identity, state: LiveState, k: Knowledg
     'Measure a complete gathering batch as an alternative to my previous activities.', 'collection', [{fact:'free-slots',minimum:1}]);
   for (const route of Object.values(k.routes).filter(r => meaningfulFrontierRoute(r) && r.level === Number(state.player?.level ?? 0) && !k.visited[r.id] && (!k.routeFailures?.[r.id] || k.routeFailures[r.id]!.retryAt<=now || k.routeFailures[r.id]!.context!==capabilityContext(state) || k.routeFailures[r.id]!.learningRevision<(memory.learningRevision??0))).slice(0,64))
     add({id:'survey:'+route.id,kind:'exploration',route},'exploration','visited:'+route.id,1,1,
-      'Visit a sourced lead and verify it personally; path assessment and arrival are required.', 'frontier');
+       'Visit a sourced lead and verify it personally; path assessment and arrival are required.', 'frontier');
+  if (supported.includes('discovery')) {
+    const loc=discoveryCandidate(state,k);
+    if(loc) {
+      const opt=(loc.optionsWithIndex??[]).find((o:any)=>/^(open|climb(?:-up|-down)?|enter|cross|use)$/i.test(String(o.text)))!;
+      const fact=discoveryFact(loc,opt.opIndex);
+      add({id:'discover:'+fact,kind:'discovery'},'exploration',fact,1,1,
+        'Test a nearby reachable transition or obstruction with a bounded safe interaction, then retain only the verified result.', 'frontier');
+    }
+  }
   const completed=memory.reviews.filter(r=>r.result==='success').slice(-5);
   if(completed.length===5 && !completed.some(r=>r.goal.domain==='exploration') && facts.food!>=policy.foodTarget) {
     // A bounded survey periodically competes with training. It still needs a

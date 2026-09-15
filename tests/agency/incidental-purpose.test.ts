@@ -17,3 +17,11 @@ test('a generic raw incidental resource beside observed heat can become a proces
   const c=buildCatalogue(identity,s,emptyKnowledge(),defaultPolicy,['production'],createMemory(identity),Date.now());
   assert.ok(c.opportunities.some(o=>o.id==='incidental-process'));
 });
+
+test('discovery is generated from a fresh local transition, never from a seeded coordinate',()=>{
+  const s:any=base();s.nearbyLocs=[{id:44,name:'Unnamed object',x:11,z:10,level:0,reachable:true,distance:1,
+    optionsWithIndex:[{opIndex:7,text:'Open'}]}];
+  const c=buildCatalogue(identity,s,emptyKnowledge(),defaultPolicy,['discovery'],createMemory(identity),Date.now());
+  assert.equal(c.opportunities.length,1);assert.match(c.opportunities[0]!.id,/discovered:interaction:44:11:10:0:7/);
+  assert.equal(c.tasks.get(c.opportunities[0]!.id)?.kind,'discovery');
+});

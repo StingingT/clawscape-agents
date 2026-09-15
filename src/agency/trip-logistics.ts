@@ -41,7 +41,11 @@ export function preparation(state:LiveState,kind:TaskKind|undefined,memory:TripL
   const cold=(isCombat||immediateDanger)?1:0;
   const use=history.length?Math.max(...history.map(s=>Math.max(s.foodUsed,Math.ceil(Math.max(0,s.damage-maxHp*.25)/healPerMeal)))):cold;
   const margin=adverse.length?Math.max(1,Math.ceil(Math.max(...adverse.map(s=>s.damage))/healPerMeal)):0;
-  const need=Math.max(use+margin,Math.ceil(missing/healPerMeal));
+  // Missing HP alone must not turn peaceful, unmeasured work into a large
+  // food prerequisite. Non-combat reserves come from comparable trip evidence;
+  // a cold-start reserve is only justified for combat or immediate danger.
+  const healthNeed=(isCombat||immediateDanger)?Math.ceil(missing/healPerMeal):0;
+  const need=Math.max(use+margin,healthNeed);
   const foodTarget=Math.min(Math.max(0,capacity-tools-1),need);
   return {activity,context:key,foodTarget,capacity,occupiedToolSlots:tools,
     cargoSlots:Math.max(0,capacity-tools-foodTarget),samples:history.length,provisional:history.length===0,

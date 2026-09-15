@@ -19,9 +19,21 @@ export function inspectAgency(root: string, now = Date.now()): unknown[] {
     const file = join(directory,'agency-v2.json'), current = read(file), recovery = read(join(directory,'legacy-recovery.json'));
     const known = current?.version === 2;
     const goal = known ? current.memory?.active : undefined;
+    const observation=known?current.lastObservation:undefined;
+    const verifiedAt=known&&current.lastOutcome?.status==='verified'?current.lastOutcome.at:null;
+    const objectiveAt=goal?.lastObjectiveProgressAt??null,supportAt=goal?.lastSupportProgressAt??null;
+    const measurableAt=Math.max(objectiveAt??0,supportAt??0)||null;
+    const ageMs=observation?.at===undefined?null:Math.max(0,now-observation.at);
+    const progressHealth=known?{stage:measurableAt!==null&&(!verifiedAt||measurableAt>=verifiedAt)?'measurable-progress'
+        :verifiedAt!==null?'verified':current.receipt||current.safetyReceipt?'executing'
+        :observation?.connected===true&&ageMs!==null&&ageMs<=120_000?'observing':'alive',
+      connected:observation?.connected===true,ageMs,lastObservationAt:observation?.at??null,
+      lastVerifiedOutcomeAt:verifiedAt,lastObjectiveProgressAt:objectiveAt,lastSupportProgressAt:supportAt,
+      noProgressAttempts:goal?.noProgress??0,preparationOnlyStreak:goal?.preparationOnlyStreak??0}:undefined;
     return { agent, profile, source: file, process: supervisor?.agents?.[agent!]?.status ?? 'unknown',
       currentState: !current ? 'not-written' : known ? 'version-2' : 'unexpected-version',
       observationAgeSeconds: known && current.lastObservation?.at ? Math.max(0,Math.floor((now-current.lastObservation.at)/1000)) : null,
+      progressHealth,
       lastObservation: known ? current.lastObservation : undefined,
       strategy: known && current.development ? {id:current.development.id,name:current.development.name,reason:safe(current.development.reason),sourceUrls:current.development.sourceUrls,levelCaps:current.development.levelCaps,protectedXp:current.development.protectedXp,trainingLeadIds:current.development.trainingLeadIds,alternatives:current.development.alternatives,review:current.development.review} : undefined,
       preparation: known ? current.preparation : undefined,

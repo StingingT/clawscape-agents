@@ -59,7 +59,7 @@ export type Step = {
 };
 export type SupportGoal = {
   id: string; parentId: string; target: Requirement;
-  purpose: 'prerequisite' | 'investigate-blocker';
+  purpose: 'prerequisite' | 'investigate-blocker' | 'incidental';
   reason: string; status: 'pending' | 'active' | 'satisfied';
   evidence: string[];
 };
@@ -76,6 +76,9 @@ export type Goal = Opportunity & {
   elapsedMs: number;
   attempts: number;
   noProgress: number;
+  /** Consecutive non-exploration preparation steps without target progress. */
+  preparationOnlyStreak?: number;
+  lastPreparationMethodId?: string;
   strategyId?: string;
   workingReserveGp?: number;
   plan?: Plan;
@@ -85,7 +88,7 @@ export type Goal = Opportunity & {
   supportGoals?: SupportGoal[];
   investigation?: Opportunity;
   requestedSupport?: { target: Requirement; reason: string; evidence: string[] };
-  blocker?: { at: number; reason: string; recheckAt: number };
+  blocker?: { at: number; reason: string; recheckAt: number; attempts?: number };
   fundingGrants?: Array<{ at: number; ceilingGp: number; evidence: string[] }>;
 };
 export type MethodStats = {
@@ -149,5 +152,7 @@ export type Outcome = {
   deaths: number;
   elapsedMs: number;
   evidence: string[];
+  /** Low-level action category used only to distinguish preparation from production. */
+  actionType?: string;
   observationOnly?: boolean;
 };
