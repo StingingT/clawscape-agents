@@ -15,6 +15,11 @@ test('worse or duplicate equipment can still be carried for storage when capacit
   const c=chooseIncidentalGroundItem(s,100,{});assert.equal(c?.need.id,201);assert.ok(c!.score>=3);
 });
 
+test('an already owned reusable tool is not multiplied by incidental collection',()=>{
+  const s=state();s.inventory[0]={id:946,name:'Knife',slot:0,count:1};s.groundItems=[{id:946,name:'Knife',count:1,x:10,z:11,reachable:true}];
+  assert.equal(chooseIncidentalGroundItem(s,100,{}),undefined);
+});
+
 test('incidental collection yields to inventory efficiency and cooldowns',()=>{
   const s=state();s.inventory=Array.from({length:25},(_,slot)=>({id:1000+slot,name:'held '+slot,slot,count:1}));
   s.groundItems=[{id:202,name:'Interesting item',count:1,x:1,z:1,reachable:true}];assert.equal(chooseIncidentalGroundItem(s,100,{}),undefined);

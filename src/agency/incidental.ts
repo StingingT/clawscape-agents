@@ -7,6 +7,7 @@ export type IncidentalChoice={need:ItemNeed;key:string;score:number;reason:strin
 const finiteCount=(v:unknown)=>Number.isSafeInteger(Number(v))&&Number(v)>0?Number(v):1;
 const norm=(v:unknown)=>String(v??'').trim().toLowerCase().replace(/\s+/g,' ');
 const equipmentLike=(name:string)=>/\b(helmet|helm|platebody|platelegs|plateskirt|chainbody|shield|sword|scimitar|longsword|battleaxe|warhammer|mace|dagger|bow|staff|robe|boots|gloves|gauntlets|amulet|ring|cape)\b/i.test(name);
+const reusableToolLike=(name:string)=>/\b(knife|axe|hatchet|pickaxe|hammer|chisel|tinderbox|spade|shears|needle|mould|net|fishing rod|fly fishing rod|harpoon|lobster pot)\b/i.test(name);
 
 /**
  * Value a side opportunity without naming particular drops or creatures.
@@ -26,6 +27,10 @@ export function chooseIncidentalGroundItem(state:IncidentalState,now:number,cool
     if(row.reachable!==true||!Number.isInteger(id)||id<0||!name||!Number.isInteger(x)||!Number.isInteger(z))return [];
     const key=`ground:${id}:${x}:${z}`;if((cooldowns[key]??0)>now)return [];
     const stack=finiteCount(row.count),already=ownedIds.has(id),current=itemCount(inventory,{id,name,minimum:1});
+    // Reusable tools normally provide their utility once. Do not turn another copy
+    // of an already-carried/equipped tool into an incidental support requirement.
+    // Equipment remains eligible because spare pieces can still have storage/value.
+    if(already&&reusableToolLike(norm(name))&&!equipmentLike(norm(name)))return [];
     let score=0;
     if(!already)score+=4;                         // collection/future-use information
     if(equipmentLike(norm(name)))score+=3;        // equipment can be stored even when not an upgrade

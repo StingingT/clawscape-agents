@@ -73,7 +73,10 @@ const skillMark=(skills:any[])=>skills.map(s=>[s.name,s.experience??s.xp,s.baseL
 export function observeQuietStep(action: StepAction, before: LiveState, after: LiveState, now: number,
   observer: string, previous?: QuietWindow): { window?: QuietWindow; settled: boolean; reason: string } {
   const no = (reason: string) => ({ settled: false, reason });
-  const transient = ['walkTo', 'retreat', 'closeModal', 'closeShop', 'setCombatStyle'].includes(action.type);
+  // A pickup has no irreversible transaction/choice semantics. If its requested item
+  // was never attributable, retire the stale receipt after fresh quiescence instead
+  // of freezing the controller. A future pickup must be selected from fresh ground state.
+  const transient = ['walkTo', 'retreat', 'closeModal', 'closeShop', 'setCombatStyle', 'pickupItem'].includes(action.type);
   const invalidRecipe = obsoleteEmptyRecipe(action, before, after);
   const repeatable = repeatableActivity(action, before) || invalidRecipe;
   if (!transient && !repeatable)
@@ -110,6 +113,8 @@ export function observeQuietStep(action: StepAction, before: LiveState, after: L
     ? 'Invalid historical tool/empty-slot context interrupted after fresh quiescence. Original effects remain unknown; no reward or non-execution inferred and no stale packet may be replayed.'
     : repeatable
     ? 'Repeatable activity interrupted: it is now idle after a continuous quiet window; historical effects are unknown, no success or non-execution is inferred, and any new action needs fresh validation.'
+    : action.type==='pickupItem'
+    ? 'Unattributed pickup interrupted after a continuous quiet window; no success is inferred and any future pickup requires a fresh visible ground item.'
     : 'Transient step interrupted after a continuous quiet window; no success or replay inferred.';
   return { window, settled,
     reason: settled ? completedReason : 'Observing a 30-second quiet window before retiring this transient step.' };

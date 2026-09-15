@@ -16,6 +16,7 @@ import { reconcileAstraJournals } from './restart-journals.ts';
 import { acquireController } from '../../../src/controller-lease.ts';
 import { runWithStartupStatus, readRequiredJson, checkedUpstream, type StartupContext } from './startup.ts';
 import { agencyState, agencyCandidate, arbiterVerification, observedVerification, urgentDecision } from './agency-bridge.ts';
+import { recoverableExecutorBlock } from './replanning.ts';
 
 const codeRoot=resolve(import.meta.dir,'..');
 const argv=process.argv.slice(2),mode=argv[0]??'status';
@@ -262,7 +263,13 @@ export async function main(context:StartupContext){
         // requirement, not a reason to disconnect the whole controller.
         if(['TARGET_NOT_OBSERVED','STALE_OBSERVATION','UNRESOLVED_THREAT'].includes(decision.blocked) && Date.now()-lastProgress<60_000){await sleep(700);continue;}
         if(agency){
-          if(!agency.pending()&&!agency.pending('safety'))agency.blocked(decision.blocked);
+          if(!agency.pending()&&!agency.pending('safety')) {
+            if(recoverableExecutorBlock(decision.blocked)) {
+              agency.deferCurrent(agencyState(latest),decision.blocked);
+              publish('REPLANNING',decision.blocked);await sleep(700);continue;
+            }
+            agency.blocked(decision.blocked);
+          }
           publish('BLOCKED',decision.blocked);await sleep(700);continue;
         }
         publish('BLOCKED',decision.blocked);reason=decision.blocked;break;
