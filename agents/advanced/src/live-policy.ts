@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { Task } from "../../../src/agency/world-model.ts";
-import { Observation, Tile, Intent } from "./contracts.ts";
+import { Observation, Tile, Intent, type ActionResult } from "./contracts.ts";
 
 export type LiveDecision = {
   goal: string; reason: string; intent?: Intent; destination?: Tile; wait?: boolean; blocked?: string;
@@ -266,6 +266,22 @@ export class LivePolicy {
     return this.finish(o, training);
   }
 
+  /** Clear only the duplicate policy checkpoint of an exact reconciled command.
+   * The caller must have settled the arbiter journal first. No historical effect,
+   * XP, reward, or success is inferred from current quiescence. */
+  retireReconciledOutcome(before:Observation, intent:Intent, result:ActionResult):boolean {
+    const pending=this.state.uncertain;
+    if(!pending||result.status!=='CANCELLED'||!result.evidence.length
+      ||!['RECONCILED_TRANSIENT_INTERRUPTED','RECONCILED_DIALOGUE_CONTEXT_EXPIRED'].includes(result.reason)
+      ||identity(before)!==identity(pending.before)||before.seq!==pending.before.seq
+      ||JSON.stringify(intent)!==JSON.stringify(pending.decision.intent))return false;
+    this.state.resolved=[...this.state.resolved,this.outcomeKey(pending.before,pending.decision)].slice(-128);
+    const key=this.key(pending.before,pending.decision);
+    this.state.stalls[key]=Math.min(3,(this.state.stalls[key]??0)+1);
+    this.state.uncertain=null;
+    return true;
+  }
+
   recordOutcome(before: Observation, after: Observation, decision: LiveDecision, status: string): void {
     if (decision.blocked) return;
     const actionKey = this.outcomeKey(before, decision);
@@ -478,7 +494,9 @@ export class LivePolicy {
    */
   private localDiscovery(o: Observation, goal: string): LiveDecision {
     const candidate=o.entities
-      .filter(e=>e.kind==='object'&&e.reachable===true&&!!transitionOption(e))
+      .filter(e=>e.kind==='object'&&e.reachable===true&&!!transitionOption(e)
+        &&(!goal.startsWith('discover:discovered:interaction:')
+          ||goal===`discover:discovered:interaction:${e.content_id}:${e.position.x}:${e.position.z}:${e.position.plane}:${transitionOption(e)!.index}`))
       .sort((a,b)=>distance(o.position!,a.position)-distance(o.position!,b.position)
         ||a.content_id-b.content_id||(a.index??-1)-(b.index??-1)||a.ref.localeCompare(b.ref))[0];
     if(!candidate)return block(goal,'NO_LOCAL_RECOVERY_EXPERIMENT',

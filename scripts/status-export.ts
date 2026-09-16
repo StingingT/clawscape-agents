@@ -6,6 +6,7 @@ import {dirname,resolve,relative,join,isAbsolute,sep} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
 import {inspectAgency} from './agency-status.ts';
+import {progressHealth} from '../src/agency/progress.ts';
 const profiles=[['clawscout','online'],['stinger','stinger'],['coincrafter','coincrafter'],['featherer','featherer'],['astra','advanced']] as const;
 const sensitive=/token|password|secret|authorization|api[_-]?key|cookie|private[_-]?key|credential/i;
 /** Redact before truncation; nested JSON strings are never decoded/executed. */
@@ -29,7 +30,7 @@ function json(root:string,path:string,warnings:string[]):any {
   catch{warnings.push(relative(root,path)+': missing, incomplete, oversized or unreadable');return undefined;}
 }
 const pick=(v:any,keys:string[])=>v&&Object.fromEntries(keys.filter(k=>v[k]!==undefined).map(k=>[k,v[k]]));
-function pending(r:any){return r&&{...pick(r,['commandId','startedAt','scope','methodId']),action:pick(r.action,['id','type','itemRefs','fields']),execution:r.execution,
+function pending(r:any){return r&&{...pick(r,['commandId','startedAt','scope','methodId','investigation']),action:pick(r.action,['id','type','itemRefs','fields']),execution:r.execution,
   referencedBeforeItems:Array.isArray(r.before?.inventory)?r.before.inventory.filter((i:any)=>[r.action?.fields?.slot,r.action?.fields?.sourceSlot,r.action?.fields?.itemSlot,r.action?.fields?.targetSlot].includes(i.slot)).map((i:any)=>pick(i,['slot','id','name','count'])):undefined};}
 function logTail(root:string,file:string):any {
   // Read bounded tail bytes, never an entire log or paths supplied in its contents.
@@ -68,7 +69,8 @@ export function collectReport(root:string,now=Date.now()):any {
       const files=readdirSync(folder).filter(n=>new RegExp('^'+name+'-\\d+\\.'+ext+'$').test(n)).sort((a,b)=>Number(b.split('-')[1]?.split('.')[0])-Number(a.split('-')[1]?.split('.')[0]));
       return files[0]?[logTail(root,join(folder,files[0]))]:[];
     });}catch{warnings.push(name+': recent logs unavailable');}
-    return {agent:name,summary:selected,supervisor:pick(supervisor?.agents?.[name],['status','pid','started','reason','exitCode','retryAt']),status,
+    return {agent:name,summary:selected,supervisor:pick(supervisor?.agents?.[name],['status','pid','started','reason','exitCode','retryAt','progressHealth']),status,
+      progressHealth:doc?.version===2?progressHealth(doc.memory??{},now):undefined,
       observationAgeSeconds:Number.isFinite(stamp)?Math.max(0,Math.floor((now-stamp)/1000)):null,
       latestObservation:pick(doc?.lastObservation,['at','tick','connected','position']),
       astraObservation:pick(latest?.observation,['tick','connected','position','hp','maxHp']),

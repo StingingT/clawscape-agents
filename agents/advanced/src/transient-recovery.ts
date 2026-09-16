@@ -14,7 +14,7 @@ export function settleAstraTransient(store:Store,command:ActionCommand,result:Ac
   if(!['RECONCILING','RUNNING'].includes(control.mode)||control.disabled||control.expires<=now)
     return no('A live sole-controller lease is required for transient reconciliation.');
   if(control.mode==='RUNNING'&&control.lease!==command.lease)return no('Command belongs to another controller lease.');
-  if(!['move','close_interface','style','dialogue'].includes(command.intent.operation))return no('Operation requires attributable terminal evidence.');
+  if(!['move','close_interface','style','dialogue','interact','pickup','use_on_item','use_on_object'].includes(command.intent.operation))return no('Operation requires attributable terminal evidence.');
   if(command.action_id!==result.action_id||command.character!==after.character||command.world!==after.world
     ||command.profile_id!==after.profile_id||after.seq<=before.seq||after.fresh_at===null
     ||after.fresh_at>now||now-after.fresh_at>10_000)return no('Fresh matching own observations required.');
@@ -27,9 +27,11 @@ export function settleAstraTransient(store:Store,command:ActionCommand,result:Ac
   // closed-interface state for a full quiet window, retire only the obsolete click
   // context. Any future dialogue must be reopened and revalidated from a fresh snapshot.
   if(dialogue && before.dialog.open!==true)return no('Original dialogue context was not observed open; terminal evidence is still required.');
-  const action=dialogue
+  let action;
+  try { action=dialogue
     ? {type:'closeModal',fields:{}}
     : agencyCandidate(before,{goal:command.plan_id,reason:'Observe existing transient intent',intent:command.intent});
+  } catch { return no('Original observed interaction target is unavailable; retain the exact journal for attribution.'); }
   const quiet=observeQuietStep(action,agencyState(before),agencyState(after),now,saved.observer,saved.window);
   saved.window=quiet.window;states.set(command.action_id,saved);
   if(!quiet.settled)return {settling:!!quiet.window,reason:quiet.reason};

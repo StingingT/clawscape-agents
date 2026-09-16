@@ -1,6 +1,7 @@
 import {mkdirSync,appendFileSync,writeFileSync,readFileSync,existsSync} from 'node:fs';
 import {resolve} from 'node:path';
 import {acquireController} from '../src/controller-lease';
+import {inspectProgress} from './agency-status.ts';
 const root=resolve(import.meta.dir,'..'), logs=resolve(root,'data/supervisor');
 mkdirSync(logs,{recursive:true});
 const release=acquireController(resolve(logs,'supervisor.lock'));
@@ -15,10 +16,17 @@ let stopping=false;
 const children=new Map<string,ReturnType<typeof Bun.spawn>>();
 const states:Record<string,any>={};
 function publish(event:string,name?:string,detail?:any){
+ // Read-only health: a live process and verified clicks are not productive
+ // progress. Never kill/restart an uncertain transaction to escape a stall.
+ for(const job of jobs)if(states[job.name])try {
+   const i=job.args.indexOf('--profile');
+   const file=i>=0?resolve(job.cwd,'data',job.args[i+1]!,'agency-v2.json'):resolve(job.cwd,'data/astra-live/agency-v2.json');
+   states[job.name].progressHealth=inspectProgress(file);
+ }catch{states[job.name].progressHealth={status:'unavailable'};}
  appendFileSync(resolve(logs,'events.jsonl'),JSON.stringify({time:new Date().toISOString(),event,name,detail})+'\n');
  writeFileSync(resolve(logs,'status.json'),JSON.stringify({time:new Date().toISOString(),pid:process.pid,agents:states},null,2));
 }
-const timer=setInterval(()=>publish('hourly-health-check'),3600000);
+const timer=setInterval(()=>publish('productive-health-check'),30_000);
 async function run(job:typeof jobs[number]){
  let failures=0;
  while(!stopping){

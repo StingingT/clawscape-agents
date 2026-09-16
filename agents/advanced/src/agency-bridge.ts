@@ -11,7 +11,7 @@ export function agencyState(o: Observation): Record<string, any> {
     distance:o.position?Math.max(Math.abs(o.position.x-e.position.x),Math.abs(o.position.z-e.position.z)):Infinity,
     optionsWithIndex:e.options.map(p=>({opIndex:p.index,text:p.text}))});
   return {character:o.character,world:o.world,worldEpoch:o.world_epoch,sessionId:o.session_id,profileId:o.profile_id,tick:o.tick,seq:o.seq,
-    inGame:o.connected,capacity:o.capacity,player:{hp:o.hp,maxHp:o.max_hp,lifeId:o.life_id,respawnCount:o.respawns,
+    danger:o.danger,inGame:o.connected,capacity:o.capacity,player:{hp:o.hp,maxHp:o.max_hp,lifeId:o.life_id,respawnCount:o.respawns,
       worldX:o.position?.x,worldZ:o.position?.z,level:o.position?.plane,isDead:o.hp===0,animId:o.activity?.animation,
       combat:{inCombat:o.activity?.target_type==='npc'&&o.entities.some(e=>e.kind==='npc'&&e.index===o.activity?.target_index&&e.options.some(p=>/^attack$/i.test(p.text))),
         targetType:o.activity?.target_type,targetIndex:o.activity?.target_index,lastDamageTick:o.activity?.last_damage_tick}},
@@ -34,7 +34,8 @@ export function agencyCandidate(o: Observation, decision: LiveDecision): LiveCan
   const choice=(slot:number,re:RegExp)=>o.inventory.find(v=>v.slot===slot)?.options.find(v=>re.test(v.text))?.index;
   switch(i.operation) {
     case 'close_interface':return a('closeModal');
-    case 'move':return a('walkTo',{x:i.destination.x,z:i.destination.z,level:i.destination.plane});
+    case 'move':return {...a('walkTo',{x:i.destination.x,z:i.destination.z,level:i.destination.plane}),
+      approach:{x:(decision.destination??i.destination).x,z:(decision.destination??i.destination).z,level:(decision.destination??i.destination).plane}};
     case 'eat':return a('useInventoryItem',{slot:i.slot,optionIndex:choice(i.slot,/^eat$/i)});
     case 'equip':return a('useInventoryItem',{slot:i.slot,optionIndex:choice(i.slot,/^(wear|wield|equip)$/i)});
     case 'deposit':return a('bankDeposit',{slot:i.slot,amount:i.amount});
@@ -59,7 +60,8 @@ export function agencyCandidate(o: Observation, decision: LiveDecision): LiveCan
 export function arbiterVerification(commandId:string,result:ActionResult|undefined):Verification {
   if(!result)return {status:'unknown',evidence:[],reason:'No action result yet.'};
   if(result.action_id!==commandId)throw new Error('RESULT_COMMAND_ID_MISMATCH');
-  if(result.status==='CANCELLED'&&result.reason==='RECONCILED_TRANSIENT_INTERRUPTED'&&result.evidence.length)return {status:'interrupted',evidence:result.evidence,reason:result.reason};
+  if(result.status==='CANCELLED'&&['RECONCILED_TRANSIENT_INTERRUPTED','RECONCILED_DIALOGUE_CONTEXT_EXPIRED'].includes(result.reason)&&result.evidence.length)
+    return {status:'interrupted',recovery:'investigate',evidence:result.evidence,reason:result.reason};
   if(result.status==='SUCCEEDED'&&result.evidence.length)return {status:'verified',evidence:result.evidence};
   if(result.status==='REJECTED'||result.status==='EXPIRED'||result.status==='CANCELLED'&&!/MAY_STILL|OUTCOME_UNKNOWN|PREEMPTED/.test(result.reason))
     return {status:'rejected',evidence:[`arbiter-before-dispatch:${result.reason}`]};

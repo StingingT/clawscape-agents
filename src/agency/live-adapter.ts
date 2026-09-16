@@ -3,6 +3,7 @@ import { dirname } from 'node:path';
 import { validateBuildRules, type BuildRules } from './build-rules.ts';
 import { chooseDevelopment, reviewDevelopment, developmentReadiness, guardDevelopment, protectedXpChanged, type Development } from './development.ts';
 import { observeQuietStep, recordViability, retryAllowed, stepKey, type QuietWindow, type Viability } from './step-retry.ts';
+import { effectState, progressHealth, PROGRESS_TIMEOUT_MS } from './progress.ts';
 import { meaningfulFrontierRoute, reconcileDeathLoss } from './reconciliation.ts';
 import { addAcquisition, emptyAcquisition, observeAcquisitionSources, rememberAcquisitionSources, type AcquisitionMemory, type AcquisitionHint } from './acquisition.ts';
 import type { DropLead } from './drop-leads.ts';
@@ -14,15 +15,15 @@ import type { Decision, Identity, Memory, Method, Observation, Outcome } from '.
 import { buildCatalogue, capabilityContext, cash, defaultPolicy, emptyKnowledge, observeFacts, observeKnowledge, discoveryFact,
   type Catalogue, type Knowledge, type LiveState, type Policy, type Route, type Task, type TaskKind } from './world-model.ts';
 
-export type LiveCandidate = { itemRefs?:ItemRef[]; id: string; type: string; fields?: Record<string, any>; waitTicks?: number };
+export type LiveCandidate = { approach?:{x:number;z:number;level:number}; itemRefs?:ItemRef[]; id: string; type: string; fields?: Record<string, any>; waitTicks?: number };
 export type Selection = { decision: Extract<Decision,{type:'execute'}>; method: Method; task: Task; view: Observation };
-export type Receipt = { commandId:string; action:LiveCandidate; before:LiveState; startedAt:number; scope:'task'|'safety'; methodId?:string; execution?:{accepted?:boolean;phase?:string;navigation?:{status:string;reason?:string;movementDispatched?:boolean}}; stationary?:QuietWindow };
+export type Receipt = { commandId:string; action:LiveCandidate; before:LiveState; startedAt:number; scope:'task'|'safety'; methodId?:string; approach?:{x:number;z:number;level:number}; execution?:{accepted?:boolean;phase?:string;navigation?:{status:string;reason?:string;movementDispatched?:boolean}}; stationary?:QuietWindow; investigation?:{at:number;reason:string;quietSince?:number} };
 type Document = { acquisition?:AcquisitionMemory; interruptions?:Array<{at:number;receipt:Receipt;reason:string}>; trips?:TripLearning; preparation?:TripPreparation; version:2; memory:Memory; knowledge:Knowledge; receipt?:Receipt; safetyReceipt?:Receipt;
   buildReadiness?:ReturnType<typeof developmentReadiness>; lastCommands:string[]; route?:{goalKey:string;methodId:string;action:LiveCandidate}; blocked?:string; development?:Development; updatedAt?:number;
   retries?:Record<string,Viability>; lastOutcome?:{at:number;commandId:string;type:string;status:string;reason?:string;evidence:string[]};
   losses?:Array<{at:number;commandId:string;lifeFrom:any;lifeTo:any;lostGp:number;items:Array<{id:number|string;count:number;name?:string}>}>;
   lastObservation?:{at:number;tick?:number;connected?:boolean;position?:{x:number;z:number;level:number}} };
-export type Verification = { status:'verified'|'rejected'|'unknown'|'interrupted'; evidence:string[]; reason?:string };
+export type Verification = { recovery?:'investigate'; status:'verified'|'rejected'|'unknown'|'interrupted'; evidence:string[]; reason?:string };
 
 const atomic = (file:string,value:unknown) => {
   mkdirSync(dirname(file),{recursive:true});
@@ -83,6 +84,7 @@ export class LiveAgency {
   catalogue(state:LiveState):Catalogue {
     if(state.character && String(state.character).toLowerCase()!==this.identity.agent.toLowerCase())throw new Error('OBSERVATION_AGENT_MISMATCH');
     if(state.world && state.world!==this.identity.world)throw new Error('OBSERVATION_WORLD_MISMATCH');
+    this.director.memory.progress??={since:this.clock(),noProgressActions:0,recentStates:[]};
     this.document.lastObservation={at:this.clock(),tick:state.tick,connected:state.inGame,position:state.player && {x:state.player.worldX,z:state.player.worldZ,level:state.player.level}};
     observeKnowledge(state,this.document.knowledge,this.clock(),this.routes);
     this.document.trips??=emptyTrips();
@@ -129,6 +131,7 @@ export class LiveAgency {
     if(!this.document.receipt) {
       this.director.retireObsoleteSurveys(new Set(Object.keys(this.document.knowledge.routes)),this.clock());
       this.director.reviseFoodNeed(this.document.preparation!.foodTarget,this.clock());
+      this.checkProgress(state);
     }
     const decision=this.director.next(catalogue.view,catalogue.opportunities,catalogue.methods);
     if(decision.type==='blocked'&&this.director.memory.active?.domain==='combat'&&catalogue.methods.some(m=>m.risk==='unknown'))
@@ -171,8 +174,9 @@ export class LiveAgency {
     if(!r||r.commandId!==commandId)return;
     const result=observeQuietStep(r.action,r.before,state,this.clock(),this.observer,r.stationary);
     r.stationary=result.window;
+    r.investigation={at:this.clock(),reason:result.reason,quietSince:result.window?.since};
     this.document.blocked=result.reason;this.save();
-    return result.settled?{status:'interrupted',evidence:[result.reason],reason:result.reason}:undefined;
+    return result.settled?{status:'interrupted',recovery:['interactNpc','interactLoc','pickupItem','useItemOnItem','useItemOnLoc'].includes(r.action.type)?'investigate':undefined,evidence:[result.reason],reason:result.reason}:undefined;
   }
   /** Retire a non-transactional receipt inherited from an earlier runtime when two fresh own observations
    * still cannot attribute its terminal effect. This never calls the executor and never records success.
@@ -182,6 +186,11 @@ export class LiveAgency {
     if(!receipt)return false;
     const strict=new Set(['shopBuy','shopSell','bankDeposit','bankWithdraw','clickDialogOption']);
     if(strict.has(receipt.action.type))return false;
+    if(['interactNpc','interactLoc','talkToNpc','useInventoryItem','equip','useItemOnItem','useItemOnLoc','pickupItem'].includes(receipt.action.type)) {
+      const settled=this.settleStep(receipt.commandId,stable);
+      if(settled)this.record(receipt.commandId,stable,settled);
+      return !(scope==='safety'?this.document.safetyReceipt:this.document.receipt);
+    }
     const a=first.player,b=stable.player;
     if(first.inGame!==true||stable.inGame!==true||!a||!b||a.isDead||b.isDead
       ||![first.tick,stable.tick,a.worldX,a.worldZ,a.level,b.worldX,b.worldZ,b.level].every(Number.isFinite)
@@ -245,6 +254,16 @@ export class LiveAgency {
   blocked(reason:string):void {
     this.director.blocked(this.clock(),reason);this.document.blocked=reason;this.save();
   }
+  /** Shared productive-progress deadline. Reconciliation/safety is never bypassed,
+   * and starting another attempt does not reset the exported health clock. */
+  checkProgress(state:LiveState):boolean {
+    if(this.document.receipt||this.document.safetyReceipt)return false;
+    const goal=this.director.memory.active,p=this.director.memory.progress;
+    if(!goal||!p||this.clock()-Math.max(goal.startedAt,p.lastProductiveAt??p.since)<PROGRESS_TIMEOUT_MS)return false;
+    this.director.blocked(this.clock(),'No causal progress within the bounded method window.',[]);
+    this.deferCurrent(state,'Productive-progress deadline exceeded; reconsider methods from fresh observations.');
+    return true;
+  }
   /** No re-selection here. A refused begin MUST prevent normal execution. */
   begin(selection:Selection,action:LiveCandidate,state:LiveState,commandId:string=randomUUID()):string {
     if(this.document.receipt||this.document.safetyReceipt)throw new Error('RECONCILE_PENDING_ACTION_FIRST');
@@ -257,7 +276,14 @@ export class LiveAgency {
     const cost=authorizeAction(state,action,selection.method,Math.max(0,cash(state.inventory??[])-this.policy.reserveCoins));
     const priced={...selection.method,costGp:cost};
     this.director.begin(view,selection.decision,priced,commandId);
-    this.document.receipt={commandId,action:structuredClone(action),before:structuredClone(state),startedAt:this.clock(),scope:'task',methodId:selection.method.id};
+    let approach=action.approach;
+    if(action.type==='walkTo'&&!approach) {
+      const route=selection.task.route;
+      const f=action.fields??{};
+      const end=route??{x:f.x,z:f.z,level:f.level??state.player?.level};
+      if([end.x,end.z,end.level].every(Number.isFinite))approach={x:end.x,z:end.z,level:end.level};
+    }
+    this.document.receipt={commandId,action:structuredClone(action),before:structuredClone(state),startedAt:this.clock(),scope:'task',methodId:selection.method.id,approach};
     if(action.type==='walkTo')this.document.route={goalKey:selection.decision.goal.key,methodId:selection.method.id,action:structuredClone(action)};
     this.save();return commandId;
   }
@@ -320,10 +346,24 @@ export class LiveAgency {
       if(!pending || pending.commandId!==commandId)throw new Error('OUTCOME_WITHOUT_MATCHING_INTENT');
       const productive=Object.keys(pending.method.effects).some(k=>(state.facts[k]??0)>(pending.before[k]??0));
       const status:Outcome['status']=verification.status==='verified'&&!productive?'progress':verification.status;
+      const end=receipt.approach??receipt.action.approach,from=receipt.before.player,to=after.player;
+      const approach=end&&from?.level===end.level&&to?.level===end.level
+        ? {key:JSON.stringify([end.x,end.z,end.level]),before:Math.max(Math.abs(from.worldX-end.x),Math.abs(from.worldZ-end.z)),
+          after:Math.max(Math.abs(to.worldX-end.x),Math.abs(to.worldZ-end.z))}:undefined;
       this.director.record({commandId,sequence:this.director.memory.sequence+1,status,at:state.at,facts:state.facts,
+        effectState:{before:effectState(receipt.before,pending.before),after:effectState(after,state.facts)},approach,
         ...deltas,evidence:verification.evidence,actionType:receipt.action.type,
         observationOnly:['wait','scanNearbyLocs'].includes(receipt.action.type)});
-      if(!this.director.memory.pending)delete this.document.receipt;
+      if(!this.director.memory.pending) {
+        delete this.document.receipt;
+        if(verification.status==='interrupted'&&verification.recovery==='investigate'&&verification.evidence.length) {
+          // The historical effect remains unknown. Retire only this bounded
+          // approach; generic discovery/alternative plans compete on the next tick.
+          const reason='QUIESCENT_INTERACTION_REPLAN: '+(verification.reason??'Historical effect unknown; current state is quiet.');
+          this.director.deferCurrent(this.clock(),reason,verification.evidence);
+          delete this.document.route;this.document.blocked=reason;
+        }
+      }
     }
     if(!this.document.receipt || this.document.receipt.commandId!==commandId)
       this.document.lastCommands=[...this.document.lastCommands,commandId].slice(-128);
@@ -337,11 +377,12 @@ export class LiveAgency {
     this.save();
   }
   summary() {
-    const brief=(r:Receipt|undefined)=>r?{commandId:r.commandId,action:r.action,startedAt:r.startedAt}:undefined;
+    const brief=(r:Receipt|undefined)=>r?{commandId:r.commandId,action:r.action,startedAt:r.startedAt,investigation:r.investigation}:undefined;
     const observation=this.document.lastObservation;
-    const verifiedAt=this.document.lastOutcome?.status==='verified'?this.document.lastOutcome.at:null;
-    const objectiveAt=this.director.memory.active?.lastObjectiveProgressAt??null;
-    const supportAt=this.director.memory.active?.lastSupportProgressAt??null;
+    const health=progressHealth(this.director.memory,this.clock());
+    const verifiedAt=health.lastVerifiedActionAt??(this.document.lastOutcome?.status==='verified'?this.document.lastOutcome.at:null);
+    const objectiveAt=health.lastObjectiveProgressAt??this.director.memory.active?.lastObjectiveProgressAt??null;
+    const supportAt=health.lastSupportProgressAt??this.director.memory.active?.lastSupportProgressAt??null;
     const measurableAt=Math.max(objectiveAt??0,supportAt??0)||null;
     const ageMs=observation?.at===undefined?null:Math.max(0,this.clock()-observation.at);
     const stage=measurableAt!==null&&(!verifiedAt||measurableAt>=verifiedAt)?'measurable-progress'
@@ -350,7 +391,7 @@ export class LiveAgency {
       :observation?.connected===true&&ageMs!==null&&ageMs<=120_000?'observing':'alive';
     return {source:'agency-v2.json',acquisition:this.document.acquisition,routeFailures:this.document.knowledge.routeFailures,preparation:this.document.preparation,updatedAt:this.document.updatedAt,buildReadiness:this.document.buildReadiness,development:this.document.development,
       lastObservation:this.document.lastObservation,lastOutcome:this.document.lastOutcome,losses:(this.document.losses??[]).slice(-8),
-      progressHealth:{stage,connected:observation?.connected===true,ageMs,lastObservationAt:observation?.at??null,
+      progressHealth:{...health,stage:health.stalled?'stalled':stage,connected:observation?.connected===true,ageMs,lastObservationAt:observation?.at??null,
         lastVerifiedOutcomeAt:verifiedAt,lastObjectiveProgressAt:objectiveAt,lastSupportProgressAt:supportAt,
         noProgressAttempts:this.director.memory.active?.noProgress??0,
         preparationOnlyStreak:this.director.memory.active?.preparationOnlyStreak??0},

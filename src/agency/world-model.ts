@@ -40,11 +40,11 @@ const base = (state: LiveState, skill: string) => Number((state.skills ?? []).fi
 const at = (state: LiveState, route: Route) => Number(state.player?.level) === route.level &&
   Math.max(Math.abs(Number(state.player?.worldX) - route.x), Math.abs(Number(state.player?.worldZ) - route.z)) <= 1;
 export const discoveryFact = (loc:any, optionIndex:number) => `discovered:interaction:${Number(loc?.id)}:${Number(loc?.x)}:${Number(loc?.z)}:${Number(loc?.level??0)}:${optionIndex}`;
-const discoveryCandidate = (state:LiveState,k:Knowledge) => (state.nearbyLocs??[])
+const discoveryCandidates = (state:LiveState,k:Knowledge) => (state.nearbyLocs??[])
   .filter((loc:any)=>loc?.reachable===true&&Number.isInteger(loc.id)&&Number.isInteger(loc.x)&&Number.isInteger(loc.z)
     &&(loc.optionsWithIndex??[]).some((o:any)=>/^(open|climb(?:-up|-down)?|enter|cross|use)$/i.test(String(o.text)))
     &&!(k.discovered??{})[discoveryFact(loc,(loc.optionsWithIndex??[]).find((o:any)=>/^(open|climb(?:-up|-down)?|enter|cross|use)$/i.test(String(o.text)))!.opIndex)])
-  .sort((a:any,b:any)=>Number(a.distance??0)-Number(b.distance??0)||a.x-b.x||a.z-b.z)[0];
+  .sort((a:any,b:any)=>Number(a.distance??0)-Number(b.distance??0)||a.x-b.x||a.z-b.z).slice(0,8);
 
 /** Actual personal state only. Duplicate unstackable inventory entries are summed. */
 export function observeFacts(state: LiveState, knowledge: Knowledge): Facts {
@@ -109,6 +109,7 @@ export function buildCatalogue(identity: Identity, state: LiveState, k: Knowledg
     // Before a completed trip exists, zero means no PRE-AUTHORIZED purchase;
     // each actual purchase must still be quoted and charged at dispatch.
     methods.push({ id:task.id, capability:task.kind, domain, effects:{[fact]:delta}, prerequisites,
+      progressFacts:task.kind==='gathering'?['xp:gathering']:undefined,
       costGp:measuredSpend, lossBoundGp:risk === 'bounded' ? policy.combatLossBoundGp ?? 0 : 0,
       durationMs:task.kind === 'exploration' && task.route ? Math.max(2_000,(Math.abs(Number(state.player?.worldX)-task.route.x)+Math.abs(Number(state.player?.worldZ)-task.route.z))*600) : 30_000, risk });
     if (task.kind!=='funds' && (facts[fact] ?? 0) < target) opportunities.push({ id:task.id, domain, target:{fact,minimum:target}, reason,
@@ -170,8 +171,7 @@ export function buildCatalogue(identity: Identity, state: LiveState, k: Knowledg
     add({id:'survey:'+route.id,kind:'exploration',route},'exploration','visited:'+route.id,1,1,
        'Visit a sourced lead and verify it personally; path assessment and arrival are required.', 'frontier');
   if (supported.includes('discovery')) {
-    const loc=discoveryCandidate(state,k);
-    if(loc) {
+    for(const loc of discoveryCandidates(state,k)) {
       const opt=(loc.optionsWithIndex??[]).find((o:any)=>/^(open|climb(?:-up|-down)?|enter|cross|use)$/i.test(String(o.text)))!;
       const fact=discoveryFact(loc,opt.opIndex);
       add({id:'discover:'+fact,kind:'discovery'},'exploration',fact,1,1,
