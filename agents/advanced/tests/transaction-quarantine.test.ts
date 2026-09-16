@@ -95,14 +95,16 @@ test('mismatched executor intent cannot inherit a shared quarantine decision', (
 
 test('policy clears only matching bank uncertainty with command-scoped administrative evidence and no reward', () => fixture(f => {
   const policy = new LivePolicy();
+  const summary = () => (policy.summary() as { state: { uncertain: unknown; counters: unknown } }).state;
   const decision = { goal: f.command.plan_id, reason: 'bank preparation', intent: f.command.intent };
   const after = observation(2);
   policy.recordOutcome(f.before, after, decision, 'RUNNING');
-  const counters = structuredClone(policy.summary().counters);
+  expect(summary().uncertain).not.toBeNull();
+  const counters = structuredClone(summary().counters);
   const result: ActionResult = { schema_version: '1.0', action_id: f.command.action_id, status: 'CANCELLED', reason: HISTORICAL_QUARANTINE,
     at: Date.now(), evidence: [`historical-command-quarantined:${f.command.action_id}`] };
   expect(policy.retireReconciledOutcome(f.before, f.command.intent, { ...result, evidence: ['unmatched'] })).toBe(false);
   expect(policy.retireReconciledOutcome(f.before, { operation: 'withdraw', slot: 7, item_id: 315, amount: 4 }, result)).toBe(false);
   expect(policy.retireReconciledOutcome(f.before, f.command.intent, result)).toBe(true);
-  expect(policy.summary().uncertain).toBeNull(); expect(policy.summary().counters).toEqual(counters);
+  expect(summary().uncertain).toBeNull(); expect(summary().counters).toEqual(counters);
 }));
