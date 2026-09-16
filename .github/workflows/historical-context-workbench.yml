@@ -1,0 +1,52 @@
+name: Historical context recovery validation
+on:
+  push:
+    branches: [fix/historical-context-and-exhausted-methods]
+permissions:
+  contents: write
+concurrency:
+  group: historical-context-workbench
+  cancel-in-progress: true
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22.16.0'
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: '1.3.10'
+      - name: Apply exact reviewed integration edits
+        run: python .github/apply-historical-context.py
+      - name: Install pinned offline test dependencies
+        run: |
+          npm install --prefix "$RUNNER_TEMP/agency-tests" --ignore-scripts --no-audit --no-fund --no-package-lock zod@4.1.5 typescript@5.9.3 @types/node@22.16.0
+          ln -s "$RUNNER_TEMP/agency-tests/node_modules" agents/advanced/node_modules
+      - name: Historical context and exhaustion regressions
+        run: node --experimental-strip-types --test tests/agency/historical-context.test.ts tests/agency/exhausted-methods.test.ts
+      - name: Shared agency regressions
+        run: npm run test:agency
+      - name: Unchanged original controller integration
+        run: npm run test:integration
+      - name: Agency types
+        run: npm run check:agency
+      - name: Complete Bun and advanced controller regressions
+        run: bun test
+      - name: Commit only validated integration edits and remove workbench
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          git add src/agency/live-adapter.ts src/agency/director.ts src/agency/world-model.ts agents/advanced/src/transaction-quarantine.ts agents/advanced/src/restart-journals.ts agents/advanced/src/live-policy.ts
+          git rm .github/apply-historical-context.py .github/workflows/historical-context-workbench.yml
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Integrate validated historical context recovery and exhausted-method replanning'
+          git fetch origin fix/historical-context-and-exhausted-methods
+          test "$(git rev-parse FETCH_HEAD)" = "$EXPECTED_SHA"
+          git push origin HEAD:fix/historical-context-and-exhausted-methods
