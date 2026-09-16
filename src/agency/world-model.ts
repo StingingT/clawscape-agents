@@ -4,6 +4,7 @@ import { allowedTraining, guideTrainingTarget, strategyView, type Development } 
 import type { BuildRules } from './build-rules.ts';
 import { meaningfulFrontierRoute } from './reconciliation.ts';
 import { preparation, emptyTrips, type TripLearning } from './trip-logistics.ts';
+import { progressHealth } from './progress.ts';
 import type { Domain, Facts, Identity, Memory, Method, Observation, Opportunity } from './types.ts';
 
 export type LiveState = Record<string, any>;
@@ -40,8 +41,11 @@ const base = (state: LiveState, skill: string) => Number((state.skills ?? []).fi
 const at = (state: LiveState, route: Route) => Number(state.player?.level) === route.level &&
   Math.max(Math.abs(Number(state.player?.worldX) - route.x), Math.abs(Number(state.player?.worldZ) - route.z)) <= 1;
 export const discoveryFact = (loc:any, optionIndex:number) => `discovered:interaction:${Number(loc?.id)}:${Number(loc?.x)}:${Number(loc?.z)}:${Number(loc?.level??0)}:${optionIndex}`;
+const localDistance=(state:LiveState,loc:any)=>Math.max(Math.abs(Number(state.player?.worldX)-Number(loc?.x)),Math.abs(Number(state.player?.worldZ)-Number(loc?.z)));
+const localTransition=(state:LiveState,loc:any)=>Number(loc?.level??state.player?.level??0)===Number(state.player?.level??0)
+  && (loc?.reachable===true || localDistance(state,loc)<=1);
 const discoveryCandidates = (state:LiveState,k:Knowledge) => (state.nearbyLocs??[])
-  .filter((loc:any)=>loc?.reachable===true&&Number.isInteger(loc.id)&&Number.isInteger(loc.x)&&Number.isInteger(loc.z)
+  .filter((loc:any)=>localTransition(state,loc)&&Number.isInteger(loc.id)&&Number.isInteger(loc.x)&&Number.isInteger(loc.z)
     &&(loc.optionsWithIndex??[]).some((o:any)=>/^(open|climb(?:-up|-down)?|enter|cross|use)$/i.test(String(o.text)))
     &&!(k.discovered??{})[discoveryFact(loc,(loc.optionsWithIndex??[]).find((o:any)=>/^(open|climb(?:-up|-down)?|enter|cross|use)$/i.test(String(o.text)))!.opIndex)])
   .sort((a:any,b:any)=>Number(a.distance??0)-Number(b.distance??0)||a.x-b.x||a.z-b.z).slice(0,8);
@@ -167,15 +171,38 @@ export function buildCatalogue(identity: Identity, state: LiveState, k: Knowledg
       'Gather a cargo-sized batch and bank the verified outputs; reserve tools and learned food, not arbitrary empty slots.', 'collection');
   } else add({id:'gathering-batch',kind:'gathering'},'gathering','xp:gathering',Math.floor(facts['xp:gathering']!/100)*100+100,100,
     'Measure a complete gathering batch as an alternative to my previous activities.', 'collection', [{fact:'free-slots',minimum:1}]);
-  for (const route of Object.values(k.routes).filter(r => meaningfulFrontierRoute(r) && r.level === Number(state.player?.level ?? 0) && !k.visited[r.id] && (!k.routeFailures?.[r.id] || k.routeFailures[r.id]!.retryAt<=now || k.routeFailures[r.id]!.context!==capabilityContext(state) || k.routeFailures[r.id]!.learningRevision<(memory.learningRevision??0))).slice(0,64))
+  // Count actual survey goal IDs (and legacy IDs), including unsuccessful probes.
+  const recentLocalProbes=memory.reviews.filter(r=>/^(?:survey:)?local-probe:/.test(r.goal.id)&&now-r.at<10*60_000).length;
+  const health=progressHealth(memory,now);
+  const discoveryBootstrap=health.lastProductiveAt===null||health.stalled||!!memory.active?.blocker;
+  const p=state.player;
+  const safeProbeState=state.inGame===true&&!!p&&!p.isDead&&Number(p.hp)>0
+    &&p.combat?.inCombat!==true&&state.danger?.active!==true;
+  const probeEligible=(route:Route)=>safeProbeState&&(memory.active?.id==='survey:'+route.id
+    ||discoveryBootstrap&&recentLocalProbes<2);
+  if(discoveryBootstrap&&safeProbeState&&supported.includes('exploration')&&recentLocalProbes<2
+    &&[p.worldX,p.worldZ,p.level].every(Number.isFinite)&&Object.keys(k.routes).filter(id=>id.startsWith('local-probe:')).length<128) {
+    for(const [dx,dz] of [[3,0],[-3,0],[0,3],[0,-3]] as const) {
+      const x=Number(p.worldX)+dx,z=Number(p.worldZ)+dz,level=Number(p.level),id=`local-probe:${x}:${z}:${level}`;
+      if(k.routes[id]||k.visited[id])continue;
+      k.routes[id]={id,x,z,level,evidence:`fresh-local-probe:${p.lifeId}:${state.tick}; collision verification required before movement`};
+    }
+  }
+  for (const route of Object.values(k.routes).filter(r => meaningfulFrontierRoute(r) && r.level === Number(state.player?.level ?? 0) && !k.visited[r.id]
+    // Previously generated routes must pass the same gate; generation-only gating leaks stale probes.
+    && (!r.id.startsWith('local-probe:')||probeEligible(r))
+    && (!k.routeFailures?.[r.id] || k.routeFailures[r.id]!.retryAt<=now || k.routeFailures[r.id]!.context!==capabilityContext(state) || k.routeFailures[r.id]!.learningRevision<(memory.learningRevision??0))).slice(0,64)) {
+    const before=opportunities.length;
     add({id:'survey:'+route.id,kind:'exploration',route},'exploration','visited:'+route.id,1,1,
        'Visit a sourced lead and verify it personally; path assessment and arrival are required.', 'frontier');
+    if(route.id.startsWith('local-probe:')&&opportunities.length>before)opportunities.at(-1)!.priority='maintenance';
+  }
   if (supported.includes('discovery')) {
     for(const loc of discoveryCandidates(state,k)) {
       const opt=(loc.optionsWithIndex??[]).find((o:any)=>/^(open|climb(?:-up|-down)?|enter|cross|use)$/i.test(String(o.text)))!;
       const fact=discoveryFact(loc,opt.opIndex);
       add({id:'discover:'+fact,kind:'discovery'},'exploration',fact,1,1,
-        'Test a nearby reachable transition or obstruction with a bounded safe interaction, then retain only the verified result.', 'frontier');
+        'Test a nearby observed transition or obstruction with a bounded safe interaction, then retain only the verified result.', 'frontier');
     }
   }
   const completed=memory.reviews.filter(r=>r.result==='success').slice(-5);

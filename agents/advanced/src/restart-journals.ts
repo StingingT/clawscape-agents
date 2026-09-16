@@ -56,6 +56,10 @@ export function reconcileAstraJournals(store:Store,directory:string,first:Observ
   if(agency) for(const scope of ['safety','task'] as const) {
     const receipt=agency.pending(scope);if(!receipt)continue;
     const row=store.action(receipt.commandId);
+    if(row?.result.reason==='HISTORICALLY_UNRESOLVED_QUARANTINED') {
+      const q=agency.quarantinePendingTransaction(agencyState(second),row.result.reason);
+      if(q){report.resolved.push(receipt.commandId);continue;}
+    }
     let proof=row?arbiterVerification(receipt.commandId,row.result):{status:'unknown' as const,evidence:[],reason:'No executor receipt matched.'};
     if(!row && receipt.action.type!=='wait' && !checkpoints.some(c=>c.action_id===receipt.commandId)) {
       // agency-v2 writes a receipt BEFORE Store reserves dispatch; validated runtime discovery
@@ -68,6 +72,13 @@ export function reconcileAstraJournals(store:Store,directory:string,first:Observ
       if(durable.length)proof={status:'verified',evidence:durable};
     }
     agency.record(receipt.commandId,agencyState(second),proof);
+    if(agency.pending(scope)&&scope==='task'&&proof.status==='unknown') {
+      const q=agency.quarantinePendingTransaction(agencyState(second),proof.reason??'historical attribution unavailable');
+      if(q&&row) {
+        const administrative={...row.result,status:'CANCELLED' as const,reason:'HISTORICALLY_UNRESOLVED_QUARANTINED',at:Date.now(),evidence:q.evidence};
+        store.result(administrative);store.append('transaction_quarantine',q.commandId,q);report.resolved.push(receipt.commandId);continue;
+      }
+    }
     if(agency.pending(scope))report.unresolved.push({commandId:receipt.commandId,operation:receipt.action.type,reason:proof.reason??'Pending accounting or safety outcome.'});
   }
   const legacy=recoverLegacyJournals(directory,{agent:second.character,world:second.world},{

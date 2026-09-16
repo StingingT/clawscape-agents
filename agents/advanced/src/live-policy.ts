@@ -479,7 +479,8 @@ export class LivePolicy {
   }
 
   private entityAction(o: Observation, e: Entity, goal: string, intent: Intent): LiveDecision {
-    if (e.reachable !== true || distance(o.position!, e.position) > 5) {
+    const adjacentTransition=e.kind==='object'&&!!transitionOption(e)&&e.position.plane===o.position!.plane&&distance(o.position!,e.position)<=1;
+    if ((e.reachable !== true&&!adjacentTransition) || distance(o.position!, e.position) > 5) {
       if (distance(o.position!, e.position) === 0) return block(goal, "INTERACTION_REACHABILITY_UNKNOWN", "Navigator must verify an interaction side before dispatch.");
       return { goal, reason: `Navigate to an interaction side of observed ${e.name}; the main navigator owns collision and gates.`, destination: { ...e.position } };
     }
@@ -494,7 +495,8 @@ export class LivePolicy {
    */
   private localDiscovery(o: Observation, goal: string): LiveDecision {
     const candidate=o.entities
-      .filter(e=>e.kind==='object'&&e.reachable===true&&!!transitionOption(e)
+      .filter(e=>e.kind==='object'&&!!transitionOption(e)&&e.position.plane===o.position!.plane
+        &&(e.reachable===true||distance(o.position!,e.position)<=1)
         &&(!goal.startsWith('discover:discovered:interaction:')
           ||goal===`discover:discovered:interaction:${e.content_id}:${e.position.x}:${e.position.z}:${e.position.plane}:${transitionOption(e)!.index}`))
       .sort((a,b)=>distance(o.position!,a.position)-distance(o.position!,b.position)

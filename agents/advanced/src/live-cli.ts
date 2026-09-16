@@ -241,6 +241,13 @@ export async function main(context:StartupContext){
             if(observed.status==='verified')proof=observed;
           }
           agency.record(receipt.commandId,agencyState(latest),proof);
+          if(agency.pending(scope)&&scope==='task'&&proof.status==='unknown') {
+            const q=agency.quarantinePendingTransaction(agencyState(latest),proof.reason??'historical attribution unavailable');
+            if(q&&stored) {
+              store.result({...stored.result,status:'CANCELLED',reason:'HISTORICALLY_UNRESOLVED_QUARANTINED',at:Date.now(),evidence:q.evidence});
+              store.append('transaction_quarantine',q.commandId,q);
+            }
+          }
           if(proof.status==='interrupted'&&proof.recovery==='investigate'&&stored&&receipt.before._advanced) {
             policy.retireReconciledOutcome(receipt.before._advanced,stored.command.intent,stored.result);
             store.append('live_policy_checkpoints',crypto.randomUUID(),policy.summary());
