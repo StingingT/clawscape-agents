@@ -5,6 +5,8 @@ import { chooseDevelopment, reviewDevelopment, developmentReadiness, guardDevelo
 import { observeQuietStep, recordViability, retryAllowed, stepKey, type QuietWindow, type Viability } from './step-retry.ts';
 import { effectState, progressHealth, PROGRESS_TIMEOUT_MS } from './progress.ts';
 import { meaningfulFrontierRoute, reconcileDeathLoss } from './reconciliation.ts';
+import { conflictsWithQuarantine, quarantineEligible, releaseFromFreshAccounting, transactionIdentity,
+  type QuarantinedTransaction } from './transaction-quarantine.ts';
 import { addAcquisition, emptyAcquisition, observeAcquisitionSources, rememberAcquisitionSources, type AcquisitionMemory, type AcquisitionHint } from './acquisition.ts';
 import type { DropLead } from './drop-leads.ts';
 import { bindItems, resolveItems, itemFact, itemCount, type ItemNeed, type ItemRef } from './item-intents.ts';
@@ -22,6 +24,7 @@ type Document = { acquisition?:AcquisitionMemory; interruptions?:Array<{at:numbe
   buildReadiness?:ReturnType<typeof developmentReadiness>; lastCommands:string[]; route?:{goalKey:string;methodId:string;action:LiveCandidate}; blocked?:string; development?:Development; updatedAt?:number;
   retries?:Record<string,Viability>; lastOutcome?:{at:number;commandId:string;type:string;status:string;reason?:string;evidence:string[]};
   losses?:Array<{at:number;commandId:string;lifeFrom:any;lifeTo:any;lostGp:number;items:Array<{id:number|string;count:number;name?:string}>}>;
+  transactionQuarantine?:QuarantinedTransaction[];
   lastObservation?:{at:number;tick?:number;connected?:boolean;position?:{x:number;z:number;level:number}} };
 export type Verification = { recovery?:'investigate'; status:'verified'|'rejected'|'unknown'|'interrupted'; evidence:string[]; reason?:string };
 
@@ -85,6 +88,10 @@ export class LiveAgency {
     if(state.character && String(state.character).toLowerCase()!==this.identity.agent.toLowerCase())throw new Error('OBSERVATION_AGENT_MISMATCH');
     if(state.world && state.world!==this.identity.world)throw new Error('OBSERVATION_WORLD_MISMATCH');
     this.director.memory.progress??={since:this.clock(),noProgressActions:0,recentStates:[]};
+    if(this.document.transactionQuarantine?.some(q=>q.active)&&state.bank?.isOpen===true&&Array.isArray(state.bank?.items)&&Array.isArray(state.inventory)) {
+      const now=this.clock();
+      this.document.transactionQuarantine=this.document.transactionQuarantine.map(q=>releaseFromFreshAccounting(q,state,now));
+    }
     this.document.lastObservation={at:this.clock(),tick:state.tick,connected:state.inGame,position:state.player && {x:state.player.worldX,z:state.player.worldZ,level:state.player.level}};
     observeKnowledge(state,this.document.knowledge,this.clock(),this.routes);
     this.document.trips??=emptyTrips();
@@ -145,6 +152,37 @@ export class LiveAgency {
   pending(scope:'task'|'safety'='task'):Receipt|undefined {
     const receipt=scope==='safety'?this.document.safetyReceipt:this.document.receipt;
     return receipt && structuredClone(receipt);
+  }
+  quarantinedTransaction(commandId:string):QuarantinedTransaction|undefined {
+    const entry=this.document.transactionQuarantine?.find(q=>q.commandId===commandId);
+    return entry&&structuredClone(entry);
+  }
+  /** Preserve a historically unresolved bank mutation as audit state instead of inventing success/failure. */
+  quarantinePendingTransaction(state:LiveState,reason:string):QuarantinedTransaction|undefined {
+    const receipt=this.document.receipt,pending=this.director.memory.pending;
+    if(!receipt||receipt.scope!=='task'||!pending||pending.commandId!==receipt.commandId||pending.status!=='unknown')return;
+    const now=this.clock();
+    if(!quarantineEligible(receipt.action,receipt.before,state,receipt.startedAt,now,reason))return;
+    const identity=transactionIdentity(receipt.action,receipt.before);if(!identity)return;
+    const evidence=[`historical-command-quarantined:${receipt.commandId}`,`fresh-current-state:${state.tick}`,
+      'No historical success or failure inferred; exact command must never be replayed.',
+      'Future bank mutations for the affected item require a complete fresh bank snapshot.'];
+    const goalKey=pending.goalKey;
+    const entry:QuarantinedTransaction={at:now,commandId:receipt.commandId,type:receipt.action.type,semanticKey:identity.semanticKey,
+      itemIds:identity.itemIds,reason,evidence,goalKey,active:true,originalReceipt:structuredClone(receipt),
+      observation:{tick:state.tick,sessionId:state.sessionId,character:state.character,world:state.world,
+        worldEpoch:state.worldEpoch,profileId:state.profileId}};
+    this.document.transactionQuarantine=[...(this.document.transactionQuarantine??[]),entry];
+    delete this.director.memory.pending;delete this.document.receipt;delete this.document.route;
+    if(this.document.acquisition?.need?.parentKey===goalKey)delete this.document.acquisition.need;
+    this.document.lastCommands=[...this.document.lastCommands,receipt.commandId].slice(-128);
+    this.document.lastOutcome={at:now,commandId:receipt.commandId,type:receipt.action.type,status:'quarantined',reason,evidence};
+    if(this.director.memory.active)this.director.deferCurrent(now,'Historical bank transaction quarantined; replan only from fresh current state.',evidence);
+    this.document.blocked='Historical bank transaction quarantined; value-moving replay disabled until fresh bank accounting.';
+    this.save();return structuredClone(entry);
+  }
+  private transactionConflict(action:LiveCandidate,state:LiveState):boolean {
+    return (this.document.transactionQuarantine??[]).some(q=>conflictsWithQuarantine(q,action,state));
   }
   /** Persist only command-scoped executor evidence, never an entire global navigation cache. */
   rememberExecution(commandId:string,result:any):void {
@@ -209,6 +247,7 @@ export class LiveAgency {
   settleNavigation(commandId:string,state:LiveState):Verification|undefined { return this.settleStep(commandId,state); }
   eligible(action:LiveCandidate,state:LiveState):boolean {
     let current=action;try{current=bindItems(action,state);}catch{return false;}
+    if(this.transactionConflict(current,state))return false;
     return retryAllowed(this.document.retries?.[stepKey(current,state)],this.clock(),capabilityContext(state),this.director.memory.learningRevision??0);
   }
   /** Funding is an observed prerequisite. This never grants purchase authority by itself. */
@@ -267,7 +306,9 @@ export class LiveAgency {
   /** No re-selection here. A refused begin MUST prevent normal execution. */
   begin(selection:Selection,action:LiveCandidate,state:LiveState,commandId:string=randomUUID()):string {
     if(this.document.receipt||this.document.safetyReceipt)throw new Error('RECONCILE_PENDING_ACTION_FIRST');
+    if(this.quarantinedTransaction(commandId))throw new Error('QUARANTINED_COMMAND_ID_CANNOT_BE_REUSED');
     action=bindItems(action,state);
+    if(this.transactionConflict(action,state))throw new Error('TRANSACTION_QUARANTINED_UNTIL_FRESH_BANK_ACCOUNTING');
     const view=this.catalogue(state).view;
     if(view.context!==selection.view.context)throw new Error('CAPABILITY_CONTEXT_CHANGED');
     if(!this.eligible(action,state))throw new Error('STEP_AWAITING_EVIDENCE_OR_COOLDOWN');
@@ -395,6 +436,7 @@ export class LiveAgency {
         lastVerifiedOutcomeAt:verifiedAt,lastObjectiveProgressAt:objectiveAt,lastSupportProgressAt:supportAt,
         noProgressAttempts:this.director.memory.active?.noProgress??0,
         preparationOnlyStreak:this.director.memory.active?.preparationOnlyStreak??0},
+      transactionQuarantine:(this.document.transactionQuarantine??[]).slice(-8).map(({originalReceipt,...brief})=>brief),
       goal:this.director.memory.active,pending:brief(this.pending()),safetyPending:brief(this.pending('safety')),blocked:this.document.blocked};
   }
 }
@@ -426,6 +468,13 @@ export function authorizeAction(state:LiveState,action:LiveCandidate,method:Meth
     const option=(npc?.optionsWithIndex??[]).find((o:any)=>o.opIndex===action.fields?.optionIndex);
     if(!npc||npc.reachable!==true||!option)throw new Error('FRESH_NPC_OPTION_REQUIRED');
     if(/^attack$/i.test(String(option.text)) && (method.risk!=='bounded'||method.domain!=='combat'))throw new Error('COMBAT_REQUIRES_A_BOUNDED_COMBAT_METHOD');
+  }
+  if(action.type==='interactLoc') {
+    const f=action.fields??{},loc=(state.nearbyLocs??[]).find((l:any)=>l.id===f.locId&&l.x===f.x&&l.z===f.z);
+    const option=(loc?.optionsWithIndex??[]).find((o:any)=>o.opIndex===f.optionIndex),p=state.player;
+    const samePlane=Number(loc?.level??p?.level??0)===Number(p?.level??0);
+    const adjacent=samePlane&&Math.max(Math.abs(Number(p?.worldX)-Number(loc?.x)),Math.abs(Number(p?.worldZ)-Number(loc?.z)))<=1;
+    if(!loc||!option||!(loc.reachable===true||adjacent))throw new Error('FRESH_LOC_OPTION_REQUIRED');
   }
   bindItems(action,state); // Refuse absent/changed items before creating any pending journal.
   if(action.type==='shopBuy') {

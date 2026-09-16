@@ -1195,10 +1195,13 @@ function localNavigationExperiments(state:GameState):Candidate[] {
   if(state.player?.combat?.inCombat===true)return [];
   const p=state.player??{};
   const candidates=(state.nearbyLocs??[]).flatMap((loc:any)=>{
-    if(loc.reachable!==true||!Number.isInteger(loc.x)||!Number.isInteger(loc.z)||!Number.isInteger(loc.id))return [];
+    if(!Number.isInteger(loc.x)||!Number.isInteger(loc.z)||!Number.isInteger(loc.id))return [];
+    const distance=Math.max(Math.abs(Number(p.worldX)-loc.x),Math.abs(Number(p.worldZ)-loc.z));
+    const samePlane=Number(loc.level??p.level??0)===Number(p.level??0);
+    if(loc.reachable!==true&&!(samePlane&&distance<=1))return [];
     const option=(loc.optionsWithIndex??[]).find((o:any)=>/^(open|climb(?:-up|-down)?|enter|cross|use)$/i.test(String(o.text)));
     if(!option)return [];
-    return [{loc,option,distance:Math.max(Math.abs(Number(p.worldX)-loc.x),Math.abs(Number(p.worldZ)-loc.z))}];
+    return [{loc,option,distance}];
   }).filter(v=>v.distance<=3).sort((a,b)=>a.distance-b.distance||a.loc.id-b.loc.id||a.loc.x-b.loc.x||a.loc.z-b.loc.z);
   return candidates.slice(0,8).map(chosen=>({id:`navigation-experiment-${chosen.loc.id}-${chosen.loc.x}-${chosen.loc.z}-${chosen.option.opIndex}`,type:'interactLoc',
     fields:{x:chosen.loc.x,z:chosen.loc.z,locId:chosen.loc.id,optionIndex:chosen.option.opIndex,
@@ -1362,7 +1365,10 @@ async function runEpisode(): Promise<void> {
       const old=agency.pending(scope);if(!old)continue;
       const check=verifyActionOutcome(old.before,stable,old.action,old.execution);
       if(!check.uncertain)agency.record(old.commandId,stable,verification(check));
-      else agency.retireRestartPending(scope,state,stable,check.reason??'terminal effect is no longer attributable after restart');
+      else {
+        const retired=agency.retireRestartPending(scope,state,stable,check.reason??'terminal effect is no longer attributable after restart');
+        if(!retired&&scope==='task')agency.quarantinePendingTransaction(stable,check.reason??'historical attribution unavailable after restart');
+      }
     }
     state=stable;
   }
@@ -1407,6 +1413,11 @@ async function runEpisode(): Promise<void> {
       const check=verifyActionOutcome(pending.before,state,pending.action,pending.execution);
       agency.record(pending.commandId,state,check.uncertain?(agency.settleStep(pending.commandId,state)??verification(check)):verification(check));
       if(agency.pending()) {
+        const quarantined=agency.quarantinePendingTransaction(state,check.reason??'historical attribution unavailable');
+        if(quarantined){
+          console.log(JSON.stringify({agency:'transaction-quarantined',commandId:quarantined.commandId,reason:quarantined.reason}));
+          continue;
+        }
         console.log(JSON.stringify({agency:'reconciling',commandId:pending.commandId,reason:check.reason,operation:pending.action.type,action:pending.action,startedAt:pending.startedAt,source:'agency-v2.json'}));
         await cliCall(['wait','2']);continue;
       }

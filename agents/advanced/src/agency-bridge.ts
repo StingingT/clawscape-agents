@@ -62,6 +62,8 @@ export function arbiterVerification(commandId:string,result:ActionResult|undefin
   if(result.action_id!==commandId)throw new Error('RESULT_COMMAND_ID_MISMATCH');
   if(result.status==='CANCELLED'&&['RECONCILED_TRANSIENT_INTERRUPTED','RECONCILED_DIALOGUE_CONTEXT_EXPIRED'].includes(result.reason)&&result.evidence.length)
     return {status:'interrupted',recovery:'investigate',evidence:result.evidence,reason:result.reason};
+  if(result.status==='CANCELLED'&&result.reason==='HISTORICALLY_UNRESOLVED_QUARANTINED')
+    return {status:'unknown',evidence:[],reason:result.reason};
   if(result.status==='SUCCEEDED'&&result.evidence.length)return {status:'verified',evidence:result.evidence};
   if(result.status==='REJECTED'||result.status==='EXPIRED'||result.status==='CANCELLED'&&!/MAY_STILL|OUTCOME_UNKNOWN|PREEMPTED/.test(result.reason))
     return {status:'rejected',evidence:[`arbiter-before-dispatch:${result.reason}`]};

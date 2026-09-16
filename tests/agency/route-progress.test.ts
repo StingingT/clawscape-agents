@@ -85,11 +85,12 @@ test('clock alone or unrelated item changes cannot verify a production dialogue'
  assert.equal(verifyActionOutcome(b,a,{type:'clickDialogOption',fields:{optionIndex:2}}).verified,false);
 });
 
-test('a failed survey yields to another lead and persists a reversible route refusal',t=>{
+test('a failed survey can yield to bounded local discovery while preserving the reversible route refusal',t=>{
  const f=fixture(t),a=f.agency,b=state();const selected=a.plan(b);assert.ok(isSelection(selected));
  const route=selected.task.route!;a.deferSurvey(route,b,'No verified approach: partial-path');
  assert.equal(a.director.memory.active,undefined);assert.equal(a.director.memory.reviews[0]?.result,'partial');
- const next=a.plan(state());assert.ok(!isSelection(next));
- const restarted=new LiveAgency(f.file,f.identity,f.options);assert.ok(!isSelection(restarted.plan(state())));
- f.time(31*60_000);assert.ok(isSelection(restarted.plan(state(10,10,30))),'cooldown is temporary, not permanent blacklisting');
+ const next=a.plan(state());assert.ok(isSelection(next));assert.match(next.task.route?.id??'',/^local-probe:/);assert.notEqual(next.task.route?.id,route.id);
+ const refusal=a.summary().routeFailures?.[route.id];assert.ok(refusal);assert.match(refusal.reason,/partial-path/);
+ const restarted=new LiveAgency(f.file,f.identity,f.options);const resumed=restarted.plan(state());assert.ok(isSelection(resumed));assert.match(resumed.task.route?.id??'',/^local-probe:/);
+ f.time(31*60_000);const later=restarted.plan(state(10,10,30));assert.ok(isSelection(later),'cooldown is temporary, not permanent blacklisting');
 });

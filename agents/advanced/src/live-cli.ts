@@ -1,3 +1,4 @@
+import { finalizeQuarantinedAction } from './transaction-quarantine.ts';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { Config, CompatibilityProfile, type Observation, type Intent } from './contracts.ts';
@@ -241,6 +242,16 @@ export async function main(context:StartupContext){
             if(observed.status==='verified')proof=observed;
           }
           agency.record(receipt.commandId,agencyState(latest),proof);
+          if(agency.pending(scope)&&scope==='task'&&proof.status==='unknown'&&stored) {
+            const current=agencyState(latest);
+            const observed=observedVerification(receipt.before,current,receipt.action);
+            const q=agency.quarantinePendingTransaction(current,observed.reason??'');
+            const retired=q&&finalizeQuarantinedAction(store,agency,q.commandId);
+            if(retired&&receipt.before._advanced) {
+              policy.retireReconciledOutcome(receipt.before._advanced,stored.command.intent,retired);
+              store.append('live_policy_checkpoints',crypto.randomUUID(),policy.summary());
+            }
+          }
           if(proof.status==='interrupted'&&proof.recovery==='investigate'&&stored&&receipt.before._advanced) {
             policy.retireReconciledOutcome(receipt.before._advanced,stored.command.intent,stored.result);
             store.append('live_policy_checkpoints',crypto.randomUUID(),policy.summary());
