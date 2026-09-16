@@ -40,15 +40,16 @@ test('shared quarantine retains its original receipt and exact command ban after
   const options = { supported: ['production', 'exploration'] as any, now: () => now };
   const a = new LiveAgency(file, identity, options), before = state(1), selected = a.plan(before);
   assert.ok(isSelection(selected)); a.begin(selected, action, before, 'old');
-  const original = a.pending();
+  // JSON journals omit optional undefined properties; compare the exact durable representation.
+  const original = JSON.stringify(a.pending());
   a.record('old', before, { status: 'unknown', evidence: [], reason: 'unconfirmed' });
   const current = state(10); current.bank.isOpen = false; now = 122000;
   assert.ok(a.quarantinePendingTransaction(current, 'original bank source unavailable'));
-  assert.deepEqual(a.quarantinedTransaction('old')!.originalReceipt, original);
+  assert.equal(JSON.stringify(a.quarantinedTransaction('old')!.originalReceipt), original);
   const fresh = state(11); a.catalogue(fresh); a.plan(fresh);
   const reloaded = new LiveAgency(file, identity, options);
   assert.equal(reloaded.quarantinedTransaction('old')!.active, false);
-  assert.deepEqual(reloaded.quarantinedTransaction('old')!.originalReceipt, original);
+  assert.equal(JSON.stringify(reloaded.quarantinedTransaction('old')!.originalReceipt), original);
   assert.throws(() => reloaded.begin(selected, action, fresh, 'old'), /QUARANTINED_COMMAND_ID_CANNOT_BE_REUSED/);
   assert.equal(reloaded.pending(), undefined);
   assert.equal('originalReceipt' in reloaded.summary().transactionQuarantine[0]!, false, 'status output stays bounded');
