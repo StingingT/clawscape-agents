@@ -4,6 +4,7 @@ on:
     branches: [fix/discovery-and-transaction-quarantine]
     paths:
       - .github/apply-discovery-quarantine.py
+      - .github/apply-discovery-bootstrap-gate.py
       - .github/workflows/discovery-quarantine-workbench.yml
 permissions:
   contents: write
@@ -24,6 +25,7 @@ jobs:
       - name: Apply deterministic implementation edits
         run: |
           python .github/apply-discovery-quarantine.py
+          python .github/apply-discovery-bootstrap-gate.py
           git diff --check
       - name: Install pinned offline advanced dependencies
         run: |
