@@ -1,0 +1,30 @@
+name: Herdr integration workbench
+on:
+  push:
+    branches: [feat/herdr-control-and-approved-consultations]
+    paths: [.github/workflows/herdr-workbench.yml]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: '1.3.10'
+      - run: |
+          mkdir -p /tmp/herdr-validation
+          git archive HEAD -o /tmp/herdr-validation/source.zip
+          cp "$(command -v bun)" /tmp/herdr-validation/bun
+          npm install --prefix /tmp/herdr-validation/deps --ignore-scripts --no-audit --no-fund --no-package-lock zod@4.1.5 typescript@5.9.3 @types/node@22.16.0
+          tar -czf /tmp/herdr-validation/deps.tgz -C /tmp/herdr-validation/deps node_modules
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: herdr-offline-validation
+          path: |
+            /tmp/herdr-validation/source.zip
+            /tmp/herdr-validation/bun
+            /tmp/herdr-validation/deps.tgz
+          retention-days: 2
