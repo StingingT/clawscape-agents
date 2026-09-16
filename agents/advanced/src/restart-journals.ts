@@ -4,7 +4,8 @@ import type { Observation, ActionResult } from './contracts.ts';
 import { evidence } from './arbiter.ts';
 import type { Store } from './store.ts';
 import type { LiveAgency } from '../../../src/agency/live-adapter.ts';
-import { agencyState, agencyCandidate, arbiterVerification } from './agency-bridge.ts';
+import { agencyState, agencyCandidate, arbiterVerification, observedVerification } from './agency-bridge.ts';
+import { finalizeQuarantinedAction } from './transaction-quarantine.ts';
 import { atomicRecoveryJson, durableRecoveryEvidence, recoverLegacyJournals } from '../../../src/agency/journal-recovery.ts';
 
 export type RestartReport = { version:1; at:number; ready:boolean; resolved:string[]; unresolved:Array<{commandId:string;operation:string;reason:string;settling?:boolean}> };
@@ -27,6 +28,10 @@ export function reconcileAstraJournals(store:Store,directory:string,first:Observ
     const {command,result}=entry;
     if(command.character!==second.character||command.world!==second.world||command.profile_id!==second.profile_id
       ||result.action_id!==command.action_id)throw new Error('EXECUTOR_JOURNAL_IDENTITY_MISMATCH');
+    if(agency?.quarantinedTransaction(command.action_id)) {
+      const retired=finalizeQuarantinedAction(store,agency,command.action_id);
+      if(retired){report.resolved.push(command.action_id);continue;}
+    }
     if(!unsettledResult(result))continue;
     let resolved:ActionResult|undefined;let settling=false;let why='No attributable terminal outcome; no replay is permitted.';
     if(result.status==='QUEUED')resolved={...result,status:'CANCELLED',reason:'RESTART_BEFORE_DISPATCH',at:Date.now(),evidence:['journal reservation never entered dispatch']};
@@ -56,10 +61,6 @@ export function reconcileAstraJournals(store:Store,directory:string,first:Observ
   if(agency) for(const scope of ['safety','task'] as const) {
     const receipt=agency.pending(scope);if(!receipt)continue;
     const row=store.action(receipt.commandId);
-    if(row?.result.reason==='HISTORICALLY_UNRESOLVED_QUARANTINED') {
-      const q=agency.quarantinePendingTransaction(agencyState(second),row.result.reason);
-      if(q){report.resolved.push(receipt.commandId);continue;}
-    }
     let proof=row?arbiterVerification(receipt.commandId,row.result):{status:'unknown' as const,evidence:[],reason:'No executor receipt matched.'};
     if(!row && receipt.action.type!=='wait' && !checkpoints.some(c=>c.action_id===receipt.commandId)) {
       // agency-v2 writes a receipt BEFORE Store reserves dispatch; validated runtime discovery
@@ -72,11 +73,13 @@ export function reconcileAstraJournals(store:Store,directory:string,first:Observ
       if(durable.length)proof={status:'verified',evidence:durable};
     }
     agency.record(receipt.commandId,agencyState(second),proof);
-    if(agency.pending(scope)&&scope==='task'&&proof.status==='unknown') {
-      const q=agency.quarantinePendingTransaction(agencyState(second),proof.reason??'historical attribution unavailable');
-      if(q&&row) {
-        const administrative={...row.result,status:'CANCELLED' as const,reason:'HISTORICALLY_UNRESOLVED_QUARANTINED',at:Date.now(),evidence:q.evidence};
-        store.result(administrative);store.append('transaction_quarantine',q.commandId,q);report.resolved.push(receipt.commandId);continue;
+    if(agency.pending(scope)&&scope==='task'&&proof.status==='unknown'&&row) {
+      const current=agencyState(second);
+      const observed=observedVerification(receipt.before,current,receipt.action);
+      const q=agency.quarantinePendingTransaction(current,observed.reason??'');
+      if(q&&finalizeQuarantinedAction(store,agency,q.commandId)) {
+        report.unresolved=report.unresolved.filter(r=>r.commandId!==q.commandId);
+        report.resolved.push(q.commandId);continue;
       }
     }
     if(agency.pending(scope))report.unresolved.push({commandId:receipt.commandId,operation:receipt.action.type,reason:proof.reason??'Pending accounting or safety outcome.'});

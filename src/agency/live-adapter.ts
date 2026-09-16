@@ -153,6 +153,10 @@ export class LiveAgency {
     const receipt=scope==='safety'?this.document.safetyReceipt:this.document.receipt;
     return receipt && structuredClone(receipt);
   }
+  quarantinedTransaction(commandId:string):QuarantinedTransaction|undefined {
+    const entry=this.document.transactionQuarantine?.find(q=>q.commandId===commandId);
+    return entry&&structuredClone(entry);
+  }
   /** Preserve a historically unresolved bank mutation as audit state instead of inventing success/failure. */
   quarantinePendingTransaction(state:LiveState,reason:string):QuarantinedTransaction|undefined {
     const receipt=this.document.receipt,pending=this.director.memory.pending;
@@ -165,8 +169,10 @@ export class LiveAgency {
       'Future bank mutations for the affected item require a complete fresh bank snapshot.'];
     const goalKey=pending.goalKey;
     const entry:QuarantinedTransaction={at:now,commandId:receipt.commandId,type:receipt.action.type,semanticKey:identity.semanticKey,
-      itemIds:identity.itemIds,reason,evidence,goalKey,active:true};
-    this.document.transactionQuarantine=[...(this.document.transactionQuarantine??[]),entry].slice(-64);
+      itemIds:identity.itemIds,reason,evidence,goalKey,active:true,originalReceipt:structuredClone(receipt),
+      observation:{tick:state.tick,sessionId:state.sessionId,character:state.character,world:state.world,
+        worldEpoch:state.worldEpoch,profileId:state.profileId}};
+    this.document.transactionQuarantine=[...(this.document.transactionQuarantine??[]),entry];
     delete this.director.memory.pending;delete this.document.receipt;delete this.document.route;
     if(this.document.acquisition?.need?.parentKey===goalKey)delete this.document.acquisition.need;
     this.document.lastCommands=[...this.document.lastCommands,receipt.commandId].slice(-128);
@@ -300,6 +306,7 @@ export class LiveAgency {
   /** No re-selection here. A refused begin MUST prevent normal execution. */
   begin(selection:Selection,action:LiveCandidate,state:LiveState,commandId:string=randomUUID()):string {
     if(this.document.receipt||this.document.safetyReceipt)throw new Error('RECONCILE_PENDING_ACTION_FIRST');
+    if(this.quarantinedTransaction(commandId))throw new Error('QUARANTINED_COMMAND_ID_CANNOT_BE_REUSED');
     action=bindItems(action,state);
     if(this.transactionConflict(action,state))throw new Error('TRANSACTION_QUARANTINED_UNTIL_FRESH_BANK_ACCOUNTING');
     const view=this.catalogue(state).view;
@@ -429,7 +436,7 @@ export class LiveAgency {
         lastVerifiedOutcomeAt:verifiedAt,lastObjectiveProgressAt:objectiveAt,lastSupportProgressAt:supportAt,
         noProgressAttempts:this.director.memory.active?.noProgress??0,
         preparationOnlyStreak:this.director.memory.active?.preparationOnlyStreak??0},
-      transactionQuarantine:(this.document.transactionQuarantine??[]).slice(-8),
+      transactionQuarantine:(this.document.transactionQuarantine??[]).slice(-8).map(({originalReceipt,...brief})=>brief),
       goal:this.director.memory.active,pending:brief(this.pending()),safetyPending:brief(this.pending('safety')),blocked:this.document.blocked};
   }
 }
