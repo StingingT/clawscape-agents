@@ -1,0 +1,37 @@
+name: Discovery source workbench
+on:
+  push:
+    branches: [fix/discovery-transaction-isolation]
+    paths: [.github/workflows/discovery-workbench.yml]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Snapshot source only; no credentials or runtime player data
+        run: |
+          mkdir -p "$RUNNER_TEMP/review/repo" "$RUNNER_TEMP/review/research"
+          git archive HEAD | tar -x -C "$RUNNER_TEMP/review/repo"
+          git rev-parse HEAD > "$RUNNER_TEMP/review/commit.txt"
+          for repo in runebench rs-sdk; do
+            git clone --depth=1 --filter=blob:none --sparse "https://github.com/MaxBittker/$repo.git" "$RUNNER_TEMP/$repo"
+            if [ "$repo" = runebench ]; then
+              git -C "$RUNNER_TEMP/$repo" sparse-checkout set shared docker
+            else
+              git -C "$RUNNER_TEMP/$repo" sparse-checkout set sdk learnings docs mcp
+            fi
+            mkdir -p "$RUNNER_TEMP/review/research/$repo"
+            git -C "$RUNNER_TEMP/$repo" rev-parse HEAD > "$RUNNER_TEMP/review/research/$repo/REVIEW_COMMIT.txt"
+            rsync -a --exclude=.git "$RUNNER_TEMP/$repo/" "$RUNNER_TEMP/review/research/$repo/"
+          done
+          tar -czf "$RUNNER_TEMP/discovery-review.tar.gz" -C "$RUNNER_TEMP/review" .
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: discovery-source-review
+          path: ${{ runner.temp }}/discovery-review.tar.gz
+          retention-days: 1
