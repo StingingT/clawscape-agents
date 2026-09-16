@@ -45,6 +45,7 @@ import { acquisitionActions, type AcquisitionHint } from './agency/acquisition.t
 import { incidentalBankable } from './agency/incidental.ts';
 import { loadDropIndex } from './agency/drop-leads.ts';
 import { bindItems, resolveItems, MissingItem, type ItemRef } from './agency/item-intents.ts';
+import { transitionOption } from './agency/discovery.ts';
 import { randomUUID } from 'node:crypto';
 
 type Json = Record<string, unknown>;
@@ -1196,7 +1197,7 @@ function localNavigationExperiments(state:GameState):Candidate[] {
   const p=state.player??{};
   const candidates=(state.nearbyLocs??[]).flatMap((loc:any)=>{
     if(loc.reachable!==true||!Number.isInteger(loc.x)||!Number.isInteger(loc.z)||!Number.isInteger(loc.id))return [];
-    const option=(loc.optionsWithIndex??[]).find((o:any)=>/^(open|climb(?:-up|-down)?|enter|cross|use)$/i.test(String(o.text)));
+    const option=transitionOption(loc);
     if(!option)return [];
     return [{loc,option,distance:Math.max(Math.abs(Number(p.worldX)-loc.x),Math.abs(Number(p.worldZ)-loc.z))}];
   }).filter(v=>v.distance<=3).sort((a,b)=>a.distance-b.distance||a.loc.id-b.loc.id||a.loc.x-b.loc.x||a.loc.z-b.loc.z);
@@ -1239,6 +1240,7 @@ async function actionsForTask(state: GameState, task: Task): Promise<Candidate[]
     if(result.reason)agency!.blocked(result.reason);
     return result.actions as Candidate[];
   }
+  if(state.bank?.isOpen===true&&['discovery','exploration'].includes(task.kind))return [{id:'close-bank-for-selected-exploration',type:'closeModal',waitTicks:1}];
   if (state.bank?.isOpen === true) { const transaction=bankingCandidates(state,task);return transaction.length?transaction:[{id:'close-bank',type:'closeModal',waitTicks:1}]; }
   switch(task.kind) {
     case 'food': return productionCandidates(state,true,task.target?.minimum);
@@ -1294,6 +1296,14 @@ async function actionsForTask(state: GameState, task: Task): Promise<Candidate[]
       return [{id:task.id,type:'walkTo',fields:{...route.destination,running:true,reason:task.route.evidence},waitTicks:2}];
     }
     case 'discovery': {
+      if(task.localProbe&&task.route) {
+        const probe=await navigator!.assess(position(state),task.route);
+        if(probe.status==='loading-map')return [{id:'observe-local-probe-map',type:'wait',waitTicks:2}];
+        if(probe.status==='ready')return [{id:task.id,type:'walkTo',fields:{...task.route,reason:'Collision-verified local information-gathering probe'},waitTicks:2}];
+        const experiments=localNavigationExperiments(state);
+        if(experiments.length)return experiments;
+        agency!.blocked('LOCAL_PROBE_REFUSED: '+(probe.reason??'No verified path'));return [];
+      }
       const experiment=localNavigationExperiments(state).filter(a=> {
         const f=a.fields??{};
         return task.id===`discover:discovered:interaction:${f.locId}:${f.x}:${f.z}:${f.level??state.player?.level??0}:${f.optionIndex}`;
@@ -1406,6 +1416,7 @@ async function runEpisode(): Promise<void> {
     if(pending) {
       const check=verifyActionOutcome(pending.before,state,pending.action,pending.execution);
       agency.record(pending.commandId,state,check.uncertain?(agency.settleStep(pending.commandId,state)??verification(check)):verification(check));
+      if(agency.pending())agency.isolatePendingTransfer(state);
       if(agency.pending()) {
         console.log(JSON.stringify({agency:'reconciling',commandId:pending.commandId,reason:check.reason,operation:pending.action.type,action:pending.action,startedAt:pending.startedAt,source:'agency-v2.json'}));
         await cliCall(['wait','2']);continue;

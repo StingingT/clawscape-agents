@@ -1,3 +1,4 @@
+import { transitionEvidence, transitionOption } from './agency/discovery.ts';
 type ActionLike = { id?:string; actionId?:string; type:string; fields?:Record<string,any> };
 export type ActionVerification = { verified:boolean; evidence:string[]; uncertain:boolean; reason?:string; interrupted?:boolean };
 const quantity=(items:any[]|undefined,id:any)=>(items??[]).filter(i=>String(i.id)===String(id)).reduce((n,i)=>n+Number(i.count??1),0);
@@ -55,12 +56,16 @@ export function verifyActionOutcome(before:any,after:any,action:ActionLike,resul
   }
   if(type==='bankDeposit'||type==='bankWithdraw') {
     const source=type==='bankWithdraw'?before.bank?.items:before.inventory;
-    const item=source?.find((i:any)=>i.slot===f.slot);
-    if(!item||before.bank?.isOpen!==true||after.bank?.isOpen!==true)return no('original bank source unavailable');
+    const ref=(action as any).itemRefs?.find((r:any)=>r.field==='slot'&&r.container===(type==='bankWithdraw'?'bank':'inventory'));
+    const item=ref?source?.find((i:any)=>i.id===ref.id):source?.find((i:any)=>i.slot===f.slot);
+    if(after.bank?.isOpen!==true)return no('current bank observation unavailable; historical transfer remains unresolved');
+    if(!item||before.bank?.isOpen!==true
+      ||![before.inventory,after.inventory,before.bank.items,after.bank.items].every(Array.isArray))return no('original bank source unavailable');
     const inv=quantity(after.inventory,item.id)-quantity(before.inventory,item.id),bank=quantity(after.bank.items,item.id)-quantity(before.bank.items,item.id);
     const wanted=Number(f.amount), direction=type==='bankDeposit'?-1:1;
-    const enough=wanted===-1?inv*direction>0:inv*direction===wanted;
-    return enough&&inv===-bank?yes(`item:${item.id} balanced inventory/bank delta:${inv}/${bank}`):no('requested transfer not reconciled');
+    const expected=wanted===-1?quantity(source,item.id):wanted;
+    return Number.isSafeInteger(expected)&&expected>0&&inv*direction===expected&&inv===-bank
+      ?yes(`item:${item.id} balanced inventory/bank delta:${inv}/${bank}`):no('requested transfer not reconciled');
   }
   if(type==='shopBuy'||type==='shopSell') {
     const source=type==='shopBuy'?before.shop?.shopItems:before.inventory;
@@ -112,9 +117,9 @@ export function verifyActionOutcome(before:any,after:any,action:ActionLike,resul
   if(/bank|use-quickly/i.test(option))return before.bank?.isOpen!==true&&after.bank?.isOpen===true?yes('bank opened'):no('bank opening not observed');
   if(/trade/i.test(option))return before.shop?.isOpen!==true&&after.shop?.isOpen===true?yes('shop opened'):no('shop opening not observed');
   if(/talk/i.test(option))return !same(before.dialog,after.dialog)?yes('target dialogue advanced'):no('target dialogue not observed');
-  if(/^open$/i.test(option)) {
-    const loc=(after.nearbyLocs??[]).find((n:any)=>n.x===f.x&&n.z===f.z&&n.id===f.locId);
-    return !loc||!/^open$/i.test(menu(loc,f.optionIndex))?yes('requested obstruction changed'):no('obstruction unchanged');
+  if(type==='interactLoc'&&transitionOption((before.nearbyLocs??[]).find((l:any)=>l.id===f.locId&&l.x===f.x&&l.z===f.z))) {
+    const proof=transitionEvidence(before,after,action);
+    return proof.length?yes(...proof):no('transition or obstruction effect not yet observed');
   }
   const skill=/net|bait|lure|fish/i.test(option)?'fishing':/chop/i.test(option)?'woodcutting':/mine/i.test(option)?'mining':'';
   if(skill&&xp(after,skill)>xp(before,skill)&&!same(before.inventory,after.inventory))return yes(`${skill} output and XP observed`);

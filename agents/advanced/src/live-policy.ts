@@ -1,3 +1,5 @@
+import {agencyCandidate,agencyState} from './agency-bridge.ts';
+import {transitionEvidence} from '../../../src/agency/discovery.ts';
 import { z } from "zod";
 import type { Task } from "../../../src/agency/world-model.ts";
 import { Observation, Tile, Intent, type ActionResult } from "./contracts.ts";
@@ -47,7 +49,7 @@ const pickupAvailable = (e: Entity) => !!option(e, /^(take|pick-up|pick up)$/)
   || (e.options.length === 0 && e.reachable === true);
 const bankOption = (e: Entity) => option(e, e.kind === "object" && normalize(e.name) === "bank booth"
   ? /^(bank|use-bank|use bank|use-quickly)$/ : /^(bank|use-bank|use bank)$/);
-const transitionOption = (e: Entity) => option(e, /^(open|climb(?:-up|-down)?|enter|cross|use)$/);
+const transitionOption = (e: Entity) => /chest|coffin|altar|lever|toll|locked|wilderness/i.test(e.name)?undefined:option(e, /^(open|close|climb(?:[ -]up|[ -]down)?)$/);
 
 // Conservative policy ceilings, NOT deployed-server measurements. Exact low-level variants only.
 // Modern public guides are dated hints; the main supervisor/profile must validate compatibility.
@@ -217,11 +219,15 @@ export class LivePolicy {
     if (o.shop_open) return this.finish(o, { goal: "close-shop", reason: "No spending/selling budget is configured.", intent: { operation: "close_interface" } });
     if (o.unavailable.includes("inventory") || o.unavailable.includes("equipment") || freeSlots(o) === null)
       return block("observe", "MISSING_INVENTORY_STATE", "Require inventory, capacity and equipment observations.");
+    if(task&&['discovery','exploration'].includes(task.kind)) {
+      this.state.trip=null; // An obsolete local banking routine cannot replace the selected goal.
+      if(o.bank.open)return this.finish(o,{goal:task.id,reason:'Close the bank before the selected exploration action.',intent:{operation:'close_interface'}});
+    }
     if (this.state.trip || o.bank.open) return this.finish(o, this.banking(o));
     if (o.activity.modal_open) return block("interface", "UNSUPPORTED_MODAL", "The open modal is not an observed bank, shop or supported tutorial.");
     const rawItem = o.inventory.find(i => i.count > 0 && raw(i));
     // Cook usable raw supplies even in a full inventory; converting them needs no new slot.
-    if (freeSlots(o)! <= 0 && !(rawItem && !this.supplied(o))) return this.finish(o, this.startBank(o));
+    if (freeSlots(o)! <= 0 && !(task&&['discovery','exploration'].includes(task.kind)) && !(rawItem && !this.supplied(o))) return this.finish(o, this.startBank(o));
     // Strategic ownership: the Director has chosen the outcome before this
     // executor is asked for an action. No fallback to an unrelated activity.
     if (task) {
@@ -241,6 +247,7 @@ export class LivePolicy {
           return this.finish(o, {goal:task.id,reason:task.route.evidence,
             destination:{x:task.route.x,z:task.route.z,plane:task.route.level}});
         case 'discovery':
+          if(task.localProbe&&task.route)return this.finish(o,{goal:task.id,reason:'Collision-validated local information probe',destination:{x:task.route.x,z:task.route.z,plane:task.route.level}});
           return this.localDiscovery(o, task.id);
         default: return block(task.id, 'UNSUPPORTED_TASK_EXECUTOR', 'This controller does not implement the selected capability.');
       }
@@ -897,8 +904,7 @@ export class LivePolicy {
         if (/^attack$/i.test(action)) return (e.hp != null && sameEntity(after, e)?.hp != null && sameEntity(after, e)!.hp! < e.hp)
           || xp(after, ["attack", "strength", "defence"]) > xp(before, ["attack", "strength", "defence"]);
         if (bankOption(e)?.index === i.option_index) return !before.bank.open && after.bank.open === true && after.bank.items !== null;
-        if (normalize(action) === "open" && e.kind === "object") return !after.entities.some(a => a.kind === e.kind
-          && distance(a.position, e.position) === 0 && a.content_id === e.content_id && !!option(a, /^open$/));
+        if(e.kind==='object'&&transitionOption(e))return transitionEvidence(agencyState(before),agencyState(after),agencyCandidate(before,d)).length>0;
         if (normalize(e.name) === "runescape guide") return JSON.stringify(before.dialog) !== JSON.stringify(after.dialog) && !!(after.dialog.open || after.dialog.waiting);
         if (/^(net|small net|small-net)$/i.test(action)) return after.inventory.filter(raw).reduce((n, i) => n + i.count, 0)
           > before.inventory.filter(raw).reduce((n, i) => n + i.count, 0) && xp(after, ["fishing"]) > xp(before, ["fishing"]);

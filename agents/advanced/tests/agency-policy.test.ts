@@ -81,3 +81,27 @@ test('observed NPC index reuse or life change cannot receive old encounter credi
  policy.observe(before,after);expect((policy.summary() as any).state.counters.encountersCompleted).toBe(0);
  }
 });
+
+
+test('local information probe obeys its selected destination and closes stale bank preparation',()=>{
+ const o=observed(),policy=new LivePolicy();o.bank={open:true,items:[]};
+ const task={id:'inspect-local:0:405:404',kind:'discovery' as const,localProbe:true,route:{id:'local',x:3240,z:3236,level:0,evidence:'own local origin'}};
+ expect(policy.next(o,task).intent?.operation).toBe('close_interface');
+ o.bank.open=false;o.seq++;o.tick!++;
+ expect(policy.next(o,task).destination).toEqual({x:3240,z:3236,plane:0});
+});
+
+test('a verified staircase traversal agrees in the arbiter and policy; walking up to it does not',async()=>{
+ const {evidence}=await import('../src/arbiter.ts');
+ for(const dungeon of [false,true]){
+ const before=observed();before.entities=[{kind:'object',ref:'stairs',index:null,content_id:701,name:'Staircase',position:{x:3233,z:3230,plane:0},reachable:true,options:[{index:2,text:'Climb up'}]}];
+ const policy=new LivePolicy(),decision=policy.next(before,{id:'discover-local',kind:'discovery'});
+ expect(decision.intent?.operation).toBe('interact');
+ const approach=structuredClone(before);approach.seq++;approach.tick!++;approach.position!.x++;
+ expect(evidence(decision.intent!,before,approach)).toEqual([]);
+ const after=structuredClone(before);after.seq++;after.tick!++;after.observed_at+=600;after.fresh_at=after.observed_at;
+ if(dungeon)after.position!.z+=6400;else after.position!.plane=1;
+ expect(evidence(decision.intent!,before,after).length).toBeGreaterThan(0);
+ policy.recordOutcome(before,after,decision,'SUCCEEDED');expect((policy.summary() as any).state.uncertain).toBeNull();
+ }
+});

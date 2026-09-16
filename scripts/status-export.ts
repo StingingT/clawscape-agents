@@ -31,6 +31,8 @@ function json(root:string,path:string,warnings:string[]):any {
 }
 const pick=(v:any,keys:string[])=>v&&Object.fromEntries(keys.filter(k=>v[k]!==undefined).map(k=>[k,v[k]]));
 function pending(r:any){return r&&{...pick(r,['commandId','startedAt','scope','methodId','investigation']),action:pick(r.action,['id','type','itemRefs','fields']),execution:r.execution,
+  referencedBeforeBankItems:Array.isArray(r.before?.bank?.items)?r.before.bank.items.filter((i:any)=>(r.action?.itemRefs??[]).some((ref:any)=>ref.container==='bank'&&ref.id===i.id)).map((i:any)=>pick(i,['slot','id','name','count'])):undefined,
+  originalBankOpen:r.before?.bank?.isOpen,originalLifeId:r.before?.player?.lifeId,
   referencedBeforeItems:Array.isArray(r.before?.inventory)?r.before.inventory.filter((i:any)=>[r.action?.fields?.slot,r.action?.fields?.sourceSlot,r.action?.fields?.itemSlot,r.action?.fields?.targetSlot].includes(i.slot)).map((i:any)=>pick(i,['slot','id','name','count'])):undefined};}
 function logTail(root:string,file:string):any {
   // Read bounded tail bytes, never an entire log or paths supplied in its contents.
@@ -41,7 +43,7 @@ function logTail(root:string,file:string):any {
   const lines=buf.toString('utf8').split(/\r?\n/);if(stat.size>bytes)lines.shift();
   let omitted=0;const records:any[]=[];
   for(const line of lines.filter(Boolean).slice(-60))try{
-    const entry=JSON.parse(line),record=pick(entry,['at','time','agency','status','reason','operation','commandId','goal','startedAt','tick','actions','verified','failed']);
+    const entry=JSON.parse(line),record=pick(entry,['at','time','agency','status','reason','operation','commandId','goal','startedAt','tick','actions','verified','failed','detail']);
     if(record&&Object.keys(record).length)records.push(record);else omitted++;
   }catch{omitted++;}
   return {file:relative(root,file),modifiedAt:stat.mtime.toISOString(),truncated:stat.size>bytes,unstructuredLinesOmitted:omitted,records:records.slice(-20)};
@@ -75,7 +77,8 @@ export function collectReport(root:string,now=Date.now()):any {
       latestObservation:pick(doc?.lastObservation,['at','tick','connected','position']),
       astraObservation:pick(latest?.observation,['tick','connected','position','hp','maxHp']),
       goal:pick(doc?.memory?.active,['id','target','reason','requestedSupport','blocker']),
-      preparation:doc?.preparation,acquisition:doc?.acquisition,
+      preparation:doc?.preparation,acquisition:doc?.acquisition,plannerDiagnostics:doc?.plannerDiagnostics,
+      unresolvedTransfers:(doc?.unresolvedTransfers??[]).map((q:any)=>pick(q,['commandId','at','status','scope','itemId','reason','evidence'])),
       pending:pending(doc?.receipt),safetyPending:pending(doc?.safetyReceipt),
       routeFailures:Object.entries(doc?.knowledge?.routeFailures??{}).slice(-10).map(([id,r])=>({id,...r as any})),
       navigation:pick(navigation,['time','status','reason','destination','nextWaypoint','position','hint','endpoint','approachOnly']),

@@ -3,6 +3,8 @@ import { dirname } from 'node:path';
 import { validateBuildRules, type BuildRules } from './build-rules.ts';
 import { chooseDevelopment, reviewDevelopment, developmentReadiness, guardDevelopment, protectedXpChanged, type Development } from './development.ts';
 import { observeQuietStep, recordViability, retryAllowed, stepKey, type QuietWindow, type Viability } from './step-retry.ts';
+import {observeTransferIsolation,isolatedActionAllowed,transferFingerprint,type IsolationWindow,type UnresolvedTransfer} from './transaction-isolation.ts';
+import { transitionOption } from './discovery.ts';
 import { effectState, progressHealth, PROGRESS_TIMEOUT_MS } from './progress.ts';
 import { meaningfulFrontierRoute, reconcileDeathLoss } from './reconciliation.ts';
 import { addAcquisition, emptyAcquisition, observeAcquisitionSources, rememberAcquisitionSources, type AcquisitionMemory, type AcquisitionHint } from './acquisition.ts';
@@ -18,7 +20,7 @@ import { buildCatalogue, capabilityContext, cash, defaultPolicy, emptyKnowledge,
 export type LiveCandidate = { approach?:{x:number;z:number;level:number}; itemRefs?:ItemRef[]; id: string; type: string; fields?: Record<string, any>; waitTicks?: number };
 export type Selection = { decision: Extract<Decision,{type:'execute'}>; method: Method; task: Task; view: Observation };
 export type Receipt = { commandId:string; action:LiveCandidate; before:LiveState; startedAt:number; scope:'task'|'safety'; methodId?:string; approach?:{x:number;z:number;level:number}; execution?:{accepted?:boolean;phase?:string;navigation?:{status:string;reason?:string;movementDispatched?:boolean}}; stationary?:QuietWindow; investigation?:{at:number;reason:string;quietSince?:number} };
-type Document = { acquisition?:AcquisitionMemory; interruptions?:Array<{at:number;receipt:Receipt;reason:string}>; trips?:TripLearning; preparation?:TripPreparation; version:2; memory:Memory; knowledge:Knowledge; receipt?:Receipt; safetyReceipt?:Receipt;
+type Document = { unresolvedTransfers?:UnresolvedTransfer[]; transferWindow?:IsolationWindow; plannerDiagnostics?:(ReturnType<Director['diagnose']>&{localContext?:unknown}); acquisition?:AcquisitionMemory; interruptions?:Array<{at:number;receipt:Receipt;reason:string}>; trips?:TripLearning; preparation?:TripPreparation; version:2; memory:Memory; knowledge:Knowledge; receipt?:Receipt; safetyReceipt?:Receipt;
   buildReadiness?:ReturnType<typeof developmentReadiness>; lastCommands:string[]; route?:{goalKey:string;methodId:string;action:LiveCandidate}; blocked?:string; development?:Development; updatedAt?:number;
   retries?:Record<string,Viability>; lastOutcome?:{at:number;commandId:string;type:string;status:string;reason?:string;evidence:string[]};
   losses?:Array<{at:number;commandId:string;lifeFrom:any;lifeTo:any;lostGp:number;items:Array<{id:number|string;count:number;name?:string}>}>;
@@ -66,6 +68,8 @@ export class LiveAgency {
     if(memory.agent!==identity.agent||memory.world!==identity.world||memory.revision!==identity.revision)throw new Error('AGENCY_IDENTITY_MISMATCH');
     if (!!memory.pending!==!!this.document.receipt || (memory.pending && memory.pending.commandId!==this.document.receipt?.commandId))
       throw new Error('AGENCY_JOURNAL_INCONSISTENT');
+    if(this.document.unresolvedTransfers?.some(q=>q.status!=='historically-unresolved'||!q.receipt||q.commandId!==q.receipt.commandId
+      ||q.commandId===memory.pending?.commandId||q.goal.key!==q.pending.goalKey))throw new Error('INVALID_TRANSFER_ISOLATION_JOURNAL');
     this.director=new Director(memory);
   }
   private save() { this.document.updatedAt=this.clock();atomic(this.file,this.document); }
@@ -100,7 +104,7 @@ export class LiveAgency {
     }
     this.document.buildReadiness=developmentReadiness(this.document.development,state,this.buildRules);
     const catalogue=buildCatalogue(this.identity,state,this.document.knowledge,{...this.policy,foodTarget:this.document.preparation.foodTarget},this.supported,this.director.memory,this.clock(),this.document.development,this.buildRules,this.document.trips);
-    if(this.supported.includes('acquisition')) {
+    if(this.supported.includes('acquisition')&&!this.document.unresolvedTransfers?.length) {
       this.document.acquisition??=emptyAcquisition();
       observeAcquisitionSources(this.document.acquisition,state,this.clock());
       const need=this.document.acquisition.need,goal=this.director.memory.active;
@@ -109,6 +113,14 @@ export class LiveAgency {
         this.director.requestSupport({fact:itemFact(need),minimum:need.minimum},need.reason,[`own-missing-item:${need.at}`]);
       addAcquisition(catalogue,state,this.document.knowledge.bank,this.document.acquisition,this.director.memory,
         {...this.policy,foodTarget:this.tripPreparation(state,'combat').foodTarget},this.dropLeads,this.acquisitionHints,this.clock());
+    }
+    if(this.document.unresolvedTransfers?.length) {
+      catalogue.methods=catalogue.methods.filter(m=>['discovery','exploration'].includes(m.capability));
+      const ids=new Set(catalogue.methods.map(m=>m.id));
+      catalogue.opportunities=catalogue.opportunities.filter(g=>ids.has(g.id));
+      catalogue.view.capabilities=[...new Set(catalogue.methods.map(m=>m.capability))];
+      catalogue.view.budget.spendableGp=0;
+      delete catalogue.view.funding;
     }
     return catalogue;
   }
@@ -136,6 +148,11 @@ export class LiveAgency {
     const decision=this.director.next(catalogue.view,catalogue.opportunities,catalogue.methods);
     if(decision.type==='blocked'&&this.director.memory.active?.domain==='combat'&&catalogue.methods.some(m=>m.risk==='unknown'))
       decision.reason+=' Combat loss valuation is unknown: provide an audited carried-kit replacement-loss ceiling in agency-policy.json.';
+    this.document.plannerDiagnostics=decision.type==='blocked'?{...this.director.diagnose(catalogue.view,catalogue.opportunities,catalogue.methods),localContext:{
+      position:state.player&&{x:state.player.worldX,z:state.player.worldZ,level:state.player.level},
+      isolation:this.isolationSummary(),supported:this.supported,
+      objects:(state.nearbyLocs??[]).slice(0,16).map((l:any)=>({id:l.id,name:l.name,x:l.x,z:l.z,level:l.level,reachable:l.reachable,options:l.optionsWithIndex})),
+      visitedLocalCells:Object.keys(this.document.knowledge.localCells??{}).length}}:undefined;
     this.document.blocked=decision.type==='blocked'?decision.reason:undefined;this.save();
     if(decision.type!=='execute')return decision;
     const method=catalogue.methods.find(m=>m.id===decision.step.methodId),task=catalogue.tasks.get(decision.step.methodId);
@@ -208,8 +225,34 @@ export class LiveAgency {
   // Existing controller adapters retain compatibility; semantics remain operation-specific.
   settleNavigation(commandId:string,state:LiveState):Verification|undefined { return this.settleStep(commandId,state); }
   eligible(action:LiveCandidate,state:LiveState):boolean {
+    if(this.document.unresolvedTransfers?.length&&!isolatedActionAllowed(action,state))return false;
     let current=action;try{current=bindItems(action,state);}catch{return false;}
     return retryAllowed(this.document.retries?.[stepKey(current,state)],this.clock(),capabilityContext(state),this.director.memory.learningRevision??0);
+  }
+  /** Archive uncertainty, not outcome. This atomic document write preserves both
+   * receipt and planner intent. Financial authority stays revoked until resolved. */
+  isolatePendingTransfer(state:LiveState):boolean {
+    const r=this.document.receipt,pending=this.director.memory.pending,goal=this.director.memory.active;
+    if(!r||!pending||!goal||this.document.safetyReceipt||pending.status!=='unknown')return false;
+    const proof=observeTransferIsolation(r,state,this.clock(),this.observer,this.document.transferWindow);
+    this.document.transferWindow=proof.window;
+    r.investigation={at:this.clock(),reason:proof.reason,quietSince:proof.window?.since};
+    if(!proof.ready){this.save();return false;}
+    if((this.document.unresolvedTransfers?.length??0)>=64){this.document.blocked='UNRESOLVED_TRANSFER_ARCHIVE_FULL';this.save();return false;}
+    this.document.unresolvedTransfers??=[];
+    this.document.unresolvedTransfers.push({commandId:r.commandId,at:this.clock(),status:'historically-unresolved',scope:'non-economic-discovery-only',
+      itemId:proof.itemId!,fingerprint:transferFingerprint(r,proof.itemId!),reason:proof.reason,evidence:proof.evidence!,
+      receipt:structuredClone(r),pending:structuredClone(pending),goal:structuredClone(goal),baseline:structuredClone(state)});
+    this.director.isolatePending(r.commandId,this.clock(),proof.evidence!);
+    this.document.lastOutcome={at:this.clock(),commandId:r.commandId,type:r.action.type,status:'historically-unresolved',reason:proof.reason,evidence:proof.evidence!};
+    delete this.document.receipt;delete this.document.route;delete this.document.transferWindow;
+    this.document.blocked=proof.reason;this.save();return true;
+  }
+  isolationSummary() {
+    const entries=this.document.unresolvedTransfers??[];
+    return {active:entries.length>0,scope:entries.length?'non-economic-discovery-only':undefined,
+      count:entries.length,transactions:entries.map(q=>({commandId:q.commandId,at:q.at,status:q.status,itemId:q.itemId,
+        action:q.receipt.action.type,reason:q.reason,evidence:q.evidence})).slice(-8)};
   }
   /** Funding is an observed prerequisite. This never grants purchase authority by itself. */
   prepareFunding(action:LiveCandidate,state:LiveState):boolean {
@@ -267,6 +310,8 @@ export class LiveAgency {
   /** No re-selection here. A refused begin MUST prevent normal execution. */
   begin(selection:Selection,action:LiveCandidate,state:LiveState,commandId:string=randomUUID()):string {
     if(this.document.receipt||this.document.safetyReceipt)throw new Error('RECONCILE_PENDING_ACTION_FIRST');
+    if(this.document.unresolvedTransfers?.some(q=>q.commandId===commandId))throw new Error('QUARANTINED_COMMAND_MUST_NOT_BE_REPLAYED');
+    if(this.document.unresolvedTransfers?.length&&!isolatedActionAllowed(action,state))throw new Error('UNRESOLVED_TRANSFER_ECONOMIC_ISOLATION');
     action=bindItems(action,state);
     const view=this.catalogue(state).view;
     if(view.context!==selection.view.context)throw new Error('CAPABILITY_CONTEXT_CHANGED');
@@ -296,6 +341,7 @@ export class LiveAgency {
     this.save();return commandId;
   }
   record(commandId:string,after:LiveState,verification:Verification,metrics?:{spentGp:number;lostGp:number;deaths:number;elapsedMs:number}):void {
+    if(this.document.unresolvedTransfers?.some(q=>q.commandId===commandId))throw new Error('UNRESOLVED_TRANSFER_REQUIRES_AUTHORITATIVE_RECONCILIATION');
     if(this.document.lastCommands.includes(commandId))return;
     const safety=this.document.safetyReceipt?.commandId===commandId;
     const receipt=safety?this.document.safetyReceipt:this.document.receipt;
@@ -306,8 +352,8 @@ export class LiveAgency {
       if(receipt.action.type==='interactLoc') {
         const loc=(receipt.before.nearbyLocs??[]).find((l:any)=>l.id===receipt.action.fields?.locId&&l.x===receipt.action.fields?.x&&l.z===receipt.action.fields?.z);
         const option=(loc?.optionsWithIndex??[]).find((o:any)=>o.opIndex===receipt.action.fields?.optionIndex);
-        if(loc&&option&&/^(open|climb(?:-up|-down)?|enter|cross|use)$/i.test(String(option.text))) {
-          const fact=discoveryFact(loc,Number(option.opIndex));
+        if(loc&&option&&transitionOption(loc)?.opIndex===option.opIndex) {
+          const fact=discoveryFact(loc,Number(option.opIndex),Number(receipt.before.player?.level??0));
           this.document.knowledge.discovered[fact]=`own-interaction:${receipt.before.player?.lifeId}:${receipt.before.tick}->${after.tick}`;
           const key=`${Number(loc.id)}:${Number(loc.x)}:${Number(loc.z)}:${Number(loc.level??receipt.before.player?.level??0)}:${Number(option.opIndex)}`;
           this.document.knowledge.interactions[key]={name:String(loc.name),id:Number(loc.id),x:Number(loc.x),z:Number(loc.z),level:Number(loc.level??receipt.before.player?.level??0),option:String(option.text),at:this.clock(),evidence:`own-interaction:${receipt.before.tick}->${after.tick}`};
@@ -389,7 +435,7 @@ export class LiveAgency {
       :verifiedAt!==null?'verified'
       :this.document.receipt||this.document.safetyReceipt?'executing'
       :observation?.connected===true&&ageMs!==null&&ageMs<=120_000?'observing':'alive';
-    return {source:'agency-v2.json',acquisition:this.document.acquisition,routeFailures:this.document.knowledge.routeFailures,preparation:this.document.preparation,updatedAt:this.document.updatedAt,buildReadiness:this.document.buildReadiness,development:this.document.development,
+    return {source:'agency-v2.json',isolation:this.isolationSummary(),plannerDiagnostics:this.document.plannerDiagnostics,acquisition:this.document.acquisition,routeFailures:this.document.knowledge.routeFailures,preparation:this.document.preparation,updatedAt:this.document.updatedAt,buildReadiness:this.document.buildReadiness,development:this.document.development,
       lastObservation:this.document.lastObservation,lastOutcome:this.document.lastOutcome,losses:(this.document.losses??[]).slice(-8),
       progressHealth:{...health,stage:health.stalled?'stalled':stage,connected:observation?.connected===true,ageMs,lastObservationAt:observation?.at??null,
         lastVerifiedOutcomeAt:verifiedAt,lastObjectiveProgressAt:objectiveAt,lastSupportProgressAt:supportAt,
@@ -426,6 +472,12 @@ export function authorizeAction(state:LiveState,action:LiveCandidate,method:Meth
     const option=(npc?.optionsWithIndex??[]).find((o:any)=>o.opIndex===action.fields?.optionIndex);
     if(!npc||npc.reachable!==true||!option)throw new Error('FRESH_NPC_OPTION_REQUIRED');
     if(/^attack$/i.test(String(option.text)) && (method.risk!=='bounded'||method.domain!=='combat'))throw new Error('COMBAT_REQUIRES_A_BOUNDED_COMBAT_METHOD');
+  }
+  if(['bankDeposit','bankWithdraw'].includes(action.type)) {
+    if(state.bank?.isOpen!==true||!Array.isArray(state.bank.items)||!Array.isArray(state.inventory)
+      ||![state.bank.items,state.inventory].every(rows=>rows.every((i:any)=>Number.isInteger(i.id)&&Number.isSafeInteger(i.count??1)&&(i.count??1)>=0)))
+      throw new Error('FRESH_COMPLETE_BANK_AND_INVENTORY_REQUIRED');
+    const n=Number(action.fields?.amount);if(!Number.isSafeInteger(n)||n!==-1&&n<1)throw new Error('INVALID_TRANSFER_AMOUNT');
   }
   bindItems(action,state); // Refuse absent/changed items before creating any pending journal.
   if(action.type==='shopBuy') {

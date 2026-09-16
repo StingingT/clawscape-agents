@@ -1,3 +1,4 @@
+import { localCell, localCellFact, localFrontiers, transitionOption } from './discovery.ts';
 import { itemFact, itemName } from './item-intents.ts';
 import type { NeededItem, AcquisitionSource } from './acquisition.ts';
 import { allowedTraining, guideTrainingTarget, strategyView, type Development } from './development.ts';
@@ -9,7 +10,7 @@ import type { Domain, Facts, Identity, Memory, Method, Observation, Opportunity 
 export type LiveState = Record<string, any>;
 export type TaskKind = 'food' | 'ammunition' | 'equipment' | 'bank' | 'combat' | 'production' | 'gathering' | 'exploration' | 'discovery' | 'funds' | 'prayer' | 'acquisition';
 export type Route = { id: string; x: number; z: number; level: number; evidence: string };
-export type Task = { acquisition?:{need:NeededItem;source:AcquisitionSource}; foodTarget?:number; id: string; kind: TaskKind; skill?: string; guideLeadIds?: string[]; route?: Route; target?: { fact: string; minimum: number } };
+export type Task = { localProbe?:boolean; acquisition?:{need:NeededItem;source:AcquisitionSource}; foodTarget?:number; id: string; kind: TaskKind; skill?: string; guideLeadIds?: string[]; route?: Route; target?: { fact: string; minimum: number } };
 export type Policy = {
   reserveCoins: number; maxLossGp: number; maxDeaths: number; maxDurationMs: number;
   foodTarget: number; ammoTarget: number;
@@ -22,7 +23,7 @@ export const defaultPolicy: Policy = {
 };
 export type Catalogue = { view: Observation; opportunities: Opportunity[]; methods: Method[]; tasks: Map<string, Task> };
 export type RouteFailure = {at:number;retryAt:number;attempts:number;context:string;learningRevision:number;reason:string};
-export type Knowledge = { routeFailures?:Record<string,RouteFailure>; bank: any[]; bankCheckedAt: number; routes: Record<string, Route>; visited: Record<string, string>;
+export type Knowledge = { localCells?:Record<string,string>; routeFailures?:Record<string,RouteFailure>; bank: any[]; bankCheckedAt: number; routes: Record<string, Route>; visited: Record<string, string>;
   /** Local, verified environmental discoveries. These are learned facts, not seed routes. */
   discovered: Record<string,string>;
   interactions: Record<string,{name:string;id:number;x:number;z:number;level:number;option:string;at:number;evidence:string}> };
@@ -39,11 +40,10 @@ const base = (state: LiveState, skill: string) => Number((state.skills ?? []).fi
   ?? (state.skills ?? []).find((s: any) => String(s.name).toLowerCase() === skill)?.level ?? 1);
 const at = (state: LiveState, route: Route) => Number(state.player?.level) === route.level &&
   Math.max(Math.abs(Number(state.player?.worldX) - route.x), Math.abs(Number(state.player?.worldZ) - route.z)) <= 1;
-export const discoveryFact = (loc:any, optionIndex:number) => `discovered:interaction:${Number(loc?.id)}:${Number(loc?.x)}:${Number(loc?.z)}:${Number(loc?.level??0)}:${optionIndex}`;
+export const discoveryFact = (loc:any, optionIndex:number, plane=0) => `discovered:interaction:${Number(loc?.id)}:${Number(loc?.x)}:${Number(loc?.z)}:${Number(loc?.level??plane)}:${optionIndex}`;
 const discoveryCandidates = (state:LiveState,k:Knowledge) => (state.nearbyLocs??[])
   .filter((loc:any)=>loc?.reachable===true&&Number.isInteger(loc.id)&&Number.isInteger(loc.x)&&Number.isInteger(loc.z)
-    &&(loc.optionsWithIndex??[]).some((o:any)=>/^(open|climb(?:-up|-down)?|enter|cross|use)$/i.test(String(o.text)))
-    &&!(k.discovered??{})[discoveryFact(loc,(loc.optionsWithIndex??[]).find((o:any)=>/^(open|climb(?:-up|-down)?|enter|cross|use)$/i.test(String(o.text)))!.opIndex)])
+    &&transitionOption(loc)&&!(k.discovered??{})[discoveryFact(loc,transitionOption(loc)!.opIndex,Number(state.player?.level??0))])
   .sort((a:any,b:any)=>Number(a.distance??0)-Number(b.distance??0)||a.x-b.x||a.z-b.z).slice(0,8);
 
 /** Actual personal state only. Duplicate unstackable inventory entries are summed. */
@@ -68,6 +68,7 @@ export function observeFacts(state: LiveState, knowledge: Knowledge): Facts {
   for (const i of [...inv,...equipped,...bank]) facts['owned:' + i.id] = (facts['owned:' + i.id] ?? 0) + quantity(i);
   for (const [id] of Object.entries(knowledge.visited)) facts['visited:' + id] = 1;
   for (const id of Object.keys(knowledge.discovered??{})) facts[id] = 1;
+  for (const cell of Object.keys(knowledge.localCells??{})) facts['observed:local-cell:'+cell] = 1;
   return facts;
 }
 
@@ -82,6 +83,11 @@ export function capabilityContext(state: LiveState): string {
 }
 
 export function observeKnowledge(state: LiveState, k: Knowledge, now: number, seedRoutes: Route[] = []): void {
+  const p=state.player;
+  if(state.inGame===true&&p?.hp>0&&!p.isDead&&[p.worldX,p.worldZ,p.level,state.tick].every(Number.isInteger)) {
+    k.localCells??={};const cell=localCell({x:p.worldX,z:p.worldZ,level:p.level});
+    if(Object.keys(k.localCells).length<8192||k.localCells[cell])k.localCells[cell]??=`own-position:${p.lifeId}:${state.tick}`;
+  }
   if (state.bank?.isOpen === true && Array.isArray(state.bank.items)) { k.bank = structuredClone(state.bank.items); k.bankCheckedAt = now; }
   for (const r of seedRoutes) if (Number.isInteger(r.x) && Number.isInteger(r.z) && Number.isInteger(r.level)) k.routes[r.id] ??= r;
   for (const r of Object.values(k.routes)) if (at(state, r)) k.visited[r.id] = `own-position:${state.player?.lifeId}:${state.tick}`;
@@ -172,11 +178,19 @@ export function buildCatalogue(identity: Identity, state: LiveState, k: Knowledg
        'Visit a sourced lead and verify it personally; path assessment and arrival are required.', 'frontier');
   if (supported.includes('discovery')) {
     for(const loc of discoveryCandidates(state,k)) {
-      const opt=(loc.optionsWithIndex??[]).find((o:any)=>/^(open|climb(?:-up|-down)?|enter|cross|use)$/i.test(String(o.text)))!;
-      const fact=discoveryFact(loc,opt.opIndex);
+      const opt=transitionOption(loc)!;
+      const fact=discoveryFact(loc,opt.opIndex,Number(state.player?.level??0));
       add({id:'discover:'+fact,kind:'discovery'},'exploration',fact,1,1,
         'Test a nearby reachable transition or obstruction with a bounded safe interaction, then retain only the verified result.', 'frontier');
     }
+  }
+  if(supported.includes('discovery'))for(const to of localFrontiers(state,k.localCells??{})) {
+    const fact=localCellFact(to),id='inspect-local:'+localCell(to);
+    const route={id,...to,evidence:`own-local-probe-origin:${state.tick}:${state.player?.worldX},${state.player?.worldZ}`};
+    add({id,kind:'discovery',route,localProbe:true},'exploration',fact,1,1,
+      'Inspect an unobserved local area through a fully collision-verified approach; a probe endpoint is not a known route.', 'investigation');
+    // Safe local discovery competes only after executable substantive methods.
+    const g=opportunities.find(g=>g.id===id);if(g)g.priority='maintenance';
   }
   const completed=memory.reviews.filter(r=>r.result==='success').slice(-5);
   if(completed.length===5 && !completed.some(r=>r.goal.domain==='exploration') && facts.food!>=policy.foodTarget) {

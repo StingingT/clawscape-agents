@@ -1,5 +1,7 @@
 import { ActionCommand, ActionResult, Observation, type Intent } from "./contracts.ts";
 import { Store } from "./store.ts";
+import { agencyState, agencyCandidate } from './agency-bridge.ts';
+import { transitionEvidence, transitionOption } from '../../../src/agency/discovery.ts';
 import { settleAstraTransient } from "./transient-recovery.ts";
 
 export interface Adapter {
@@ -79,8 +81,11 @@ export function evidence(intent: Intent, before: Observation, after: Observation
             && e.target_index===target.index&&(e.type==='damage_dealt'||e.type==='kill')))return ['target-specific-combat-event'];
           return after.activity?.target_type === 'npc' && after.activity.target_index === target.index ? ['attack-target-observed'] : [];
         }
-        if (op === 'open') return !after.entities.some(e => e.kind === target.kind && same(e.position,target.position)
-          && e.content_id === target.content_id && e.options.some(p => p.text.toLowerCase() === 'open')) ? ['obstruction-opened'] : [];
+        if(target.kind==='object') {
+          const state=agencyState(before),action=agencyCandidate(before,{goal:'verify-observed-transition',reason:'Exact command effect',intent});
+          const loc=state.nearbyLocs.find((l:any)=>l.id===target.content_id&&l.x===target.position.x&&l.z===target.position.z);
+          if(transitionOption(loc))return transitionEvidence(state,agencyState(after),action);
+        }
         const skill = /net|bait|lure|fish/.test(op) ? 'fishing' : /chop/.test(op) ? 'woodcutting' : '';
         return skill && (after.skills.find(s => s.name.toLowerCase() === skill)?.xp ?? 0)
           > (before.skills.find(s => s.name.toLowerCase() === skill)?.xp ?? 0)

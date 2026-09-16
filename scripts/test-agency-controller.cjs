@@ -8,7 +8,7 @@ const vm=require('node:vm');
 const assert=require('node:assert/strict');
 const source=readFileSync('src/agent.ts','utf8');
 const parsed=ts.createSourceFile('src/agent.ts',source,ts.ScriptTarget.Latest,true);
-const wanted=['runEpisode','actionsForTask','executeAgencyAction','verification'];
+const wanted=['runEpisode','actionsForTask','executeAgencyAction','verification','localNavigationExperiments'];
 const extracted=parsed.statements.filter(s=>ts.isFunctionDeclaration(s)&&wanted.includes(s.name?.text)).map(s=>s.getText(parsed)).join('\n');
 assert.equal(parsed.statements.filter(s=>ts.isFunctionDeclaration(s)&&wanted.includes(s.name?.text)).length,wanted.length);
 const js=ts.transpileModule(extracted,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText;
@@ -174,9 +174,58 @@ async function runGatherScenario(){
     return {scenario:{learnedGathering:true},harvests,deposits,bankOpens};
   }finally{rmSync(dir,{recursive:true,force:true});}
 }
+async function runDiscoveryScenario({isolatedTransfer=false,blockedProbe=false,stairs=false}={}) {
+  const {LiveAgency,isSelection}=await import('../src/agency/live-adapter.ts');
+  const {bindItems,resolveItems,MissingItem}=await import('../src/agency/item-intents.ts');
+  const {verifyActionOutcome}=await import('../src/action-outcome.ts');
+  const {recoverLegacyJournals}=await import('../src/agency/journal-recovery.ts');
+  const {transitionOption}=await import('../src/agency/discovery.ts');
+  const dir=mkdtempSync(join(tmpdir(),'discovery-controller-'));
+  try {
+    let now=1000,ids=0,moves=0,assessed=0,interactions=0,financialPackets=0;
+    class TestDate extends Date {static now(){return now;}}
+    const state={character:'test',world:'test',profileId:'p',worldEpoch:'epoch',sessionId:'session',inGame:true,tick:1,capacity:28,
+      player:{hp:30,maxHp:30,lifeId:1,respawnCount:0,level:0,worldX:100,worldZ:100,animId:-1,combat:{inCombat:false,targetType:'none',lastDamageTick:-1}},
+      inventory:[],equipment:[],skills:[],bank:{isOpen:false,items:[]},shop:{isOpen:false},dialog:{isOpen:false,isWaiting:false},modalOpen:false,
+      danger:{active:false},nearbyLocs:stairs?[{id:701,name:'Staircase',x:101,z:100,level:0,reachable:true,optionsWithIndex:[{opIndex:2,text:'Climb up'}]}]:[],nearbyNpcs:[]};
+    const agency=new LiveAgency(join(dir,'agency.json'),{agent:'test',world:'test',revision:'test'},
+      {supported:isolatedTransfer?['production','discovery']:['discovery'],now:()=>now});
+    if(isolatedTransfer){
+      const before=structuredClone(state);before.bank={isOpen:true,items:[{slot:8,id:995,name:'Coins',count:80}]};
+      const selection=agency.plan(before);agency.begin(selection,{id:'old-transfer',type:'bankWithdraw',fields:{slot:8,amount:50}},before,'old-transfer');
+      agency.document.receipt.before.bank.items=[]; // reproduce an already-persisted insufficient historical snapshot
+      state.player.lifeId=2;state.player.respawnCount=1;
+    }
+    const env={agency,steps:isolatedTransfer?45:8,character:'test',role:'explorer',build:'melee',forumEnabled:false,training:undefined,
+      console:{log(){},error(){}},Date:TestDate,transitionOption,position:s=>({x:s.player.worldX,z:s.player.worldZ,level:s.player.level}),
+      actionIntentPath:join(dir,'action-intent.json'),dataDir:dir,existsSync:require('node:fs').existsSync,resolve:require('node:path').resolve,
+      recoverLegacyJournals,process:{env:{CLAWSCAPE_SERVER:'test'}},bindItems,resolveItems,MissingItem,stateFrom:v=>v.state,isSelection,verifyActionOutcome,
+      available:v=>v,choose:(_,v)=>v[0],stateKey:()=>'',urgentAgencyAction:()=>undefined,validateMetal:()=>true,validateBow:()=>true,validateFishing:()=>true,
+      equipmentGoals:{validate:()=>true},observeAgencyResult(){},appendFileSync(){},experiencePath:'unused',randomUUID:()=>`probe-${++ids}`,
+      navigator:{assess:async()=>{assessed++;return blockedProbe?{status:'blocked',reason:'unverified-collision-coverage'}:{status:'ready',cost:6,conditionalDoors:0};},
+        step:async to=>{assert.ok(agency.pending(),'probe needs a durable fresh intent');moves++;state.player.worldX=to.x;state.player.worldZ=to.z;state.player.level=to.level;state.tick++;now+=500;
+          return {state:structuredClone(state),navigation:{status:'arrived',movementDispatched:true}};}},
+      cliCall:async args=>{now+=500;state.tick++;
+        if(args[0]==='act'){
+          if(args[1]==='interactLoc'){interactions++;assert.ok(agency.pending());state.player.level=1;state.nearbyLocs=[];}
+          else {financialPackets++;throw new Error('Unexpected packet in discovery: '+args[1]);}
+        }
+        return {state:structuredClone(state)};
+      },
+    };
+    const context=vm.createContext(env);vm.runInContext(js,context);await context.runEpisode();
+    assert.equal(financialPackets,0);
+    if(blockedProbe){assert.equal(moves,0);assert.equal(agency.summary().progressHealth.lastProductiveAt,null);assert.ok(assessed>0);}
+    else {assert.ok(moves>0,'original episode did not dispatch a safe discovery probe');assert.ok(agency.summary().progressHealth.lastProductiveAt);}
+    if(stairs){assert.equal(interactions,1);assert.equal(state.player.level,1);assert.ok(agency.document.knowledge.discovered['discovered:interaction:701:101:100:0:2']);}
+    if(isolatedTransfer){assert.equal(agency.summary().isolation.active,true);assert.equal(agency.document.unresolvedTransfers[0].pending.status,'unknown');}
+    return {scenario:{localDiscovery:true,isolatedTransfer,blockedProbe,stairs},moves,assessed,interactions,financialPackets};
+  } finally {rmSync(dir,{recursive:true,force:true});}
+}
 (async()=>{
   const results=[];
   for(const scenario of [{},{rebound:true},{missingInput:true},{blocked:true},{unknown:true},{deny:true},{movement:true},{movement:true,mapWait:true},{movement:true,legacyNavigation:true},{combatGoal:true},{combatGoal:true,badStyle:true},{combatGoal:true,meleeGoal:true},{combatGoal:true,meleeGoal:true,badStyle:true}])results.push({scenario,...await runScenario(scenario)});
   results.push(await runGatherScenario());
+  for(const scenario of [{},{isolatedTransfer:true},{blockedProbe:true},{stairs:true}])results.push(await runDiscoveryScenario(scenario));
   console.log(JSON.stringify({controllerChecks:results.length,passed:results.length,results},null,2));
 })().catch(e=>{console.error(e);process.exitCode=1;});

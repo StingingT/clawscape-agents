@@ -156,6 +156,15 @@ export class Director {
     this.review(at,'partial',reason,evidence);
   }
 
+  /** Suspend an unknown intent ONLY after the caller established durable isolation.
+   * No execution statistic, reward, payment or loss is inferred. */
+  isolatePending(commandId:string,at:number,evidence:string[]):void {
+    if(!this.memory.pending||this.memory.pending.commandId!==commandId||this.memory.pending.status!=='unknown'||!evidence.length)
+      throw new Error('MATCHING_UNKNOWN_INTENT_REQUIRED');
+    delete this.memory.pending;
+    this.review(at,'partial','Historical transaction isolated; outcome unresolved and financial authority withheld.',evidence);
+  }
+
   /** Refresh the food dependency, not the strategic objective or a pending receipt. */
   reviseFoodNeed(target:number,at:number):void {
     if(this.memory.pending||!Number.isInteger(target)||target<0)return;
@@ -272,6 +281,24 @@ export class Director {
     }
     this.memory.active = goal;
     return this.attach(goal, selected.plan, view);
+  }
+
+  /** Explain candidate starvation without authorizing an action or inventing facts. */
+  diagnose(view:Observation, opportunities:Opportunity[], methods:Method[]) {
+    const reasons=(m:Method):string[]=>[
+      ...(!view.capabilities.includes(m.capability)?['missing-capability']:[]),
+      ...(m.risk==='unknown'?['unknown-risk']:m.risk==='pvp'?['pvp-disallowed']:[]),
+      ...((view.strategy?.protectedSkills??[]).some(s=>(m.effects['xp:'+s]??0)>0)?['protected-xp']:[]),
+      ...(!available(this.memory,view,m)&&permitted(m,view)?['method-cooldown']:[]),
+      ...(m.costGp>view.budget.spendableGp||m.lossBoundGp>view.budget.maxLossGp?['budget']:[]),
+    ];
+    return {at:view.at,opportunities:opportunities.length,methods:methods.length,
+      missingCapabilities:[...new Set(methods.filter(m=>!view.capabilities.includes(m.capability)).map(m=>m.capability))],
+      candidates:opportunities.slice(0,16).map(g=>({id:g.id,target:g.target,
+        reasons:met(view.facts,g.target)?['already-satisfied']:(this.memory.goalCooldowns[goalKey(view,g)]??0)>view.at?['goal-cooldown']:
+          makePlan(this.memory,view,g,methods)?.steps.length?[]:['no-complete-permitted-plan'],
+        methods:methods.filter(m=>(m.effects[g.target.fact]??0)>0).slice(0,4).map(m=>({id:m.id,reasons:reasons(m),
+          missing:m.prerequisites.filter(r=>!met(view.facts,r)).slice(0,8)}))}))};
   }
 
   /** An executable method can discover a missing prerequisite without dispatching. */
