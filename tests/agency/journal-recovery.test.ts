@@ -99,9 +99,10 @@ test('error classification does not include secret-bearing exception text',()=>{
   assert.equal(startupFailure(new Error('CONFIG_FILE_MISSING')).retryable,false);
 });
 test('bootstrap persists status even when importing the main runtime fails',async()=>{
-  const dir=mkdtempSync(join(tmpdir(),'bootstrap-test-'));const exit=process.exitCode;
+  const dir=mkdtempSync(join(tmpdir(),'bootstrap-test-'));const exit=process.exitCode ?? 0; // Bun needs an explicit numeric restoration after an expected startup failure.
   try {
     await runWithStartupStatus(dir,['run','--runtime-root',dir],async()=>{throw Object.assign(new Error('Cannot find package zod TOKEN_SHOULD_NOT_APPEAR'),{code:'ERR_MODULE_NOT_FOUND'});});
+    assert.equal(process.exitCode,2); // Production must still report the expected startup failure.
     const text=readFileSync(join(dir,'data/astra-live/status.json'),'utf8'),s=JSON.parse(text);
     assert.equal(s.status,'STARTUP_FAILED');assert.equal(s.reason,'RUNTIME_DEPENDENCY_MISSING');assert.equal(s.pid,process.pid);
     assert.equal(text.includes('TOKEN_SHOULD_NOT_APPEAR'),false);assert.equal(existsSync(join(dir,'data/astra-launcher-status.json')),true);

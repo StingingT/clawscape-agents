@@ -48,7 +48,7 @@ export function reconcileAstraJournals(store:Store,directory:string,first:Observ
         } catch { /* Missing original entity/slot is uncertainty, never a guessed mapping. */ }
       }
       if(proof.length)resolved={...result,status:'SUCCEEDED',reason:'RECONCILED_DURABLE_EFFECT',evidence:proof,at:Date.now()};
-      else if(before&&['move','close_interface','style','dialogue'].includes(command.intent.operation)) {
+      else if(before&&['move','close_interface','style','dialogue','interact','pickup','use_on_item','use_on_object'].includes(command.intent.operation)) {
         const transient=settleAstraTransient(store,command,result,before,second);
         why=transient.reason;settling=transient.settling;
         // The shared helper writes its cancellation and immutable audit atomically.
@@ -82,7 +82,12 @@ export function reconcileAstraJournals(store:Store,directory:string,first:Observ
         report.resolved.push(q.commandId);continue;
       }
     }
-    if(agency.pending(scope))report.unresolved.push({commandId:receipt.commandId,operation:receipt.action.type,reason:proof.reason??'Pending accounting or safety outcome.'});
+    if(agency.pending(scope)) {
+      const pending=agency.pending(scope)!;
+      report.unresolved.push({commandId:receipt.commandId,operation:receipt.action.type,
+        reason:pending.investigation?.reason??proof.reason??'Pending accounting or safety outcome.',
+        settling:!!pending.historicalWindow});
+    }
   }
   const legacy=recoverLegacyJournals(directory,{agent:second.character,world:second.world},{
     state:agencyState(first),stable:agencyState(second),executorSettled:report.unresolved.length===0,

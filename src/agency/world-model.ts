@@ -21,7 +21,7 @@ export const defaultPolicy: Policy = {
   reserveCoins: 25, maxLossGp: 100, maxDeaths: 1, maxDurationMs: 30 * 60_000,
   foodTarget: 0, ammoTarget: 50,
 };
-export type Catalogue = { view: Observation; opportunities: Opportunity[]; methods: Method[]; tasks: Map<string, Task> };
+export type Catalogue = { view: Observation; opportunities: Opportunity[]; methods: Method[]; tasks: Map<string, Task>; discovery?:{reason:string;nextProbeAt?:number} };
 export type RouteFailure = {at:number;retryAt:number;attempts:number;context:string;learningRevision:number;reason:string};
 export type Knowledge = { routeFailures?:Record<string,RouteFailure>; bank: any[]; bankCheckedAt: number; routes: Record<string, Route>; visited: Record<string, string>;
   /** Local, verified environmental discoveries. These are learned facts, not seed routes. */
@@ -174,7 +174,13 @@ export function buildCatalogue(identity: Identity, state: LiveState, k: Knowledg
   // Count actual survey goal IDs (and legacy IDs), including unsuccessful probes.
   const recentLocalProbes=memory.reviews.filter(r=>/^(?:survey:)?local-probe:/.test(r.goal.id)&&now-r.at<10*60_000).length;
   const health=progressHealth(memory,now);
-  const discoveryBootstrap=health.lastProductiveAt===null||health.stalled||!!memory.active?.blocker;
+  const lastReview=memory.reviews.at(-1);
+  // A successful discovery probe may continue its bounded episode. Ordinary
+  // productive work still suppresses bootstrap (including persisted probes).
+  const continuingDiscovery=lastReview?.result==='success'&&/^survey:local-probe:/.test(lastReview.goal.id)
+    &&now>=lastReview.at&&now-lastReview.at<10*60_000
+    &&(health.lastProductiveAt===null||health.lastProductiveAt<=lastReview.at);
+  const discoveryBootstrap=health.lastProductiveAt===null||health.stalled||!!memory.active?.blocker||continuingDiscovery;
   const p=state.player;
   const safeProbeState=state.inGame===true&&!!p&&!p.isDead&&Number(p.hp)>0
     &&p.combat?.inCombat!==true&&state.danger?.active!==true;
@@ -217,5 +223,11 @@ export function buildCatalogue(identity: Identity, state: LiveState, k: Knowledg
     knowledgeRevision: memory.learningRevision ?? 0, strategy: strategyView(development),
     funding:{carriedGp:cash(state.inventory??[]),bankGp:bankCoins,reserveGp:policy.reserveCoins,evidence} };
   // Completed/poor trials affect later choices through the Director's method memory and cooldowns.
-  return {view,opportunities,methods,tasks};
+  const probeReviews=memory.reviews.filter(r=>/^(?:survey:)?local-probe:/.test(r.goal.id)&&now>=r.at&&now-r.at<10*60_000).sort((a,b)=>a.at-b.at);
+  const discovery=probeReviews.length>=2
+    ?{reason:'local discovery attempt budget exhausted',nextProbeAt:probeReviews.at(-2)!.at+10*60_000}
+    :!discoveryBootstrap&&health.lastProductiveAt!==null
+      ?{reason:'bootstrap deferred after productive work',nextProbeAt:health.lastProductiveAt+5*60_000}
+      :{reason:safeProbeState?'local discovery available':'current safety/observation state prevents discovery'};
+  return {view,opportunities,methods,tasks,discovery};
 }

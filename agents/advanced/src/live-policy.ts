@@ -271,7 +271,8 @@ export class LivePolicy {
    * XP, reward, or success is inferred from current quiescence. */
   retireReconciledOutcome(before:Observation, intent:Intent, result:ActionResult):boolean {
     const pending=this.state.uncertain;
-    const bankQuarantine=['withdraw','deposit'].includes(intent.operation)
+    const bankQuarantine=(['withdraw','deposit'].includes(intent.operation)
+      ||['move','interact'].includes(intent.operation)&&result.evidence.includes('historical-navigation-context'))
       &&result.reason==='HISTORICALLY_UNRESOLVED_QUARANTINED'
       &&result.evidence.includes(`historical-command-quarantined:${result.action_id}`);
     if(!pending||result.status!=='CANCELLED'||!result.evidence.length

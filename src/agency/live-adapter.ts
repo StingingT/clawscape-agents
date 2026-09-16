@@ -4,6 +4,7 @@ import { validateBuildRules, type BuildRules } from './build-rules.ts';
 import { chooseDevelopment, reviewDevelopment, developmentReadiness, guardDevelopment, protectedXpChanged, type Development } from './development.ts';
 import { observeQuietStep, recordViability, retryAllowed, stepKey, type QuietWindow, type Viability } from './step-retry.ts';
 import { effectState, progressHealth, PROGRESS_TIMEOUT_MS } from './progress.ts';
+import { observeHistoricalContext, historicalActionIdentity, type HistoricalWindow } from './historical-context.ts';
 import { meaningfulFrontierRoute, reconcileDeathLoss } from './reconciliation.ts';
 import { conflictsWithQuarantine, quarantineEligible, releaseFromFreshAccounting, transactionIdentity,
   type QuarantinedTransaction } from './transaction-quarantine.ts';
@@ -19,7 +20,7 @@ import { buildCatalogue, capabilityContext, cash, defaultPolicy, emptyKnowledge,
 
 export type LiveCandidate = { approach?:{x:number;z:number;level:number}; itemRefs?:ItemRef[]; id: string; type: string; fields?: Record<string, any>; waitTicks?: number };
 export type Selection = { decision: Extract<Decision,{type:'execute'}>; method: Method; task: Task; view: Observation };
-export type Receipt = { commandId:string; action:LiveCandidate; before:LiveState; startedAt:number; scope:'task'|'safety'; methodId?:string; approach?:{x:number;z:number;level:number}; execution?:{accepted?:boolean;phase?:string;navigation?:{status:string;reason?:string;movementDispatched?:boolean}}; stationary?:QuietWindow; investigation?:{at:number;reason:string;quietSince?:number} };
+export type Receipt = { commandId:string; action:LiveCandidate; before:LiveState; startedAt:number; scope:'task'|'safety'; methodId?:string; approach?:{x:number;z:number;level:number}; execution?:{accepted?:boolean;phase?:string;navigation?:{status:string;reason?:string;movementDispatched?:boolean}}; stationary?:QuietWindow; historicalWindow?:HistoricalWindow; investigation?:{at:number;reason:string;quietSince?:number} };
 type Document = { acquisition?:AcquisitionMemory; interruptions?:Array<{at:number;receipt:Receipt;reason:string}>; trips?:TripLearning; preparation?:TripPreparation; version:2; memory:Memory; knowledge:Knowledge; receipt?:Receipt; safetyReceipt?:Receipt;
   buildReadiness?:ReturnType<typeof developmentReadiness>; lastCommands:string[]; route?:{goalKey:string;methodId:string;action:LiveCandidate}; blocked?:string; development?:Development; updatedAt?:number;
   retries?:Record<string,Viability>; lastOutcome?:{at:number;commandId:string;type:string;status:string;reason?:string;evidence:string[]};
@@ -143,6 +144,8 @@ export class LiveAgency {
     const decision=this.director.next(catalogue.view,catalogue.opportunities,catalogue.methods);
     if(decision.type==='blocked'&&this.director.memory.active?.domain==='combat'&&catalogue.methods.some(m=>m.risk==='unknown'))
       decision.reason+=' Combat loss valuation is unknown: provide an audited carried-kit replacement-loss ceiling in agency-policy.json.';
+    if(decision.type==='blocked'&&!this.director.memory.active&&catalogue.discovery?.nextProbeAt!==undefined)
+      decision.reason+=` Discovery is bounded: ${catalogue.discovery.reason}; next probe eligible at ${catalogue.discovery.nextProbeAt}. Normal objectives were reconsidered.`;
     this.document.blocked=decision.type==='blocked'?decision.reason:undefined;this.save();
     if(decision.type!=='execute')return decision;
     const method=catalogue.methods.find(m=>m.id===decision.step.methodId),task=catalogue.tasks.get(decision.step.methodId);
@@ -157,19 +160,28 @@ export class LiveAgency {
     const entry=this.document.transactionQuarantine?.find(q=>q.commandId===commandId);
     return entry&&structuredClone(entry);
   }
-  /** Preserve a historically unresolved bank mutation as audit state instead of inventing success/failure. */
+  /** Preserve a supported historical action as audit state, not success/failure.
+   * Bank mutations retain item-level accounting barriers; old navigation retains a permanent command ban. */
   quarantinePendingTransaction(state:LiveState,reason:string):QuarantinedTransaction|undefined {
     const receipt=this.document.receipt,pending=this.director.memory.pending;
-    if(!receipt||receipt.scope!=='task'||!pending||pending.commandId!==receipt.commandId||pending.status!=='unknown')return;
+    if(!receipt||receipt.scope!=='task'||this.document.safetyReceipt||!pending||pending.commandId!==receipt.commandId||pending.status!=='unknown')return;
     const now=this.clock();
-    if(!quarantineEligible(receipt.action,receipt.before,state,receipt.startedAt,now,reason))return;
-    const identity=transactionIdentity(receipt.action,receipt.before);if(!identity)return;
+    let historicalEvidence:string[]=[];
+    if(!quarantineEligible(receipt.action,receipt.before,state,receipt.startedAt,now,reason)) {
+      const historical=observeHistoricalContext(receipt.action,receipt.before,state,receipt.startedAt,now,this.observer,receipt.historicalWindow);
+      receipt.historicalWindow=historical.window;
+      receipt.investigation={at:now,reason:historical.reason,quietSince:historical.window?.since};
+      if(!historical.settled){this.document.blocked=historical.reason;this.save();return;}
+      historicalEvidence=historical.evidence;
+    }
+    const identity=historicalActionIdentity(receipt.action,receipt.before);if(!identity)return;
     const evidence=[`historical-command-quarantined:${receipt.commandId}`,`fresh-current-state:${state.tick}`,
       'No historical success or failure inferred; exact command must never be replayed.',
-      'Future bank mutations for the affected item require a complete fresh bank snapshot.'];
+      ...(identity.kind==='bank'?['Future bank mutations for the affected item require a complete fresh bank snapshot.']:[]),
+      ...historicalEvidence];
     const goalKey=pending.goalKey;
     const entry:QuarantinedTransaction={at:now,commandId:receipt.commandId,type:receipt.action.type,semanticKey:identity.semanticKey,
-      itemIds:identity.itemIds,reason,evidence,goalKey,active:true,originalReceipt:structuredClone(receipt),
+      itemIds:identity.itemIds,reason,evidence,goalKey,active:identity.kind==='bank',originalReceipt:structuredClone(receipt),
       observation:{tick:state.tick,sessionId:state.sessionId,character:state.character,world:state.world,
         worldEpoch:state.worldEpoch,profileId:state.profileId}};
     this.document.transactionQuarantine=[...(this.document.transactionQuarantine??[]),entry];
@@ -177,8 +189,10 @@ export class LiveAgency {
     if(this.document.acquisition?.need?.parentKey===goalKey)delete this.document.acquisition.need;
     this.document.lastCommands=[...this.document.lastCommands,receipt.commandId].slice(-128);
     this.document.lastOutcome={at:now,commandId:receipt.commandId,type:receipt.action.type,status:'quarantined',reason,evidence};
-    if(this.director.memory.active)this.director.deferCurrent(now,'Historical bank transaction quarantined; replan only from fresh current state.',evidence);
-    this.document.blocked='Historical bank transaction quarantined; value-moving replay disabled until fresh bank accounting.';
+    if(this.director.memory.active)this.director.deferCurrent(now,'Historical action quarantined; replan only from fresh current state.',evidence);
+    this.document.blocked=identity.kind==='bank'
+      ?'Historical bank transaction quarantined; affected bank mutations require fresh accounting.'
+      :'Historical navigation context quarantined; original effect unknown, old command permanently non-replayable.';
     this.save();return structuredClone(entry);
   }
   private transactionConflict(action:LiveCandidate,state:LiveState):boolean {
@@ -331,13 +345,14 @@ export class LiveAgency {
   /** Urgent survival is independent of the goal; it cannot overwrite an unresolved ordinary intent. */
   beginSafety(action:LiveCandidate,state:LiveState,commandId:string=randomUUID()):string {
     if(this.document.safetyReceipt)throw new Error('RECONCILE_SAFETY_ACTION_FIRST');
+    if(this.quarantinedTransaction(commandId))throw new Error('QUARANTINED_COMMAND_ID_CANNOT_BE_REUSED');
     action=bindItems(action,state);
     if(!safetyAction(state,action))throw new Error('NOT_AN_URGENT_SAFETY_ACTION');
     this.document.safetyReceipt={commandId,action:structuredClone(action),before:structuredClone(state),startedAt:this.clock(),scope:'safety'};
     this.save();return commandId;
   }
   record(commandId:string,after:LiveState,verification:Verification,metrics?:{spentGp:number;lostGp:number;deaths:number;elapsedMs:number}):void {
-    if(this.document.lastCommands.includes(commandId))return;
+    if(this.document.lastCommands.includes(commandId)||this.quarantinedTransaction(commandId))return;
     const safety=this.document.safetyReceipt?.commandId===commandId;
     const receipt=safety?this.document.safetyReceipt:this.document.receipt;
     if(!receipt && this.document.lastCommands.includes(commandId))return;
@@ -408,6 +423,18 @@ export class LiveAgency {
     }
     if(!this.document.receipt || this.document.receipt.commandId!==commandId)
       this.document.lastCommands=[...this.document.lastCommands,commandId].slice(-128);
+    // A terminal, command-scoped navigation refusal ends this APPROACH now.
+    // Loading, partial movement, danger and unknown dispatches do not qualify.
+    const nav=receipt.execution?.navigation;
+    if(!safety&&!this.document.receipt&&verification.status==='interrupted'&&verification.evidence.length
+      &&nav?.status==='blocked'&&nav.movementDispatched===false
+      &&['door-retry-budget','partial-path','empty-route','unverified-collision-coverage','transition-required'].includes(nav.reason??'')) {
+      const routeId=receipt.methodId?.startsWith('survey:')?receipt.methodId.slice(7):undefined;
+      const route=routeId?this.document.knowledge.routes[routeId]:undefined;
+      if(route)this.deferSurvey(route,after,'NAVIGATION_APPROACH_EXHAUSTED: '+nav.reason);
+      else if(this.director.memory.active?.plan?.steps[0]?.methodId===receipt.methodId)
+        this.deferCurrent(after,'NAVIGATION_APPROACH_EXHAUSTED: '+nav.reason);
+    }
     if(verification.status!=='unknown' && (verification.evidence.length || verification.status==='rejected')) {
       const key=stepKey(receipt.action,receipt.before);this.document.retries??={};
       this.document.retries[key]=recordViability(this.document.retries[key],verification.status,this.clock(),
