@@ -279,11 +279,14 @@ export class Director {
     if (this.memory.pending) throw new Error('RECONCILE_PENDING_ACTION_FIRST');
     const goal = this.memory.active;
     if (!goal) return;
-    goal.blocker = { at, reason, recheckAt: at + COOLDOWN_MS };
+    // Re-reporting the same refusal must not move its deadline indefinitely.
+    // Only a changed cause starts a new bounded investigation window.
+    const previous=goal.blocker;
+    goal.blocker=previous?.reason===reason?previous:{at,reason,recheckAt:at+30_000,attempts:0};
     const step = goal.plan?.steps[0];
     if (step) {
       const stats = this.memory.methods[methodKey(goal.planContext ?? goal.context, step.methodId)] ??= emptyStats();
-      stats.viability = 'temporarily-poor'; stats.cooldownUntil = at + COOLDOWN_MS;
+      stats.viability = 'temporarily-poor'; if(previous?.reason!==reason)stats.cooldownUntil = at + COOLDOWN_MS;
       stats.knowledgeRevision = this.memory.learningRevision ?? 0;
     }
     // No dispatch occurred. Keep the goal, its budget, and preparation history.

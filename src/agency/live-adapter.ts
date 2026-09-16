@@ -11,6 +11,7 @@ import { addAcquisition, emptyAcquisition, observeAcquisitionSources, rememberAc
 import type { DropLead } from './drop-leads.ts';
 import { bindItems, resolveItems, itemFact, itemCount, type ItemNeed, type ItemRef } from './item-intents.ts';
 import { randomUUID } from 'node:crypto';
+import { observeHistoricalContext, historicalWindowReady, historicalTraversal, type HistoricalWindow } from './historical-context.ts';
 import { emptyTrips, preparation, observeTrip, recordTripEffect, type TripLearning, type TripPreparation } from './trip-logistics.ts';
 import { Director, createMemory } from './director.ts';
 import type { Decision, Identity, Memory, Method, Observation, Outcome } from './types.ts';
@@ -19,14 +20,16 @@ import { buildCatalogue, capabilityContext, cash, defaultPolicy, emptyKnowledge,
 
 export type LiveCandidate = { approach?:{x:number;z:number;level:number}; itemRefs?:ItemRef[]; id: string; type: string; fields?: Record<string, any>; waitTicks?: number };
 export type Selection = { decision: Extract<Decision,{type:'execute'}>; method: Method; task: Task; view: Observation };
-export type Receipt = { commandId:string; action:LiveCandidate; before:LiveState; startedAt:number; scope:'task'|'safety'; methodId?:string; approach?:{x:number;z:number;level:number}; execution?:{accepted?:boolean;phase?:string;navigation?:{status:string;reason?:string;movementDispatched?:boolean}}; stationary?:QuietWindow; investigation?:{at:number;reason:string;quietSince?:number} };
+export type Receipt = { commandId:string; action:LiveCandidate; before:LiveState; startedAt:number; scope:'task'|'safety'; methodId?:string; approach?:{x:number;z:number;level:number}; execution?:{accepted?:boolean;phase?:string;navigation?:{status:string;reason?:string;movementDispatched?:boolean}}; stationary?:QuietWindow; historical?:HistoricalWindow; investigation?:{at:number;reason:string;quietSince?:number} };
 type Document = { acquisition?:AcquisitionMemory; interruptions?:Array<{at:number;receipt:Receipt;reason:string}>; trips?:TripLearning; preparation?:TripPreparation; version:2; memory:Memory; knowledge:Knowledge; receipt?:Receipt; safetyReceipt?:Receipt;
   buildReadiness?:ReturnType<typeof developmentReadiness>; lastCommands:string[]; route?:{goalKey:string;methodId:string;action:LiveCandidate}; blocked?:string; development?:Development; updatedAt?:number;
   retries?:Record<string,Viability>; lastOutcome?:{at:number;commandId:string;type:string;status:string;reason?:string;evidence:string[]};
   losses?:Array<{at:number;commandId:string;lifeFrom:any;lifeTo:any;lostGp:number;items:Array<{id:number|string;count:number;name?:string}>}>;
   transactionQuarantine?:QuarantinedTransaction[];
+  historicalRetirements?:Array<{at:number;commandId:string;receipt:Receipt;reason:string;evidence:string[];lossAttribution:'unknown'}>;
+  discoveryRetryAt?:number;
   lastObservation?:{at:number;tick?:number;connected?:boolean;position?:{x:number;z:number;level:number}} };
-export type Verification = { recovery?:'investigate'; status:'verified'|'rejected'|'unknown'|'interrupted'; evidence:string[]; reason?:string };
+export type Verification = { historical?:boolean; recovery?:'investigate'; status:'verified'|'rejected'|'unknown'|'interrupted'; evidence:string[]; reason?:string };
 
 const atomic = (file:string,value:unknown) => {
   mkdirSync(dirname(file),{recursive:true});
@@ -141,6 +144,11 @@ export class LiveAgency {
       this.checkProgress(state);
     }
     const decision=this.director.next(catalogue.view,catalogue.opportunities,catalogue.methods);
+    this.document.discoveryRetryAt=undefined;
+    if(decision.type==='blocked'&&!this.director.memory.pending&&!this.director.memory.active&&catalogue.discoveryRetryAt) {
+      this.document.discoveryRetryAt=catalogue.discoveryRetryAt;
+      decision.reason+=' Local discovery is temporarily budgeted/cooling down; next eligibility '+new Date(catalogue.discoveryRetryAt).toISOString()+'. Feasible ordinary goals are still reconsidered on each observation.';
+    }
     if(decision.type==='blocked'&&this.director.memory.active?.domain==='combat'&&catalogue.methods.some(m=>m.risk==='unknown'))
       decision.reason+=' Combat loss valuation is unknown: provide an audited carried-kit replacement-loss ceiling in agency-policy.json.';
     this.document.blocked=decision.type==='blocked'?decision.reason:undefined;this.save();
@@ -162,9 +170,21 @@ export class LiveAgency {
     const receipt=this.document.receipt,pending=this.director.memory.pending;
     if(!receipt||receipt.scope!=='task'||!pending||pending.commandId!==receipt.commandId||pending.status!=='unknown')return;
     const now=this.clock();
-    if(!quarantineEligible(receipt.action,receipt.before,state,receipt.startedAt,now,reason))return;
     const identity=transactionIdentity(receipt.action,receipt.before);if(!identity)return;
-    const evidence=[`historical-command-quarantined:${receipt.commandId}`,`fresh-current-state:${state.tick}`,
+    const quantity=Number(receipt.action.fields?.amount);
+    if(!Number.isSafeInteger(quantity)||!(quantity>0||receipt.action.type==='bankDeposit'&&quantity===-1))return;
+    let historicalEvidence:string[]=[];
+    if(!quarantineEligible(receipt.action,receipt.before,state,receipt.startedAt,now,reason)) {
+      const current=observeHistoricalContext(receipt.before,state,now,this.observer,receipt.historical);
+      receipt.historical=current.window;
+      receipt.investigation={at:now,reason:current.reason,quietSince:current.window?.since};
+      this.document.blocked=current.reason;this.save();
+      // A new current-context window, not the old server tick origin, establishes
+      // administrative finality. The original value-moving effect stays unknown.
+      if(!current.settled||!Number.isFinite(receipt.startedAt)||now-receipt.startedAt<120_000)return;
+      historicalEvidence=current.evidence;
+    }
+    const evidence=[`historical-command-quarantined:${receipt.commandId}`,`fresh-current-state:${state.tick}`,...historicalEvidence,
       'No historical success or failure inferred; exact command must never be replayed.',
       'Future bank mutations for the affected item require a complete fresh bank snapshot.'];
     const goalKey=pending.goalKey;
@@ -212,6 +232,16 @@ export class LiveAgency {
     if(!r||r.commandId!==commandId)return;
     const result=observeQuietStep(r.action,r.before,state,this.clock(),this.observer,r.stationary);
     r.stationary=result.window;
+    if(!result.settled&&historicalTraversal(r.action,r.before)) {
+      const current=observeHistoricalContext(r.before,state,this.clock(),this.observer,r.historical,true);
+      r.historical=current.window;
+      if(current.window) {
+        r.investigation={at:this.clock(),reason:current.reason,quietSince:current.window.since};
+        this.document.blocked=current.reason;this.save();
+        return current.settled?{status:'interrupted',recovery:'investigate',historical:true,
+          reason:current.reason,evidence:['historical-context-retired',...current.evidence]}:undefined;
+      }
+    }
     r.investigation={at:this.clock(),reason:result.reason,quietSince:result.window?.since};
     this.document.blocked=result.reason;this.save();
     return result.settled?{status:'interrupted',recovery:['interactNpc','interactLoc','pickupItem','useItemOnItem','useItemOnLoc'].includes(r.action.type)?'investigate':undefined,evidence:[result.reason],reason:result.reason}:undefined;
@@ -307,6 +337,7 @@ export class LiveAgency {
   begin(selection:Selection,action:LiveCandidate,state:LiveState,commandId:string=randomUUID()):string {
     if(this.document.receipt||this.document.safetyReceipt)throw new Error('RECONCILE_PENDING_ACTION_FIRST');
     if(this.quarantinedTransaction(commandId))throw new Error('QUARANTINED_COMMAND_ID_CANNOT_BE_REUSED');
+    if(this.document.historicalRetirements?.some(r=>r.commandId===commandId))throw new Error('HISTORICAL_COMMAND_ID_CANNOT_BE_REUSED');
     action=bindItems(action,state);
     if(this.transactionConflict(action,state))throw new Error('TRANSACTION_QUARANTINED_UNTIL_FRESH_BANK_ACCOUNTING');
     const view=this.catalogue(state).view;
@@ -331,17 +362,30 @@ export class LiveAgency {
   /** Urgent survival is independent of the goal; it cannot overwrite an unresolved ordinary intent. */
   beginSafety(action:LiveCandidate,state:LiveState,commandId:string=randomUUID()):string {
     if(this.document.safetyReceipt)throw new Error('RECONCILE_SAFETY_ACTION_FIRST');
+    if(this.quarantinedTransaction(commandId)||this.document.historicalRetirements?.some(r=>r.commandId===commandId))throw new Error('HISTORICAL_COMMAND_ID_CANNOT_BE_REUSED');
     action=bindItems(action,state);
     if(!safetyAction(state,action))throw new Error('NOT_AN_URGENT_SAFETY_ACTION');
     this.document.safetyReceipt={commandId,action:structuredClone(action),before:structuredClone(state),startedAt:this.clock(),scope:'safety'};
     this.save();return commandId;
   }
   record(commandId:string,after:LiveState,verification:Verification,metrics?:{spentGp:number;lostGp:number;deaths:number;elapsedMs:number}):void {
-    if(this.document.lastCommands.includes(commandId))return;
+    if(this.document.lastCommands.includes(commandId)||this.document.historicalRetirements?.some(r=>r.commandId===commandId)||this.quarantinedTransaction(commandId))return;
     const safety=this.document.safetyReceipt?.commandId===commandId;
     const receipt=safety?this.document.safetyReceipt:this.document.receipt;
     if(!receipt && this.document.lastCommands.includes(commandId))return;
     if(!receipt||receipt.commandId!==commandId)throw new Error('OUTCOME_WITHOUT_MATCHING_INTENT');
+    const historical=verification.historical===true&&verification.status==='interrupted'
+      &&verification.evidence.includes('historical-context-retired')&&historicalTraversal(receipt.action,receipt.before)
+      &&historicalWindowReady(receipt.before,after,this.clock(),this.observer,receipt.historical,true);
+    if(verification.historical&&!historical)verification={status:'unknown',evidence:[],reason:'Historical retirement requires the current controller-owned measured current-context window.'};
+    if(historical) {
+      this.document.historicalRetirements=[...(this.document.historicalRetirements??[]),
+        {at:this.clock(),commandId,receipt:structuredClone(receipt),reason:verification.reason??'historical context ended',
+         evidence:[...verification.evidence],lossAttribution:'unknown'}];
+      // These are administrative charges, NOT a claim that no loss/death occurred.
+      // Unattributable historical losses remain explicitly unknown in the audit.
+      metrics={spentGp:0,lostGp:0,deaths:0,elapsedMs:0};
+    }
     if(verification.status==='verified') {
       this.document.acquisition??=emptyAcquisition();rememberAcquisitionSources(this.document.acquisition,receipt.before,after,receipt.action,this.clock());
       if(receipt.action.type==='interactLoc') {
@@ -360,7 +404,7 @@ export class LiveAgency {
     recordTripEffect(this.document.trips,commandId,receipt.before,after,receipt.action,verification.status==='verified');
     const state=this.catalogue(after).view;
     if(verification.status==='interrupted' && verification.evidence.length)delete this.document.route;
-    const deaths=Number(after.player?.lifeId!==receipt.before.player?.lifeId);
+    const deaths=historical?0:Number(after.player?.lifeId!==receipt.before.player?.lifeId);
     let reconciledMetrics=metrics;
     if(deaths && !metrics && !['shopBuy','shopSell','bankDeposit','bankWithdraw','clickDialogOption'].includes(receipt.action.type)) {
       const loss=reconcileDeathLoss(receipt.before,after);
@@ -415,6 +459,17 @@ export class LiveAgency {
       const entries=Object.entries(this.document.retries).sort((a,b)=>b[1].at-a[1].at).slice(0,512);
       this.document.retries=Object.fromEntries(entries);
     }
+    // A terminally exhausted navigation attempt is a refusal of this approach,
+    // not authority to keep the same exploration goal idle for another timeout.
+    const nav=receipt.execution?.navigation,active=this.director.memory.active;
+    if(!safety&&!this.document.receipt&&!this.document.safetyReceipt&&active&&verification.status==='interrupted'
+      &&verification.evidence.length&&nav?.status==='blocked'
+      &&/^(door-retry-budget|empty-route|partial-path|unverified-collision-coverage|transition-required|no-progress|leg-timeout)$/.test(nav.reason??'')) {
+      const routeId=receipt.methodId?.startsWith('survey:')?receipt.methodId.slice(7):undefined;
+      const route=routeId?this.document.knowledge.routes[routeId]:undefined;
+      if(route)this.deferSurvey(route,after,'EXHAUSTED_NAVIGATION: '+nav.reason);
+      else if(active.domain==='exploration'&&active.id===receipt.methodId)this.deferCurrent(after,'EXHAUSTED_NAVIGATION: '+nav.reason);
+    }
     this.save();
   }
   summary() {
@@ -437,6 +492,8 @@ export class LiveAgency {
         noProgressAttempts:this.director.memory.active?.noProgress??0,
         preparationOnlyStreak:this.director.memory.active?.preparationOnlyStreak??0},
       transactionQuarantine:(this.document.transactionQuarantine??[]).slice(-8).map(({originalReceipt,...brief})=>brief),
+      historicalRetirements:(this.document.historicalRetirements??[]).slice(-8).map(({receipt,...brief})=>brief),
+      discoveryRetryAt:this.document.discoveryRetryAt,
       goal:this.director.memory.active,pending:brief(this.pending()),safetyPending:brief(this.pending('safety')),blocked:this.document.blocked};
   }
 }

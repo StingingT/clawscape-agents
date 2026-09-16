@@ -4,7 +4,7 @@ import { allowedTraining, guideTrainingTarget, strategyView, type Development } 
 import type { BuildRules } from './build-rules.ts';
 import { meaningfulFrontierRoute } from './reconciliation.ts';
 import { preparation, emptyTrips, type TripLearning } from './trip-logistics.ts';
-import { progressHealth } from './progress.ts';
+import { progressHealth, PROGRESS_TIMEOUT_MS } from './progress.ts';
 import type { Domain, Facts, Identity, Memory, Method, Observation, Opportunity } from './types.ts';
 
 export type LiveState = Record<string, any>;
@@ -21,7 +21,7 @@ export const defaultPolicy: Policy = {
   reserveCoins: 25, maxLossGp: 100, maxDeaths: 1, maxDurationMs: 30 * 60_000,
   foodTarget: 0, ammoTarget: 50,
 };
-export type Catalogue = { view: Observation; opportunities: Opportunity[]; methods: Method[]; tasks: Map<string, Task> };
+export type Catalogue = { discoveryRetryAt?:number; view: Observation; opportunities: Opportunity[]; methods: Method[]; tasks: Map<string, Task> };
 export type RouteFailure = {at:number;retryAt:number;attempts:number;context:string;learningRevision:number;reason:string};
 export type Knowledge = { routeFailures?:Record<string,RouteFailure>; bank: any[]; bankCheckedAt: number; routes: Record<string, Route>; visited: Record<string, string>;
   /** Local, verified environmental discoveries. These are learned facts, not seed routes. */
@@ -217,5 +217,13 @@ export function buildCatalogue(identity: Identity, state: LiveState, k: Knowledg
     knowledgeRevision: memory.learningRevision ?? 0, strategy: strategyView(development),
     funding:{carriedGp:cash(state.inventory??[]),bankGp:bankCoins,reserveGp:policy.reserveCoins,evidence} };
   // Completed/poor trials affect later choices through the Director's method memory and cooldowns.
-  return {view,opportunities,methods,tasks};
+  // A bounded discovery cooldown is not missing implementation or a reason to
+  // suppress normal productive opportunities. Surface its next eligibility.
+  const budgetTimes=memory.reviews.filter(r=>/^(?:survey:)?local-probe:/.test(r.goal.id)&&now-r.at<10*60_000)
+    .map(r=>r.at).sort((a,b)=>b-a);
+  const budgetReadyAt=budgetTimes.length>=2?budgetTimes[1]!+10*60_000:now;
+  const bootstrapReadyAt=discoveryBootstrap?now:(health.lastProductiveAt??now)+PROGRESS_TIMEOUT_MS;
+  const nextProbeAt=Math.max(budgetReadyAt,bootstrapReadyAt);
+  const discoveryRetryAt=supported.includes('exploration')&&safeProbeState&&nextProbeAt>now?nextProbeAt:undefined;
+  return {view,opportunities,methods,tasks,discoveryRetryAt};
 }
