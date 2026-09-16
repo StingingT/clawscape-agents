@@ -72,3 +72,5 @@ replace('agents/advanced/src/restart-journals.ts',
 replace('agents/advanced/src/live-cli.ts',
 "          agency.record(receipt.commandId,agencyState(latest),proof);\n          if(proof.status==='interrupted'&&proof.recovery==='investigate'&&stored&&receipt.before._advanced) {",
 "          agency.record(receipt.commandId,agencyState(latest),proof);\n          if(agency.pending(scope)&&scope==='task'&&proof.status==='unknown') {\n            const q=agency.quarantinePendingTransaction(agencyState(latest),proof.reason??'historical attribution unavailable');\n            if(q&&stored) {\n              store.result({...stored.result,status:'CANCELLED',reason:'HISTORICALLY_UNRESOLVED_QUARANTINED',at:Date.now(),evidence:q.evidence});\n              store.append('transaction_quarantine',q.commandId,q);\n            }\n          }\n          if(proof.status==='interrupted'&&proof.recovery==='investigate'&&stored&&receipt.before._advanced) {")
+
+# validation retrigger after updating the route fallback regression
