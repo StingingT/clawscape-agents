@@ -113,7 +113,8 @@ export async function main(context:StartupContext){
   }
   const recordedRoutes=new WeakSet<object>();
   let navigation:unknown=null;
-  const saved=store.records<any>('live_policy_checkpoints').at(-1);
+  const checkpoint=store.records<any>('live_policy_checkpoints').at(-1);
+  const saved=checkpoint?.state??checkpoint;
   let policy=new LivePolicy();let policyInitialized=false;
   let agency:LiveAgency|undefined;
   let research:ResearchSummary|undefined,researchJob:Promise<void>|undefined;
