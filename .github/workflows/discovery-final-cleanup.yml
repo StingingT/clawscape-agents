@@ -1,0 +1,52 @@
+name: Final discovery cleanup validation
+on:
+  push:
+    branches: [fix/discovery-validation-cleanup]
+    paths: [.github/workflows/discovery-final-cleanup.yml]
+permissions:
+  contents: write
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22.16.0'
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: '1.3.10'
+      - name: Finalize runtime checkpoint handling and remove temporary edit machinery
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('agents/advanced/src/live-cli.ts')
+          text = p.read_text()
+          old = "  const saved=store.records<any>('live_policy_checkpoints').at(-1);"
+          new = "  const checkpoint=store.records<any>('live_policy_checkpoints').at(-1);\n  const saved=checkpoint?.state??checkpoint;"
+          assert text.count(old) == 1
+          p.write_text(text.replace(old, new, 1))
+          PY
+          git rm .github/apply-discovery-bootstrap-gate.py .github/apply-discovery-quarantine.py .github/discovery-quarantine.patch .github/finalize-discovery-review.py .github/workflows/discovery-quarantine-workbench.yml .github/workflows/discovery-final-cleanup.yml
+          git diff --check
+      - name: Install pinned offline test dependencies
+        run: |
+          npm install --prefix "$RUNNER_TEMP/claw-deps" --ignore-scripts --no-audit --no-fund --no-package-lock zod@4.1.5 typescript@5.9.3 @types/node@22.16.0
+          ln -s "$RUNNER_TEMP/claw-deps/node_modules" agents/advanced/node_modules
+      - name: Shared agency tests, unchanged controller integration and type checks
+        run: |
+          npm run test:agency
+          npm run test:integration
+          npm run check:agency
+      - name: All advanced, native outcome and training regressions
+        run: bun test src/action-outcome.test.ts src/training/discovery.test.ts agents/advanced/tests src/navigation/agency-route.test.ts
+      - name: Commit validated cleanup
+        run: |
+          git add agents/advanced/src/live-cli.ts
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Remove temporary validation scaffolding and unwrap recovered policy checkpoints'
+          git push origin HEAD:fix/discovery-validation-cleanup
