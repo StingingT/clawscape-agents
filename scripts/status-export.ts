@@ -30,7 +30,9 @@ function json(root:string,path:string,warnings:string[]):any {
   catch{warnings.push(relative(root,path)+': missing, incomplete, oversized or unreadable');return undefined;}
 }
 const pick=(v:any,keys:string[])=>v&&Object.fromEntries(keys.filter(k=>v[k]!==undefined).map(k=>[k,v[k]]));
-function pending(r:any){return r&&{...pick(r,['commandId','startedAt','scope','methodId','investigation']),action:pick(r.action,['id','type','itemRefs','fields']),execution:r.execution,
+const auditSummary=(rows:any)=>Array.isArray(rows)?rows.slice(-8).map(r=>pick(r,['at','commandId','reason','evidence','lossAttribution','operation','itemId','accountedAt'])):[];
+function pending(r:any){return r&&{...pick(r,['commandId','startedAt','scope','methodId','investigation']),
+  historicalWindow:pick(r.historical,['loss','since','at','tick','samples']),action:pick(r.action,['id','type','itemRefs','fields']),execution:r.execution,
   referencedBeforeItems:Array.isArray(r.before?.inventory)?r.before.inventory.filter((i:any)=>[r.action?.fields?.slot,r.action?.fields?.sourceSlot,r.action?.fields?.itemSlot,r.action?.fields?.targetSlot].includes(i.slot)).map((i:any)=>pick(i,['slot','id','name','count'])):undefined};}
 function logTail(root:string,file:string):any {
   // Read bounded tail bytes, never an entire log or paths supplied in its contents.
@@ -77,6 +79,8 @@ export function collectReport(root:string,now=Date.now()):any {
       goal:pick(doc?.memory?.active,['id','target','reason','requestedSupport','blocker']),
       preparation:doc?.preparation,acquisition:doc?.acquisition,
       pending:pending(doc?.receipt),safetyPending:pending(doc?.safetyReceipt),
+      transactionQuarantine:auditSummary(doc?.transactionQuarantine),historicalRetirements:auditSummary(doc?.historicalRetirements),
+      discoveryRetryAt:Number.isFinite(doc?.discoveryRetryAt)?doc.discoveryRetryAt:undefined,
       routeFailures:Object.entries(doc?.knowledge?.routeFailures??{}).slice(-10).map(([id,r])=>({id,...r as any})),
       navigation:pick(navigation,['time','status','reason','destination','nextWaypoint','position','hint','endpoint','approachOnly']),
       recovery:pick(recovery,['at','ready','resolved','unresolved']),

@@ -23,6 +23,9 @@ export function reconcileAstraJournals(store:Store,directory:string,first:Observ
     ||!second.connected||second.fresh_at===null||second.fresh_at>Date.now()||Date.now()-second.fresh_at>10_000||second.seq<=first.seq)
     throw new Error('FRESH_OWN_RECOVERY_OBSERVATIONS_REQUIRED');
   const report:RestartReport={version:1,at:Date.now(),ready:true,resolved:[],unresolved:[]};
+  // Observe both journals in parallel; neither may claim the other's unmeasured
+  // window, and a restart must not restart one only after the other settles.
+  if(agency)for(const scope of ['safety','task'] as const){const r=agency.pending(scope);if(r)agency.settleStep(r.commandId,agencyState(second));}
   const checkpoints=store.records<{action_id:string;before:Observation}>('action_checkpoints');
   for(const entry of store.allActions()) {
     const {command,result}=entry;
@@ -48,7 +51,7 @@ export function reconcileAstraJournals(store:Store,directory:string,first:Observ
         } catch { /* Missing original entity/slot is uncertainty, never a guessed mapping. */ }
       }
       if(proof.length)resolved={...result,status:'SUCCEEDED',reason:'RECONCILED_DURABLE_EFFECT',evidence:proof,at:Date.now()};
-      else if(before&&['move','close_interface','style','dialogue'].includes(command.intent.operation)) {
+      else if(before&&['move','close_interface','style','dialogue','interact','pickup','use_on_item','use_on_object'].includes(command.intent.operation)) {
         const transient=settleAstraTransient(store,command,result,before,second);
         why=transient.reason;settling=transient.settling;
         // The shared helper writes its cancellation and immutable audit atomically.
@@ -82,7 +85,9 @@ export function reconcileAstraJournals(store:Store,directory:string,first:Observ
         report.resolved.push(q.commandId);continue;
       }
     }
-    if(agency.pending(scope))report.unresolved.push({commandId:receipt.commandId,operation:receipt.action.type,reason:proof.reason??'Pending accounting or safety outcome.'});
+    if(agency.pending(scope))report.unresolved.push({commandId:receipt.commandId,operation:receipt.action.type,
+      reason:agency.pending(scope)?.investigation?.reason??proof.reason??'Pending accounting or safety outcome.',
+      settling:!!agency.pending(scope)?.historical});
   }
   const legacy=recoverLegacyJournals(directory,{agent:second.character,world:second.world},{
     state:agencyState(first),stable:agencyState(second),executorSettled:report.unresolved.length===0,

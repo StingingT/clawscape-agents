@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
+import { historicalTraversal, observeHistoricalContext, type HistoricalWindow } from '../../../src/agency/historical-context.ts';
 import { observeQuietStep, type QuietWindow } from '../../../src/agency/step-retry.ts';
 import { agencyCandidate, agencyState } from './agency-bridge.ts';
 import type { ActionCommand, ActionResult, Observation } from './contracts.ts';
 import type { Store } from './store.ts';
 
-const windows=new WeakMap<Store,Map<string,{observer:string;lease:string;window?:QuietWindow}>>();
+const windows=new WeakMap<Store,Map<string,{observer:string;lease:string;window?:QuietWindow;historical?:HistoricalWindow}>>();
 /** Settlement is local bookkeeping, never a command dispatch or a historical success.
  * One helper serves startup and the live arbiter, avoiding a restart-only fix. */
 export function settleAstraTransient(store:Store,command:ActionCommand,result:ActionResult,
@@ -33,12 +34,15 @@ export function settleAstraTransient(store:Store,command:ActionCommand,result:Ac
     : agencyCandidate(before,{goal:command.plan_id,reason:'Observe existing transient intent',intent:command.intent});
   } catch { return no('Original observed interaction target is unavailable; retain the exact journal for attribution.'); }
   const quiet=observeQuietStep(action,agencyState(before),agencyState(after),now,saved.observer,saved.window);
-  saved.window=quiet.window;states.set(command.action_id,saved);
-  if(!quiet.settled)return {settling:!!quiet.window,reason:quiet.reason};
-  const reason=dialogue
+  saved.window=quiet.window;
+  const historical=!dialogue&&!quiet.settled&&historicalTraversal(action,agencyState(before))
+    ?observeHistoricalContext(agencyState(before),agencyState(after),now,saved.observer,saved.historical,true):undefined;
+  saved.historical=historical?.window;states.set(command.action_id,saved);
+  if(!quiet.settled&&!historical?.settled)return {settling:!!quiet.window||!!historical?.window,reason:historical?.window?historical.reason:quiet.reason};
+  const reason=historical?.settled?historical.reason:dialogue
     ? 'Historical dialogue context expired after a continuous fresh closed-interface quiet window; original effect remains unknown and no replay is authorized.'
     : quiet.reason;
-  const settled:ActionResult={...result,status:'CANCELLED',reason:dialogue?'RECONCILED_DIALOGUE_CONTEXT_EXPIRED':'RECONCILED_TRANSIENT_INTERRUPTED',at:now,evidence:[reason]};
+  const settled:ActionResult={...result,status:'CANCELLED',reason:dialogue?'RECONCILED_DIALOGUE_CONTEXT_EXPIRED':'RECONCILED_TRANSIENT_INTERRUPTED',at:now,evidence:historical?.settled?['historical-context-retired',...historical.evidence]:[reason]};
   store.db.transaction(()=>{
     const current=store.control(),entry=store.action(command.action_id);
     if(current.lease!==control.lease||current.mode!==control.mode||current.disabled||current.expires<=now

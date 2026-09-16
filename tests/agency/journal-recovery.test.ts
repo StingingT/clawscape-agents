@@ -105,5 +105,11 @@ test('bootstrap persists status even when importing the main runtime fails',asyn
     const text=readFileSync(join(dir,'data/astra-live/status.json'),'utf8'),s=JSON.parse(text);
     assert.equal(s.status,'STARTUP_FAILED');assert.equal(s.reason,'RUNTIME_DEPENDENCY_MISSING');assert.equal(s.pid,process.pid);
     assert.equal(text.includes('TOKEN_SHOULD_NOT_APPEAR'),false);assert.equal(existsSync(join(dir,'data/astra-launcher-status.json')),true);
-  } finally {process.exitCode=exit;rmSync(dir,{recursive:true,force:true});}
+    assert.equal(process.exitCode,2);
+  } finally {
+    // Restore the captured status explicitly: assigning undefined leaves
+    // the intentional startup failure's exit code set in Bun.
+    process.exitCode=exit??0;
+    rmSync(dir,{recursive:true,force:true});
+  }
 });

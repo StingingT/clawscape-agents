@@ -141,7 +141,7 @@ export async function main(context:StartupContext){
   const deadline=Date.now()+Math.min(config.max_session_minutes*60,Number(option('seconds',mode==='pilot'?'120':String(config.max_session_minutes*60))))*1000;
   let pilotMoved=false,pilotInteracted=false,pilotDestination:Observation['position']=null;
   const publish=(status:string,why:string)=>{
-    const result={character:'astra',time:new Date().toISOString(),mode,status,live:latest?.connected===true,goal:activeGoal,reason:why,
+    const result={character:'astra',time:new Date().toISOString(),mode,status,live:latest?.connected===true,goal:agency?.summary().goal?.id??(agency?'selecting-next-goal':activeGoal),reason:why,
       actions,verified,failed,elapsedSeconds:start?Math.round((Date.now()-start.observed_at)/1000):0,
       observation:latest?brief(latest):null,policy:policy.summary(),pending:store.pending().map(p=>({operation:p.command.intent.operation,status:p.result.status,reason:p.result.reason})),
       authority:'single cooperating local controller; server fencing unavailable',npcSpendingGp:0,
@@ -229,6 +229,7 @@ export async function main(context:StartupContext){
       } else {
         if(!agency)throw new Error('AGENCY_NOT_INITIALIZED');
         // Reconcile the SAME journaled action. A later action cannot satisfy its receipt.
+        for(const scope of ['safety','task'] as const){const r=agency.pending(scope);if(r)agency.settleStep(r.commandId,agencyState(latest));}
         await arbiter.reconcile();
         for (const scope of ['safety','task'] as const) {
           const receipt=agency.pending(scope);
