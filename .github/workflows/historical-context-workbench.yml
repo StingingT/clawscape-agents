@@ -30,6 +30,18 @@ jobs:
           assert s.count(old)==1
           s=s.replace(old,'metrics={spentGp:0,lostGp:0,deaths:0,elapsedMs:0};')
           p.write_text(s)
+          p=Path('tests/agency/journal-recovery.test.ts')
+          s=p.read_text()
+          old='  } finally {process.exitCode=exit;rmSync(dir,{recursive:true,force:true});}'
+          assert s.count(old)==1
+          s=s.replace(old, '''    assert.equal(process.exitCode,2);
+            } finally {
+              // Restore the captured status explicitly: assigning undefined leaves
+              // the intentional startup failure's exit code set in Bun.
+              process.exitCode=exit??0;
+              rmSync(dir,{recursive:true,force:true});
+            }''')
+          p.write_text(s)
           PY
           git diff --check
       - name: Install pinned offline test dependencies
@@ -62,7 +74,7 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git rm .github/apply-historical-context.py .github/workflows/historical-context-workbench.yml
-          git add src/agency/live-adapter.ts src/agency/director.ts src/agency/world-model.ts agents/advanced/src/transient-recovery.ts agents/advanced/src/agency-bridge.ts agents/advanced/src/restart-journals.ts agents/advanced/src/live-cli.ts
+          git add src/agency/live-adapter.ts src/agency/director.ts src/agency/world-model.ts agents/advanced/src/transient-recovery.ts agents/advanced/src/agency-bridge.ts agents/advanced/src/restart-journals.ts agents/advanced/src/live-cli.ts tests/agency/journal-recovery.test.ts
           git diff --cached --check
           git commit -m 'Recover ended historical contexts without replay and defer exhausted routes'
           git push origin HEAD:fix/historical-context-and-exhausted-routes
