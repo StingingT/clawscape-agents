@@ -25,9 +25,9 @@ jobs:
         run: |
           python .github/apply-discovery-quarantine.py
           git diff --check
-      - name: Install pinned offline advanced dependency
+      - name: Install pinned offline advanced dependencies
         run: |
-          npm install --prefix "$RUNNER_TEMP/claw-deps" --ignore-scripts --no-audit --no-fund --no-package-lock zod@4.1.5
+          npm install --prefix "$RUNNER_TEMP/claw-deps" --ignore-scripts --no-audit --no-fund --no-package-lock zod@4.1.5 typescript@5.9.3 @types/node@22.16.0
           ln -s "$RUNNER_TEMP/claw-deps/node_modules" agents/advanced/node_modules
       - name: Validate shared agency and controller
         run: |
