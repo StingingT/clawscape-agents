@@ -43,9 +43,9 @@ jobs:
           npm run test:integration
           npm run check:agency
           bun test src/action-outcome.test.ts src/training/discovery.test.ts agents/advanced/tests src/navigation/agency-route.test.ts
-      - name: Commit only validated implementation and regression files
+      - name: Commit validated source files (workflow updates use the authorized connector separately)
         run: |
-          git add .github/workflows/astra-path-tests.yml agents/advanced/src/agency-bridge.ts agents/advanced/src/live-cli.ts agents/advanced/src/live-policy.ts agents/advanced/src/transient-recovery.ts agents/advanced/tests/semantic-recovery.test.ts docs/SEMANTIC_PROGRESS.md scripts/agency-status.ts scripts/status-export.ts scripts/supervise.ts src/agency/director.ts src/agency/live-adapter.ts src/agency/progress.ts src/agency/step-retry.ts src/agency/types.ts src/agency/world-model.ts src/agent.ts tests/agency/semantic-progress.test.ts
+          git add agents/advanced/src/agency-bridge.ts agents/advanced/src/live-cli.ts agents/advanced/src/live-policy.ts agents/advanced/src/transient-recovery.ts agents/advanced/tests/semantic-recovery.test.ts docs/SEMANTIC_PROGRESS.md scripts/agency-status.ts scripts/status-export.ts scripts/supervise.ts src/agency/director.ts src/agency/live-adapter.ts src/agency/progress.ts src/agency/step-retry.ts src/agency/types.ts src/agency/world-model.ts src/agent.ts tests/agency/semantic-progress.test.ts
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git commit -m 'Track causal progress, defer reversible cycles, and reconcile eligible unknown interactions'
