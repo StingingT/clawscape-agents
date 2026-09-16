@@ -1,3 +1,4 @@
+import type { ProgressLedger } from './progress.ts';
 /** Planner contracts. A fact is an agent's own observation, never a peer's assertion. */
 export type Domain = 'combat' | 'crafting' | 'gathering' | 'exploration' | 'social';
 export type Facts = Record<string, number>;
@@ -43,6 +44,8 @@ export type Method = {
   prerequisites: Requirement[];
   /** Predicted positive deltas. Stochastic effects still require outcome verification. */
   effects: Facts;
+  /** Registered durable intermediate results, not arbitrary balance/state changes. */
+  progressFacts?: string[];
   /** Consumable inputs are deducted for each repetition in the projected plan. */
   consumes?: Facts;
   costGp: number;
@@ -78,6 +81,8 @@ export type Goal = Opportunity & {
   noProgress: number;
   /** Consecutive non-exploration preparation steps without target progress. */
   preparationOnlyStreak?: number;
+  progressHighWater?: Facts;
+  approachBest?: Record<string,number>;
   lastPreparationMethodId?: string;
   strategyId?: string;
   workingReserveGp?: number;
@@ -120,6 +125,7 @@ export type Pending = {
   before: Facts;
   status: 'pending' | 'unknown';
   supportGoalId?: string;
+  progressTargets?: Requirement[];
   knowledgeRevision?: number;
 };
 export type Memory = Identity & {
@@ -130,6 +136,7 @@ export type Memory = Identity & {
   pending?: Pending;
   sequence: number;
   learningRevision?: number;
+  progress?: ProgressLedger;
   methods: Record<string, MethodStats>;
   goalCooldowns: Record<string, number>;
   reviews: Review[];
@@ -155,4 +162,6 @@ export type Outcome = {
   /** Low-level action category used only to distinguish preparation from production. */
   actionType?: string;
   observationOnly?: boolean;
+  effectState?: {before:string;after:string};
+  approach?: {key:string;before:number;after:number};
 };

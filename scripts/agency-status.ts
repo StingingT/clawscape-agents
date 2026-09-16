@@ -3,6 +3,7 @@
 import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { progressHealth as semanticHealth } from '../src/agency/progress.ts';
 
 const safe = (v: unknown) => typeof v === 'string'
   ? (/token|password|secret|authorization|api[_-]?key/i.test(v) ? '[redacted]' : v.slice(0, 400)) : v;
@@ -12,6 +13,10 @@ function read(file: string): any {
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 16_000_000) throw new Error('Unsupported diagnostic file: ' + file);
   try { return JSON.parse(readFileSync(file, 'utf8')); } catch { throw new Error('Invalid JSON in diagnostic file: ' + file); }
 }
+export function inspectProgress(file:string,now=Date.now()):unknown {
+  const doc=read(file);
+  return doc?.version===2?semanticHealth(doc.memory??{},now):undefined;
+}
 export function inspectAgency(root: string, now = Date.now()): unknown[] {
   const supervisor = read(join(root, 'data/supervisor/status.json'));
   return [['clawscout','online'],['stinger','stinger'],['coincrafter','coincrafter'],['featherer','featherer']].map(([agent,profile]) => {
@@ -20,11 +25,12 @@ export function inspectAgency(root: string, now = Date.now()): unknown[] {
     const known = current?.version === 2;
     const goal = known ? current.memory?.active : undefined;
     const observation=known?current.lastObservation:undefined;
-    const verifiedAt=known&&current.lastOutcome?.status==='verified'?current.lastOutcome.at:null;
-    const objectiveAt=goal?.lastObjectiveProgressAt??null,supportAt=goal?.lastSupportProgressAt??null;
+    const health=known?semanticHealth(current.memory??{},now):undefined;
+    const verifiedAt=health?.lastVerifiedActionAt??(known&&current.lastOutcome?.status==='verified'?current.lastOutcome.at:null);
+    const objectiveAt=health?.lastObjectiveProgressAt??goal?.lastObjectiveProgressAt??null,supportAt=health?.lastSupportProgressAt??goal?.lastSupportProgressAt??null;
     const measurableAt=Math.max(objectiveAt??0,supportAt??0)||null;
     const ageMs=observation?.at===undefined?null:Math.max(0,now-observation.at);
-    const progressHealth=known?{stage:measurableAt!==null&&(!verifiedAt||measurableAt>=verifiedAt)?'measurable-progress'
+    const progressHealth=known?{...health,stage:health?.stalled?'stalled':measurableAt!==null&&(!verifiedAt||measurableAt>=verifiedAt)?'measurable-progress'
         :verifiedAt!==null?'verified':current.receipt||current.safetyReceipt?'executing'
         :observation?.connected===true&&ageMs!==null&&ageMs<=120_000?'observing':'alive',
       connected:observation?.connected===true,ageMs,lastObservationAt:observation?.at??null,
@@ -43,7 +49,7 @@ export function inspectAgency(root: string, now = Date.now()): unknown[] {
         method:goal.plan?.steps?.[0]?.methodId,budget:goal.budget,
         lastObjectiveProgressAt:goal.lastObjectiveProgressAt,lastSupportProgressAt:goal.lastSupportProgressAt} : null,
       blocked: known ? safe(current.blocked) : undefined,
-      pending: known && current.receipt ? {commandId:current.receipt.commandId,type:current.receipt.action?.type,startedAt:current.receipt.startedAt} : null,
+      pending: known && current.receipt ? {commandId:current.receipt.commandId,type:current.receipt.action?.type,startedAt:current.receipt.startedAt,investigation:current.receipt.investigation} : null,
       safetyPending: known && current.safetyReceipt ? {commandId:current.safetyReceipt.commandId,type:current.safetyReceipt.action?.type,startedAt:current.safetyReceipt.startedAt}:null,
       lastOutcome: known && current.lastOutcome ? {...current.lastOutcome,reason:safe(current.lastOutcome.reason),evidence:current.lastOutcome.evidence?.map(safe)} : undefined,
       legacy: {historicalOnly:true,ready:recovery?.ready??null,

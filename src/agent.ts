@@ -28,7 +28,7 @@ import { selectWork, observeWork, objectives } from './economy/objectives';
 import { bowNext, bowReserve, validateBow, observeBow, bowBlocked } from './economy/bowmaking';
 import { mission, outcomeReward } from './goals/outcomes';
 import { saveGoalJson } from './goals/persistence';
-import { preferActive, passive, progressTimedOut, recordAutonomy, type AutonomyMemory } from './autonomy';
+import { preferActive, passive, type AutonomyMemory } from './autonomy';
 import { shouldCloseAfterFoodWithdrawal } from './banking-policy';
 import { preferRangedSupply } from './action-priority';
 import { dropLearningCandidates, knowledgeSummary, recordObservedDrops, runeDiscoveryCandidates } from './world-knowledge';
@@ -1200,10 +1200,9 @@ function localNavigationExperiments(state:GameState):Candidate[] {
     if(!option)return [];
     return [{loc,option,distance:Math.max(Math.abs(Number(p.worldX)-loc.x),Math.abs(Number(p.worldZ)-loc.z))}];
   }).filter(v=>v.distance<=3).sort((a,b)=>a.distance-b.distance||a.loc.id-b.loc.id||a.loc.x-b.loc.x||a.loc.z-b.loc.z);
-  const chosen=candidates[0];if(!chosen)return [];
-  return [{id:`navigation-experiment-${chosen.loc.id}-${chosen.loc.x}-${chosen.loc.z}-${chosen.option.opIndex}`,type:'interactLoc',
+  return candidates.slice(0,8).map(chosen=>({id:`navigation-experiment-${chosen.loc.id}-${chosen.loc.x}-${chosen.loc.z}-${chosen.option.opIndex}`,type:'interactLoc',
     fields:{x:chosen.loc.x,z:chosen.loc.z,locId:chosen.loc.id,optionIndex:chosen.option.opIndex,
-      reason:'test a nearby observed transition or obstruction before abandoning the route'},waitTicks:2}];
+      reason:'test a nearby observed transition or obstruction before abandoning the route'},waitTicks:2}));
 }
 
 /** Task-specific executors are asked for actions only AFTER the Director chooses a goal. */
@@ -1295,8 +1294,17 @@ async function actionsForTask(state: GameState, task: Task): Promise<Candidate[]
       return [{id:task.id,type:'walkTo',fields:{...route.destination,running:true,reason:task.route.evidence},waitTicks:2}];
     }
     case 'discovery': {
-      const experiment=localNavigationExperiments(state);
-      return experiment.length?experiment:[{id:'discover-local-observation',type:'scanNearbyLocs',fields:{radius:12,reason:'inspect the current area for a safe interaction hypothesis'},waitTicks:2}];
+      const experiment=localNavigationExperiments(state).filter(a=> {
+        const f=a.fields??{};
+        return task.id===`discover:discovered:interaction:${f.locId}:${f.x}:${f.z}:${f.level??state.player?.level??0}:${f.optionIndex}`;
+      });
+      if(experiment.length)return experiment;
+      const target=(state.nearbyLocs??[]).find((loc:any)=>loc.reachable===true&&(loc.optionsWithIndex??[]).some((o:any)=>
+        task.id===`discover:discovered:interaction:${loc.id}:${loc.x}:${loc.z}:${loc.level??state.player?.level??0}:${o.opIndex}`));
+      if(!target)return []; // A vanished observation is not authority for a guessed interaction.
+      const endpoint=await navigator!.assessApproach(position(state),{x:Number(target.x),z:Number(target.z),level:Number(target.level??state.player?.level??0)});
+      if(endpoint.status==='loading-map')return [{id:'observe-discovery-route-load',type:'wait',waitTicks:2}];
+      return endpoint.status==='ready'?[{id:task.id,type:'walkTo',fields:{...endpoint.destination,reason:'Approach the selected fresh local experiment'},waitTicks:2}]:[];
     }
   }
 }
@@ -1339,62 +1347,6 @@ function observeAgencyResult(before:GameState,after:GameState,action:Candidate):
   if(after.bank?.isOpen===true)work.bankItems=after.bank.items as Json[];
   if(before.bank?.isOpen===true && after.bank?.isOpen===false){delete work.foodWithdrawalPending;if(work.foodBatch?.phase==='bank')delete work.foodBatch;}
   delete work.failures[action.id];saveWork();
-}
-
-/**
- * Feed terminal executor outcomes into the shared autonomy circuit breaker.
- * This is intentionally goal- and character-agnostic: an interface change or
- * local movement may be useful preparation, but it must not keep an unchanged
- * strategic goal alive forever. Repeated cycles are reviewed and replanned by
- * the Director, preserving the evidence instead of installing a character
- * specific escape route.
- */
-function recordAutonomyOutcome(
-  before:GameState,
-  after:GameState,
-  action:Candidate,
-  check:ReturnType<typeof verifyActionOutcome>,
-  beforeSummary:ReturnType<LiveAgency['summary']>,
-):boolean {
-  if(check.uncertain)return false;
-  const afterSummary=agency!.summary();
-  const previousGoal=beforeSummary.goal;
-  const nextGoal=afterSummary.goal;
-  const objectiveProgress=Boolean(
-    nextGoal && previousGoal && (Number(nextGoal.lastObjectiveProgressAt??0)>Number(previousGoal.lastObjectiveProgressAt??0)
-      || Number(nextGoal.lastSupportProgressAt??0)>Number(previousGoal.lastSupportProgressAt??0))
-    || previousGoal && !nextGoal && check.verified,
-  );
-  if(previousGoal&&!nextGoal&&check.verified){
-    work.autonomy={...(work.autonomy??{}),active:undefined,recentActions:[],stalled:{}};
-    saveWork();
-    return false;
-  }
-  const guard=recordAutonomy(work.autonomy??={},before,after,action,Date.now(),false,previousGoal?.key,objectiveProgress);
-  if(!guard.stalled&&!progressTimedOut(work.autonomy,Date.now())){saveWork();return false;}
-  const reason=`Autonomy circuit breaker: ${guard.reason??'objective progress deadline exceeded'}; review the verified outcome and choose a fresh executable goal.`;
-  if(nextGoal&&!agency!.pending()&&!agency!.pending('safety'))agency!.deferCurrent(after,reason);
-  work.autonomy={...(work.autonomy??{}),active:undefined,recentActions:[],stalled:{}};
-  saveWork();
-  console.error(JSON.stringify({agency:'progress-watchdog',goal:previousGoal?.id,action:action.id,reason,nextGoal:agency!.summary().goal?.id??null}));
-  return true;
-}
-
-function recordAutonomyBlockedWait(
-  before:GameState,
-  after:GameState,
-  action:Candidate,
-  beforeSummary:ReturnType<LiveAgency['summary']>,
-):boolean {
-  const afterSummary=agency!.summary();
-  const guard=recordAutonomy(work.autonomy??={},before,after,action,Date.now(),false,beforeSummary.goal?.key,false);
-  if(!guard.stalled&&!progressTimedOut(work.autonomy,Date.now())){saveWork();return false;}
-  const reason=`Autonomy circuit breaker: planner remained blocked without verified progress; ${guard.reason??'replan after the progress deadline'}.`;
-  if(afterSummary.goal&&!agency!.pending()&&!agency!.pending('safety'))agency!.deferCurrent(after,reason);
-  work.autonomy={...(work.autonomy??{}),active:undefined,recentActions:[],stalled:{}};
-  saveWork();
-  console.error(JSON.stringify({agency:'planner-watchdog',action:action.id,reason,nextGoal:agency!.summary().goal?.id??null}));
-  return true;
 }
 
 async function runEpisode(): Promise<void> {
@@ -1464,16 +1416,11 @@ async function runEpisode(): Promise<void> {
     const planned=agency.plan(state);
     if(!isSelection(planned)) {
       console.log(JSON.stringify({agency:planned.type,detail:planned,goal:agency.summary().goal}));
-      const blockedBefore=state;
-      const blockedSummary=agency.summary();
       const blockedAfter=stateFrom(await cliCall(['wait','3']));
-      // Bucket the diagnostic wait so a legitimate short recheck window is
-      // preserved, while a planner that remains blocked for the normal
-      // five-minute progress deadline is forced through review/replanning.
-      const blockedAction={id:`planner-blocked-${planned.type}-${Math.floor(Date.now()/60_000)}`,type:'wait',waitTicks:3};
-      const plannerWatchdog=recordAutonomyBlockedWait(blockedBefore,blockedAfter,blockedAction,blockedSummary);
+      // The same semantic clock serves both the executor and blocked planner.
+      agency.checkProgress(blockedAfter);
       state=blockedAfter;
-      if(plannerWatchdog)continue;
+      continue;
     }
     training?.beginTrial?.(state,planned.decision.goal);
     const committedRoute=agency.routeStep(planned,state);
@@ -1516,13 +1463,12 @@ async function runEpisode(): Promise<void> {
       const {next,result}=await executeAgencyAction(beforeActionState,action);
       agency.rememberExecution(commandId,result);
       const check=verifyActionOutcome(beforeActionState,next,action,result);
-      const beforeSummary=agency.summary();
       agency.record(commandId,next,verification(check));
       if(check.verified)observeAgencyResult(beforeActionState,next,action);
       appendFileSync(experiencePath,JSON.stringify({at:new Date().toISOString(),commandId,goal:planned.decision.goal.id,
         method:planned.method.id,action,outcome:verification(check)})+'\n');
       console.log(JSON.stringify({agency:'step',commandId,goal:planned.decision.goal.id,supportGoal:planned.decision.step.supportGoalId,method:planned.method.id,action:action.type,outcome:verification(check)}));
-      const watchdogTripped=recordAutonomyOutcome(beforeActionState,next,action,check,beforeSummary);
+      const watchdogTripped=agency.checkProgress(next);
       state=next;
       if(watchdogTripped)continue;
     } catch(error) {

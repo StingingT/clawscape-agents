@@ -37,7 +37,16 @@ export function recordViability(old: Viability | undefined, status: 'verified' |
 /** Only repeatable, resource-local activity can be interrupted from current idle state.
  * This does NOT prove historical non-execution. Transactions, rewards and generic talk
  * remain strict; a fresh subsequent command must revalidate its own materials/options. */
+function requestedInterface(action:StepAction,before:LiveState):'bank'|'shop'|undefined {
+  const f=action.fields??{};
+  const entity=action.type==='interactNpc'?(before.nearbyNpcs??[]).find((n:any)=>n.index===f.npcIndex)
+    :action.type==='interactLoc'?(before.nearbyLocs??[]).find((l:any)=>l.id===f.locId&&l.x===f.x&&l.z===f.z):undefined;
+  const option=(entity?.optionsWithIndex??[]).find((o:any)=>o.opIndex===f.optionIndex)?.text??'';
+  if(/^bank$/i.test(option)||/^use-quickly$/i.test(option)&&/bank/i.test(String(entity?.name)))return 'bank';
+  if(/^trade$/i.test(option))return 'shop';
+}
 function repeatableActivity(action: StepAction, before: LiveState): boolean {
+  if(requestedInterface(action,before))return true;
   const f=action.fields??{};
   const option=(entity:any)=>(entity?.optionsWithIndex??[]).find((o:any)=>o.opIndex===f.optionIndex)?.text??'';
   if(action.type==='interactNpc') {
@@ -48,7 +57,7 @@ function repeatableActivity(action: StepAction, before: LiveState): boolean {
   }
   if(action.type==='interactLoc') {
     const loc=(before.nearbyLocs??[]).find((n:any)=>n.id===f.locId&&n.x===f.x&&n.z===f.z);
-    return /^(chop|chop down|chop-down|mine|open|close)$/i.test(option(loc))
+    return /^(chop|chop down|chop-down|mine|open|close|climb(?:-up|-down)?)$/i.test(option(loc))
       && !/chest|coffin|altar|lever/i.test(String(loc?.name));
   }
   if(action.type==='useItemOnItem') {
@@ -82,6 +91,9 @@ export function observeQuietStep(action: StepAction, before: LiveState, after: L
   if (!transient && !repeatable)
     return no('This operation requires attributable outcome evidence; a timeout cannot authorize replay.');
   const a = after.player, b = before.player;
+  const damageTick=Number(a?.combat?.lastDamageTick);
+  if(after.danger?.active===true || Number.isFinite(damageTick)&&damageTick>=0&&after.tick-damageTick>=0&&after.tick-damageTick<=10)
+    return no('Observed danger or recent damage requires safety recovery, not quiet retirement.');
   if (!a || !b || after.inGame !== true || a.isDead || !(a.hp > 0) || a.animId !== -1
     || a.combat?.inCombat !== false || (a.combat.targetType && a.combat.targetType !== 'none' && !(repeatable && a.combat.targetType==='npc')))
     return no('Need a connected, alive, stationary, explicitly idle observation.');
@@ -100,11 +112,19 @@ export function observeQuietStep(action: StepAction, before: LiveState, after: L
   }
   if (action.type === 'setCombatStyle' && !Number.isInteger(after.combatStyle?.currentStyle))
     return no('Current combat style must be observed before replanning.');
-  if(repeatable && [after.dialog?.isOpen,after.bank?.isOpen,after.shop?.isOpen,after.modalOpen].some(v=>v===true))return no('An active interface must be observed/resolved; do not replay the initiating action.');
+  const requested=requestedInterface(action,before);
+  const expectedOpen=requested==='bank'?after.bank?.isOpen===true&&after.shop?.isOpen!==true
+    :requested==='shop'?after.shop?.isOpen===true&&after.bank?.isOpen!==true:false;
+  if(repeatable && (after.dialog?.isOpen===true||!expectedOpen
+    &&[after.bank?.isOpen,after.shop?.isOpen,after.modalOpen].some(v=>v===true)))
+    return no('An active interface must be observed/resolved; do not replay the initiating action.');
+  if(expectedOpen && (requested==='bank'&&!Array.isArray(after.bank?.items)
+    ||requested==='shop'&&!Array.isArray(after.shop?.shopItems)))return no('The active container observation is incomplete.');
   const fingerprint = digest([after.character, after.world, after.worldEpoch, after.sessionId, after.profileId,
     a.lifeId, a.respawnCount, a.worldX, a.worldZ, a.level, a.hp, inventoryMark(after.inventory), inventoryMark(after.equipment),
     skillMark(after.skills??[]), after.bank?.isOpen, after.shop?.isOpen, after.dialog?.isOpen, after.modalOpen, after.combatStyle?.currentStyle,
-    repeatable ? [action.type, action.fields] : undefined]);
+    repeatable ? [action.type, action.fields] : undefined,
+    expectedOpen?requested==='bank'?inventoryMark(after.bank.items):inventoryMark(after.shop.shopItems):undefined]);
   const continuous = previous?.observer === observer && previous.fingerprint === fingerprint
     && now >= previous.at && now - previous.at <= 60_000 && after.tick > previous.tick;
   const window = { observer, fingerprint, since: continuous ? previous.since : now, at: now, tick: after.tick };

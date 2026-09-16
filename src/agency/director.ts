@@ -1,3 +1,4 @@
+import { recordProgress, PROGRESS_TIMEOUT_MS } from './progress.ts';
 import type { Budget, Decision, Facts, Goal, Identity, Memory, Method, MethodStats, Observation, Opportunity, Outcome, Plan, Requirement, SupportGoal } from './types.ts';
 
 import { createHash } from 'node:crypto';
@@ -302,7 +303,8 @@ export class Director {
       || goal.spentGp + method.costGp > goal.budget.spendableGp || method.costGp > view.budget.spendableGp
       || goal.lostGp + method.lossBoundGp > goal.budget.maxLossGp || method.lossBoundGp > view.budget.maxLossGp) throw new Error('BUDGET_EXCEEDED');
     this.memory.pending = { commandId, goalKey: goal.key, context: view.context, method: structuredClone(method),
-      before: { ...view.facts }, status: 'pending', supportGoalId: decision.step.supportGoalId, knowledgeRevision: view.knowledgeRevision ?? 0 };
+      before: { ...view.facts }, status: 'pending', supportGoalId: decision.step.supportGoalId,
+      progressTargets: structuredClone(decision.step.lineage ?? [goal.target]), knowledgeRevision: view.knowledgeRevision ?? 0 };
   }
 
   /** Only attributable, terminal outcomes update learning. Unknown is NOT failed. */
@@ -317,25 +319,18 @@ export class Director {
       pending.status = 'unknown'; return;
     }
     const stats = this.memory.methods[methodKey(pending.context, pending.method.id)] ??= emptyStats();
-    const productive = outcome.status === 'verified' && Object.keys(pending.method.effects)
-      .some(fact => amount(outcome.facts, fact) > amount(pending.before, fact));
+    this.memory.progress = recordProgress(this.memory.progress, goal, pending, outcome);
+    const semantic = this.memory.progress.last!;
+    const productive = semantic.productive;
     const preparation = outcome.status === 'progress' || outcome.status === 'interrupted';
-    // A bank-open, route, or interface step is only preparation. Repeated
-    // preparation under the same strategic method must eventually yield the
-    // method's measurable target, otherwise the controller is likely circling
-    // a prerequisite instead of making causal progress. Exploration legs are
-    // exempt because movement itself is the selected measurable result.
-    const measurableIntermediate=Object.entries(outcome.facts).some(([fact,value])=>
-      !['hp','free-slots'].includes(fact)&&Number(value)>amount(pending.before,fact));
-    const preparationAction=outcome.actionType===undefined
-      || ['interactNpc','closeModal','closeShop','bankDeposit','bankWithdraw','clickDialogOption','useItemOnItem','useItemOnLoc'].includes(outcome.actionType);
-    if (outcome.status === 'progress' && !productive && !measurableIntermediate && preparationAction && pending.method.capability !== 'exploration') {
-      goal.preparationOnlyStreak = goal.lastPreparationMethodId === pending.method.id
-        ? (goal.preparationOnlyStreak ?? 0) + 1 : 1;
+    // Successful bookkeeping is not a successful plan. No arbitrary positive
+    // inventory/balance delta may reset this counter.
+    const preparationAction = outcome.actionType === undefined || !['walkTo','wait','scanNearbyLocs'].includes(outcome.actionType);
+    if (semantic.verified && !productive && preparationAction) {
+      goal.preparationOnlyStreak = (goal.preparationOnlyStreak ?? 0) + 1;
       goal.lastPreparationMethodId = pending.method.id;
-    } else if (productive || measurableIntermediate || outcome.status !== 'progress') {
-      goal.preparationOnlyStreak = 0;
-      goal.lastPreparationMethodId = undefined;
+    } else if (productive) {
+      goal.preparationOnlyStreak = 0; goal.lastPreparationMethodId = undefined;
     }
     // A verified route leg/interface transition advances a method; it is not
     // a failed training trial and does not satisfy a quantitative goal.
@@ -356,39 +351,27 @@ export class Director {
       stats.idleObservationMs=0;
     }
     stats.knowledgeRevision = pending.knowledgeRevision ?? 0;
-    if (productive) {
-      this.memory.learningRevision = (this.memory.learningRevision ?? 0) + 1;
-      if (amount(outcome.facts,goal.target.fact)>amount(pending.before,goal.target.fact)) goal.lastObjectiveProgressAt=outcome.at;
-      else goal.lastSupportProgressAt=outcome.at;
-    }
-    let supportSatisfied=false;
-    const newlySatisfiedPrerequisite=(pending.method.prerequisites??[]).some(p=>met(outcome.facts,p)&&!met(pending.before,p));
+    if (semantic.learning || semantic.objective && productive) this.memory.learningRevision = (this.memory.learningRevision ?? 0) + 1;
     for (const support of goal.supportGoals ?? []) {
-      if (met(outcome.facts, support.target) && outcome.status !== 'rejected' && outcome.status !== 'interrupted') {
-        supportSatisfied = supportSatisfied || support.status !== 'satisfied';
+      if (semantic.verified && met(outcome.facts, support.target)) {
         support.status = 'satisfied'; support.evidence = [...outcome.evidence];
       }
     }
-    // Reaching a prerequisite is causal progress, even though the parent
-    // outcome is not complete yet. Start the preparation watchdog again for
-    // the next dependency rather than counting the old support chain.
-    if (supportSatisfied || newlySatisfiedPrerequisite) {
-      goal.preparationOnlyStreak = 0;
-      goal.lastPreparationMethodId = undefined;
-    }
-    // `progress` is the journal's terminal status for a verified but
-    // non-productive action. It is not objective progress: bank/interface
-    // preparation can verify successfully while the selected production or
-    // combat target remains unchanged. Count only a method effect, a
-    // measurable intermediate fact, or a newly satisfied dependency as
-    // progress so repeated setup cycles reach the bounded replan path.
-    const causalProgress = productive || measurableIntermediate || supportSatisfied || newlySatisfiedPrerequisite;
-    goal.attempts++; goal.noProgress = causalProgress ? 0 : goal.noProgress + 1;
+    goal.attempts++; goal.noProgress = productive ? 0 : goal.noProgress + 1;
     goal.spentGp += outcome.spentGp; goal.lostGp += outcome.lostGp; goal.deaths += outcome.deaths; goal.elapsedMs += outcome.elapsedMs;
     this.memory.sequence = outcome.sequence;
     delete this.memory.pending;
+    if (goal.spentGp <= goal.budget.spendableGp && goal.lostGp <= goal.budget.maxLossGp && goal.deaths <= goal.budget.maxDeaths
+      && goal.elapsedMs <= goal.budget.maxDurationMs && (semantic.cycle || outcome.at - Math.max(goal.startedAt,
+        this.memory.progress.lastProductiveAt ?? this.memory.progress.since) >= PROGRESS_TIMEOUT_MS)) {
+      stats.viability='temporarily-poor'; stats.cooldownUntil=outcome.at+COOLDOWN_MS;
+      this.review(outcome.at,'partial',semantic.cycle
+        ? 'Reversible state cycle without a durable result; reconsider methods from current evidence.'
+        : 'No causal progress before the productive-progress deadline; reconsider methods from current evidence.',outcome.evidence);
+      return;
+    }
     if ((goal.preparationOnlyStreak ?? 0) >= 3 && !met(outcome.facts, goal.target)
-      && !supportSatisfied && !newlySatisfiedPrerequisite) {
+      && !productive) {
       goal.blocker={at:outcome.at,
         reason:'The same strategic method repeated preparation without measurable target progress; replan its causal chain instead of repeating the setup.',
         recheckAt:outcome.at+30_000,attempts:0};

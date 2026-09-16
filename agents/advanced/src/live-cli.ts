@@ -196,7 +196,7 @@ export async function main(context:StartupContext){
       latest=await adapter.snapshot();
       if(previous){
         policy.observe(previous,latest);
-        if(JSON.stringify(previous.skills)!==JSON.stringify(latest.skills)||JSON.stringify(previous.inventory)!==JSON.stringify(latest.inventory))lastProgress=Date.now();
+        if(!agency&&JSON.stringify(previous.skills)!==JSON.stringify(latest.skills))lastProgress=Date.now();
       }
       if(research?.rejected.some(r=>r.startsWith('QUEUED_SOURCES:')))queueResearch();
       if(!latest.connected||latest.hp===0){reason='DISCONNECTED_OR_DEAD';break;}
@@ -241,18 +241,24 @@ export async function main(context:StartupContext){
             if(observed.status==='verified')proof=observed;
           }
           agency.record(receipt.commandId,agencyState(latest),proof);
+          if(proof.status==='interrupted'&&proof.recovery==='investigate'&&stored&&receipt.before._advanced) {
+            policy.retireReconciledOutcome(receipt.before._advanced,stored.command.intent,stored.result);
+            store.append('live_policy_checkpoints',crypto.randomUUID(),policy.summary());
+          }
         }
         if(agency.pending('safety')){publish('RECONCILING','Unresolved safety action');await sleep(700);continue;}
         const urgent=urgentDecision(latest);
         if(urgent) { decision=urgent; emergency=true; }
         else {
           if(agency.pending()){publish('RECONCILING','Unresolved exact command; no replay');await sleep(700);continue;}
+          agency.checkProgress(agencyState(latest));
           const selection=agency.plan(agencyState(latest));
           if(!isSelection(selection)){publish('BLOCKED',selection.type==='blocked'?selection.reason:'Reconciliation required');await sleep(700);continue;}
           planned=selection;
           decision=policy.next(latest,planned.task);
         }
       }
+      if(agency)lastProgress=agency.summary().progressHealth.lastProductiveAt??lastProgress;
       activeGoal=decision.goal;
       if(decision.blocked){
         if(agency&&planned?.task.kind==='exploration'&&planned.task.route&&!agency.pending()&&!agency.pending('safety')){
@@ -303,7 +309,7 @@ export async function main(context:StartupContext){
           policy.observe(before,latest);
           continue;
         }
-        if(Date.now()-lastProgress>60_000){reason='NO_VERIFIED_PROGRESS_60_SECONDS';publish('BLOCKED',reason);break;}
+        if(!agency&&Date.now()-lastProgress>60_000){reason='NO_VERIFIED_PROGRESS_60_SECONDS';publish('BLOCKED',reason);break;}
         await sleep(700);continue;
       }
       const before=latest,intent=decision.intent;
@@ -341,13 +347,13 @@ export async function main(context:StartupContext){
       store.append('live_policy_checkpoints',crypto.randomUUID(),policy.summary());
       store.append('observations_or_checkpoints',crypto.randomUUID(),latest);
       if(result.status==='SUCCEEDED'){
-        verified++;lastProgress=Date.now();
+        verified++;if(!agency)lastProgress=Date.now();
         if(mode==='pilot'&&intent.operation==='move'&&JSON.stringify(before.position)!==JSON.stringify(latest.position))pilotMoved=true;
         if(mode==='pilot'&&decision.goal==='pilot-interaction')pilotInteracted=true;
       }else if(result.status==='RUNNING'){publish('RECONCILING','Awaiting exact outcome or transient settling; no replay');await sleep(700);continue;}
       else{failed++;if(decision.destination)navigator!.fail(decision.destination,result.reason);}
       publish('RUNNING',result.reason+': '+decision.reason);
-      if(Date.now()-lastProgress>60_000){reason='NO_VERIFIED_PROGRESS_60_SECONDS';break;}
+      if(!agency&&Date.now()-lastProgress>60_000){reason='NO_VERIFIED_PROGRESS_60_SECONDS';break;}
       await sleep(350);
     }
     if(revoked)reason='CONTROL_REVOKED';
