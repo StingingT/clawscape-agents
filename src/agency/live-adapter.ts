@@ -1,8 +1,12 @@
+import { intentionReviewSafe } from './goal-intents.ts';
+import type { SourceTask } from './source-methods.ts';
+import { SourceResources } from './source-resources.ts';
+import type { SourcePort } from './source-actions.ts';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { validateBuildRules, type BuildRules } from './build-rules.ts';
 import { chooseDevelopment, reviewDevelopment, developmentReadiness, guardDevelopment, protectedXpChanged, type Development } from './development.ts';
-import { observeQuietStep, recordViability, retryAllowed, stepKey, type QuietWindow, type Viability } from './step-retry.ts';
+import { observeQuietStep, recordViability, retryAllowed, retryExhausted, stepKey, type QuietWindow, type Viability } from './step-retry.ts';
 import { effectState, progressHealth, PROGRESS_TIMEOUT_MS } from './progress.ts';
 import { meaningfulFrontierRoute, reconcileDeathLoss } from './reconciliation.ts';
 import { conflictsWithQuarantine, quarantineEligible, releaseFromFreshAccounting, transactionIdentity,
@@ -11,6 +15,7 @@ import { addAcquisition, emptyAcquisition, observeAcquisitionSources, rememberAc
 import type { DropLead } from './drop-leads.ts';
 import { bindItems, resolveItems, itemFact, itemCount, type ItemNeed, type ItemRef } from './item-intents.ts';
 import { randomUUID } from 'node:crypto';
+import { teamPlanning } from '../team/worker.ts';
 import { observeHistoricalContext, historicalWindowReady, historicalTraversal, type HistoricalWindow } from './historical-context.ts';
 import { emptyTrips, preparation, observeTrip, recordTripEffect, type TripLearning, type TripPreparation } from './trip-logistics.ts';
 import { Director, createMemory } from './director.ts';
@@ -18,18 +23,62 @@ import type { Decision, Identity, Memory, Method, Observation, Outcome } from '.
 import { buildCatalogue, capabilityContext, cash, defaultPolicy, emptyKnowledge, observeFacts, observeKnowledge, discoveryFact,
   type Catalogue, type Knowledge, type LiveState, type Policy, type Route, type Task, type TaskKind } from './world-model.ts';
 
-export type LiveCandidate = { approach?:{x:number;z:number;level:number}; itemRefs?:ItemRef[]; id: string; type: string; fields?: Record<string, any>; waitTicks?: number };
+export type LiveCandidate = { sourceAuthorization?:string; approach?:{x:number;z:number;level:number}; itemRefs?:ItemRef[]; id: string; type: string; fields?: Record<string, any>; waitTicks?: number };
 export type Selection = { decision: Extract<Decision,{type:'execute'}>; method: Method; task: Task; view: Observation };
-export type Receipt = { commandId:string; action:LiveCandidate; before:LiveState; startedAt:number; scope:'task'|'safety'; methodId?:string; approach?:{x:number;z:number;level:number}; execution?:{accepted?:boolean;phase?:string;navigation?:{status:string;reason?:string;movementDispatched?:boolean}}; stationary?:QuietWindow; historical?:HistoricalWindow; investigation?:{at:number;reason:string;quietSince?:number} };
+export type Receipt = { sourceTask?:SourceTask; commandId:string; action:LiveCandidate; before:LiveState; startedAt:number; scope:'task'|'safety'; methodId?:string; approach?:{x:number;z:number;level:number}; execution?:{accepted?:boolean;phase?:string;navigation?:{status:string;reason?:string;movementDispatched?:boolean}}; stationary?:QuietWindow; historical?:HistoricalWindow; investigation?:{at:number;reason:string;quietSince?:number} };
 type Document = { acquisition?:AcquisitionMemory; interruptions?:Array<{at:number;receipt:Receipt;reason:string}>; trips?:TripLearning; preparation?:TripPreparation; version:2; memory:Memory; knowledge:Knowledge; receipt?:Receipt; safetyReceipt?:Receipt;
   buildReadiness?:ReturnType<typeof developmentReadiness>; lastCommands:string[]; route?:{goalKey:string;methodId:string;action:LiveCandidate}; blocked?:string; development?:Development; updatedAt?:number;
   retries?:Record<string,Viability>; lastOutcome?:{at:number;commandId:string;type:string;status:string;reason?:string;evidence:string[]};
   losses?:Array<{at:number;commandId:string;lifeFrom:any;lifeTo:any;lostGp:number;items:Array<{id:number|string;count:number;name?:string}>}>;
   transactionQuarantine?:QuarantinedTransaction[];
   historicalRetirements?:Array<{at:number;commandId:string;receipt:Receipt;reason:string;evidence:string[];lossAttribution:'unknown'}>;
+  /** A bounded record of distinct abstract plans which had no executable first
+   * step. This is a controller capability signal, not a route blacklist. */
+  executorEpisode?:{at:number;context:string;learningRevision:number;executorRevision:string;failures:string[];recheckAt:number};
   discoveryRetryAt?:number;
   lastObservation?:{at:number;tick?:number;connected?:boolean;position?:{x:number;z:number;level:number}} };
 export type Verification = { historical?:boolean; recovery?:'investigate'; status:'verified'|'rejected'|'unknown'|'interrupted'; evidence:string[]; reason?:string };
+export const BOUNDED_INTERACTION_RECONCILIATION_MS = 30_000;
+export const EXECUTOR_EPISODE_MAX_FAILURES = 3;
+export const EXECUTOR_EPISODE_RECHECK_MS = 2*60_000;
+/** A visible acknowledgement screen is proof that the acknowledgement has not
+ * taken effect.  It is neither a transaction nor a player-choice packet, so a
+ * long exponential retry window is counterproductive: it strands the whole
+ * agent behind an unchanged UI.  Keep a short, bounded re-observation gap so
+ * we never hammer the server, then allow a fresh acknowledgement attempt. */
+export const STATE_PROVEN_ACKNOWLEDGEMENT_RETRY_MS = 30_000;
+/** Actions in this set neither move value nor commit a player choice.  Their
+ * historical effect can therefore be retired after fresh observation instead
+ * of keeping the whole controller in reconciliation forever. */
+const BOUNDED_NON_TRANSACTIONAL_INTERACTIONS = new Set([
+  'interactNpc','interactLoc','talkToNpc','pickupItem','useItemOnLoc',
+  'acceptCharacterDesign',
+]);
+export function stateProvesAcknowledgementStillRequired(action:LiveCandidate,state:LiveState):boolean {
+  // This is intentionally narrower than "modal open".  A generic modal may
+  // be a bank, dialogue, confirmation, or another value-bearing flow.  The
+  // same observed predicate that proposes the design acknowledgement is the
+  // only one which can bypass an old retry record.
+  return action.type==='acceptCharacterDesign'&&state.modalOpen===true
+    &&(state.inventory??[]).length===0&&state.bank?.isOpen!==true
+    &&state.shop?.isOpen!==true&&state.dialog?.isOpen!==true;
+}
+/** Retire only an old non-transactional interaction after a bounded fresh investigation.
+ * The historical effect remains unknown. This never records success/failure and never replays the old command. */
+export function boundedInteractionRetirement(receipt:Receipt,state:LiveState,now:number):Verification|undefined {
+  if(!BOUNDED_NON_TRANSACTIONAL_INTERACTIONS.has(receipt.action.type)||!Number.isFinite(receipt.startedAt)
+    ||now-receipt.startedAt<BOUNDED_INTERACTION_RECONCILIATION_MS||state.inGame!==true)return;
+  const before=receipt.before.player,current=state.player;
+  if(!before||!current||before.isDead||current.isDead
+    ||![receipt.before.tick,state.tick,before.worldX,before.worldZ,before.level,current.worldX,current.worldZ,current.level].every(Number.isFinite)
+    ||Number(state.tick)<=Number(receipt.before.tick)||current.lifeId!==before.lifeId)return;
+  for(const field of ['character','world','worldEpoch','profileId'] as const)
+    if((receipt.before as any)[field]!==undefined&&(receipt.before as any)[field]!== (state as any)[field])return;
+  return {status:'interrupted',recovery:'investigate',
+    reason:'BOUNDED_UNATTRIBUTED_INTERACTION: fresh 30-second investigation horizon exhausted; historical outcome remains unknown.',
+    evidence:[`bounded-interaction-window:${receipt.startedAt}->${now}`,`fresh-ticks:${receipt.before.tick}->${state.tick}`,
+      'Historical interaction outcome remains unknown; old command retired without replay.']};
+}
 
 const atomic = (file:string,value:unknown) => {
   mkdirSync(dirname(file),{recursive:true});
@@ -51,13 +100,16 @@ export class LiveAgency {
   private readonly buildRules?:BuildRules;
   private readonly dropLeads:DropLead[];
   private readonly acquisitionHints:AcquisitionHint[];
+  private readonly executorRevision:string;
   private readonly observer = randomUUID();
-  constructor(file:string,identity:Identity,options:{policy?:Partial<Policy>;supported:TaskKind[];routes?:Route[];
-    dropLeads?:DropLead[];acquisitionHints?:AcquisitionHint[];preferences?:Memory['preferences'];now?:()=>number;developmentHint?:string;buildRules?:BuildRules}) {
+  private readonly sourceResources?:SourceResources;
+  constructor(file:string,identity:Identity,options:{sourceCatalogueRoot?:string;policy?:Partial<Policy>;supported:TaskKind[];routes?:Route[];
+    dropLeads?:DropLead[];acquisitionHints?:AcquisitionHint[];preferences?:Memory['preferences'];now?:()=>number;developmentHint?:string;buildRules?:BuildRules;executorRevision?:string}) {
     this.dropLeads=options.dropLeads??[];this.acquisitionHints=options.acquisitionHints??[];
     this.file=file;this.identity={...identity};this.supported=options.supported;this.routes=options.routes??[];
     this.policy={...defaultPolicy,...options.policy};this.clock=options.now??Date.now;this.developmentHint=options.developmentHint;
     this.buildRules=options.buildRules?validateBuildRules(options.buildRules,identity):undefined;
+    this.executorRevision=options.executorRevision??identity.revision;
     if (!Object.entries(this.policy).every(([_,v])=>v===undefined||Number.isFinite(v)&&Number(v)>=0)
       || !Number.isInteger(this.policy.maxDeaths) || this.policy.foodTarget<0 || this.policy.maxDurationMs<=0)
       throw new Error('INVALID_AGENCY_POLICY');
@@ -73,6 +125,7 @@ export class LiveAgency {
     if (!!memory.pending!==!!this.document.receipt || (memory.pending && memory.pending.commandId!==this.document.receipt?.commandId))
       throw new Error('AGENCY_JOURNAL_INCONSISTENT');
     this.director=new Director(memory);
+    if(options.sourceCatalogueRoot)this.sourceResources=new SourceResources(options.sourceCatalogueRoot,file,this.identity,this.clock);
   }
   private save() { this.document.updatedAt=this.clock();atomic(this.file,this.document); }
   tripPreparation(state:LiveState,kind?:TaskKind):TripPreparation {
@@ -87,6 +140,44 @@ export class LiveAgency {
     if(id.startsWith('production')||id==='supply-ammunition')return 'production';
     return 'exploration';
   }
+  private executorEpisode(state:LiveState) {
+    const episode=this.document.executorEpisode;
+    if(!episode)return;
+    const revision=this.director.memory.learningRevision??0;
+    const productiveAt=this.director.memory.progress?.lastProductiveAt??0;
+    // An executor episode is a bounded diagnostic pause, not a durable
+    // blacklist.  Once its recheck is due, discard the old set and make a
+    // genuinely fresh plan from the current observation.  A new failure can
+    // create a new episode, but stale failures must not keep an agent idle.
+    if(episode.executorRevision!==this.executorRevision||episode.context!==capabilityContext(state)||episode.learningRevision!==revision||productiveAt>episode.at
+      ||(episode.failures.length>=EXECUTOR_EPISODE_MAX_FAILURES&&this.clock()>=episode.recheckAt)) {
+      delete this.document.executorEpisode;
+      return;
+    }
+    return episode;
+  }
+  private executorEpisodeBlocked(state:LiveState) {
+    const episode=this.executorEpisode(state);
+    return episode&&episode.failures.length>=EXECUTOR_EPISODE_MAX_FAILURES&&this.clock()<episode.recheckAt ? episode : undefined;
+  }
+  /** A closed interface is a safe, general precondition for replanning.
+   * It is allowed only while a bounded executor episode has no outstanding
+   * receipt, so it cannot discard a planned withdrawal, purchase, or dialogue. */
+  blockedInterfaceRecovery(state:LiveState):LiveCandidate|undefined {
+    if(!this.executorEpisodeBlocked(state)||this.document.receipt||this.document.safetyReceipt)return;
+    if(state.bank?.isOpen===true)return {id:'recover-close-bank-interface',type:'closeModal',waitTicks:1,
+      fields:{reason:'restore a neutral interface before a bounded executor replan'}};
+    if(state.shop?.isOpen===true)return {id:'recover-close-shop-interface',type:'closeShop',waitTicks:1,
+      fields:{reason:'restore a neutral interface before a bounded executor replan'}};
+  }
+  private recordExecutorFailure(state:LiveState,id:string):void {
+    const now=this.clock(),context=capabilityContext(state),revision=this.director.memory.learningRevision??0;
+    const prior=this.executorEpisode(state);
+    const failures=prior?[...prior.failures]:[];
+    if(!failures.includes(id))failures.push(id);
+    this.document.executorEpisode={at:prior?.at??now,context,learningRevision:revision,executorRevision:this.executorRevision,failures:failures.slice(-EXECUTOR_EPISODE_MAX_FAILURES),
+      recheckAt:failures.length>=EXECUTOR_EPISODE_MAX_FAILURES?now+EXECUTOR_EPISODE_RECHECK_MS:now};
+  }
   catalogue(state:LiveState):Catalogue {
     if(state.character && String(state.character).toLowerCase()!==this.identity.agent.toLowerCase())throw new Error('OBSERVATION_AGENT_MISMATCH');
     if(state.world && state.world!==this.identity.world)throw new Error('OBSERVATION_WORLD_MISMATCH');
@@ -97,6 +188,11 @@ export class LiveAgency {
     }
     this.document.lastObservation={at:this.clock(),tick:state.tick,connected:state.inGame,position:state.player && {x:state.player.worldX,z:state.player.worldZ,level:state.player.level}};
     observeKnowledge(state,this.document.knowledge,this.clock(),this.routes);
+    const discoveryHold=this.document.knowledge.discoveryHold;
+    if(discoveryHold && (discoveryHold.until<=this.clock()
+      || discoveryHold.context!==capabilityContext(state)
+      || discoveryHold.learningRevision!==(this.director.memory.learningRevision??0)))
+      delete this.document.knowledge.discoveryHold;
     this.document.trips??=emptyTrips();
     observeTrip(this.document.trips,state,this.activity(),this.clock());
     this.document.preparation=this.tripPreparation(state,this.activity());
@@ -120,7 +216,21 @@ export class LiveAgency {
       addAcquisition(catalogue,state,this.document.knowledge.bank,this.document.acquisition,this.director.memory,
         {...this.policy,foodTarget:this.tripPreparation(state,'combat').foodTarget},this.dropLeads,this.acquisitionHints,this.clock());
     }
+    this.sourceResources?.augment(catalogue,state,this.document.knowledge,this.document.acquisition,this.policy,this.director.memory);
     return catalogue;
+  }
+  async sourceActions(task:Task,state:LiveState,port:SourcePort):Promise<LiveCandidate[]> {
+    if(!task.sourceResource||!this.sourceResources)return [];
+    return (await this.sourceResources.actions(task.sourceResource,state,port)).actions;
+  }
+  async sourcePreflight(selection:Selection,action:LiveCandidate,state:LiveState,port:SourcePort):Promise<LiveCandidate> {
+    if(!selection.task.sourceResource)return action;
+    if(!this.sourceResources)throw new Error('SOURCE_EXECUTOR_NOT_INSTALLED');
+    return this.sourceResources.preflight(selection,action,state,port);
+  }
+  sourceOutcome(task:Task,before:LiveState,after:LiveState,action:LiveCandidate,original:Verification):Verification {
+    if(!task.sourceResource)return original;
+    return this.sourceResources?.outcome(task.sourceResource,before,after,action,original)??{status:'unknown',evidence:[],reason:'Source executor unavailable for reconciliation.'};
   }
   plan(state:LiveState):Selection|Decision {
     if(state.character && String(state.character).toLowerCase()!==this.identity.agent.toLowerCase())throw new Error('OBSERVATION_AGENT_MISMATCH');
@@ -139,11 +249,24 @@ export class LiveAgency {
       catalogue.methods=catalogue.methods.filter(m=>m.domain!=='combat');
     }
     if(!this.document.receipt) {
+      if(catalogue.intentPolicyEnabled&&intentionReviewSafe(state))this.director.retireUnjustifiedIntents(new Set(catalogue.retiredIntentIds??[]),this.clock());
       this.director.retireObsoleteSurveys(new Set(Object.keys(this.document.knowledge.routes)),this.clock());
+      this.director.retireObsoleteDiscovery(new Set(catalogue.tasks.keys()),this.clock());
       this.director.reviseFoodNeed(this.document.preparation!.foodTarget,this.clock());
       this.checkProgress(state);
     }
-    const decision=this.director.next(catalogue.view,catalogue.opportunities,catalogue.methods);
+    const executorEpisode=this.executorEpisodeBlocked(state);
+    if(executorEpisode) {
+      const reason=`EXECUTOR_CAPABILITY_EPISODE: ${executorEpisode.failures.length} distinct plans had no executable first step. Await a verified state/knowledge change or recheck at ${new Date(executorEpisode.recheckAt).toISOString()}.`;
+      this.document.blocked=reason;
+      // Export no phantom work to Herdr while the executor is rate-limited.
+      teamPlanning({...catalogue,opportunities:[],methods:[],tasks:new Map()},this.director,state.inGame===true,false,reason,process.env,this.clock(),false,executorEpisode);
+      this.save();
+      return {type:'blocked',reason,missingCapabilities:[]};
+    }
+    const episode=this.executorEpisode(state);
+    const preference=teamPlanning(catalogue,this.director,state.inGame===true,!!this.document.receipt||!!this.document.safetyReceipt,this.document.blocked,process.env,this.clock(),true,episode);
+    const decision=this.director.next(catalogue.view,catalogue.opportunities,catalogue.methods,preference);
     this.document.discoveryRetryAt=undefined;
     if(decision.type==='blocked'&&!this.director.memory.pending&&!this.director.memory.active&&catalogue.discoveryRetryAt) {
       this.document.discoveryRetryAt=catalogue.discoveryRetryAt;
@@ -230,6 +353,8 @@ export class LiveAgency {
   settleStep(commandId:string,state:LiveState):Verification|undefined {
     const r=this.document.receipt?.commandId===commandId?this.document.receipt:this.document.safetyReceipt;
     if(!r||r.commandId!==commandId)return;
+    const bounded=boundedInteractionRetirement(r,state,this.clock());
+    if(bounded)return bounded;
     const result=observeQuietStep(r.action,r.before,state,this.clock(),this.observer,r.stationary);
     r.stationary=result.window;
     if(!result.settled&&historicalTraversal(r.action,r.before)) {
@@ -254,9 +379,40 @@ export class LiveAgency {
     if(!receipt)return false;
     const strict=new Set(['shopBuy','shopSell','bankDeposit','bankWithdraw','clickDialogOption']);
     if(strict.has(receipt.action.type))return false;
-    if(['interactNpc','interactLoc','talkToNpc','useInventoryItem','equip','useItemOnItem','useItemOnLoc','pickupItem'].includes(receipt.action.type)) {
-      const settled=this.settleStep(receipt.commandId,stable);
-      if(settled)this.record(receipt.commandId,stable,settled);
+    if(BOUNDED_NON_TRANSACTIONAL_INTERACTIONS.has(receipt.action.type)||['useInventoryItem','equip'].includes(receipt.action.type)) {
+      // A changed world epoch invalidates the original command timeline. Do
+      // not start a quiet-window investigation that can never attribute that
+      // old interaction; use the two fresh current observations below to
+      // retire this non-value-moving receipt without replaying it.
+      const epochChanged=(receipt.before as any).worldEpoch!==undefined
+        &&(receipt.before as any).worldEpoch!==(stable as any).worldEpoch;
+      if(!epochChanged) {
+        const settled=this.settleStep(receipt.commandId,stable);
+        if(settled)this.record(receipt.commandId,stable,settled);
+      }
+      // A previous server/client epoch may reset the action's original tick or
+      // life id, so settleStep cannot always establish its normal quiet window.
+      // Two new observations of this same live actor are nevertheless enough to
+      // retire an old *non-value-moving* probe without replaying or claiming an
+      // outcome.  This is deliberately narrower than transaction quarantine.
+      if(!(scope==='safety'?this.document.safetyReceipt:this.document.receipt))return true;
+      // settleStep has already started a controller-owned quiet-window
+      // investigation. A restart must not shortcut that bounded evidence window
+      // merely because it happens to have two fresh observations.
+      if(receipt.investigation)return false;
+      const a=first.player,b=stable.player;
+      const fresh=first.inGame===true&&stable.inGame===true&&a&&b&&!a.isDead&&!b.isDead
+        &&[first.tick,stable.tick,a.worldX,a.worldZ,a.level,b.worldX,b.worldZ,b.level].every(Number.isFinite)
+        &&Number(stable.tick)>Number(first.tick)
+        &&['character','world','profileId'].every(field=>(first as any)[field]===undefined||(first as any)[field]===(stable as any)[field]);
+      if(fresh) {
+        const evidence=[`restart-fresh-observations:${first.tick}->${stable.tick}`,
+          `stale-${receipt.action.type}-retired-without-replay`,
+          'Historical non-transactional interaction remains unknown; select a new action from current state.'];
+        this.record(receipt.commandId,stable,{status:'interrupted',recovery:'investigate',evidence,
+          reason:'RESTART_UNATTRIBUTED_NONTRANSACTIONAL_INTERACTION: original action clock cannot be compared after restart.'},
+        {spentGp:0,lostGp:0,deaths:0,elapsedMs:Math.max(0,this.clock()-receipt.startedAt)});
+      }
       return !(scope==='safety'?this.document.safetyReceipt:this.document.receipt);
     }
     const a=first.player,b=stable.player;
@@ -278,7 +434,14 @@ export class LiveAgency {
   eligible(action:LiveCandidate,state:LiveState):boolean {
     let current=action;try{current=bindItems(action,state);}catch{return false;}
     if(this.transactionConflict(current,state))return false;
-    return retryAllowed(this.document.retries?.[stepKey(current,state)],this.clock(),capabilityContext(state),this.director.memory.learningRevision??0);
+    const retry=this.document.retries?.[stepKey(current,state)];
+    if(stateProvesAcknowledgementStillRequired(current,state)&&retry&&retry.state!=='viable')
+      return this.clock()>=retry.at+STATE_PROVEN_ACKNOWLEDGEMENT_RETRY_MS;
+    return retryAllowed(retry,this.clock(),capabilityContext(state),this.director.memory.learningRevision??0);
+  }
+  retryExhausted(action:LiveCandidate,state:LiveState):boolean {
+    let current=action;try{current=bindItems(action,state);}catch{return false;}
+    return retryExhausted(this.document.retries?.[stepKey(current,state)],capabilityContext(state),this.director.memory.learningRevision??0);
   }
   /** Funding is an observed prerequisite. This never grants purchase authority by itself. */
   prepareFunding(action:LiveCandidate,state:LiveState):boolean {
@@ -305,20 +468,33 @@ export class LiveAgency {
     this.director.requestSupport({fact:itemFact(need),minimum:need.minimum},reason,[`own-missing-item:${state.tick}:${need.id??need.name}`]);
     delete this.document.route;this.save();
   }
-  deferCurrent(state:LiveState,reason:string):void {
+  deferCurrent(state:LiveState,reason:string,executorFailure=true,methodId?:string):void {
     if(this.document.receipt||this.document.safetyReceipt)throw new Error('RECONCILE_PENDING_ACTION_FIRST');
     const goal=this.director.memory.active;if(!goal)return;
+    if(methodId)this.director.executorUnavailable(this.catalogue(state).view,methodId,this.clock());
+    if(executorFailure)this.recordExecutorFailure(state,goal.id);
     this.director.deferCurrent(this.clock(),reason,[`fresh-no-executor:${state.tick}:${goal.id}`]);
     delete this.document.route;this.document.blocked=reason;this.save();
   }
-  deferSurvey(route:Route,state:LiveState,reason:string):void {
+  deferSurvey(route:Route,state:LiveState,reason:string,executorFailure=true):void {
     if(this.document.receipt||this.document.safetyReceipt)throw new Error('RECONCILE_PENDING_ACTION_FIRST');
     this.document.knowledge.routeFailures??={};
     const old=this.document.knowledge.routeFailures[route.id],now=this.clock(),attempts=(old?.attempts??0)+1;
+    if(executorFailure)this.recordExecutorFailure(state,'survey:'+route.id);
     this.document.knowledge.routeFailures[route.id]={at:now,retryAt:now+Math.min(30*60_000,60_000*2**Math.min(5,attempts)),
       attempts,context:capabilityContext(state),learningRevision:this.director.memory.learningRevision??0,reason};
     this.director.deferSurvey(route.id,now,reason,[`own-route-assessment:${state.tick}:${route.id}`]);
     delete this.document.route;this.document.blocked=reason;this.save();
+  }
+  /** A failed path assessment is allowed one fresh, read-only local observation
+   * before it is deferred.  This is deliberately keyed to the route failure and
+   * current capability context: scans do not become a success signal, and a
+   * route cannot be kept alive by repeatedly scanning the same stale scene. */
+  needsSurveyObservation(route:Route,state:LiveState):boolean {
+    const prior=this.document.knowledge.surveyObservations?.[route.id];
+    const failure=this.document.knowledge.routeFailures?.[route.id];
+    return !prior || prior.context!==capabilityContext(state)
+      || prior.failureAt!==failure?.at;
   }
   blocked(reason:string):void {
     this.director.blocked(this.clock(),reason);this.document.blocked=reason;this.save();
@@ -330,7 +506,7 @@ export class LiveAgency {
     const goal=this.director.memory.active,p=this.director.memory.progress;
     if(!goal||!p||this.clock()-Math.max(goal.startedAt,p.lastProductiveAt??p.since)<PROGRESS_TIMEOUT_MS)return false;
     this.director.blocked(this.clock(),'No causal progress within the bounded method window.',[]);
-    this.deferCurrent(state,'Productive-progress deadline exceeded; reconsider methods from fresh observations.');
+    this.deferCurrent(state,'Productive-progress deadline exceeded; reconsider methods from fresh observations.',false);
     return true;
   }
   /** No re-selection here. A refused begin MUST prevent normal execution. */
@@ -340,13 +516,19 @@ export class LiveAgency {
     if(this.document.historicalRetirements?.some(r=>r.commandId===commandId))throw new Error('HISTORICAL_COMMAND_ID_CANNOT_BE_REUSED');
     action=bindItems(action,state);
     if(this.transactionConflict(action,state))throw new Error('TRANSACTION_QUARANTINED_UNTIL_FRESH_BANK_ACCOUNTING');
-    const view=this.catalogue(state).view;
+    const current=this.catalogue(state),view=current.view;
+    if(current.intentPolicyEnabled&&(current.retiredIntentIds??[]).some(id=>id===selection.decision.goal.id||id===selection.method.id))
+      throw new Error('INTENTION_REVIEW_REQUIRED: the selected legacy goal/leaf no longer has a current purpose; replan before dispatch.');
     if(view.context!==selection.view.context)throw new Error('CAPABILITY_CONTEXT_CHANGED');
     if(!this.eligible(action,state))throw new Error('STEP_AWAITING_EVIDENCE_OR_COOLDOWN');
     guardDevelopment(this.document.development,state,action,selection.task.skill,this.buildRules);
     // A shop cannot spend banked money; preserve the carried working reserve too.
     const cost=authorizeAction(state,action,selection.method,Math.max(0,cash(state.inventory??[])-this.policy.reserveCoins));
     const priced={...selection.method,costGp:cost};
+    if(selection.task.sourceResource) {
+      if(!this.sourceResources)throw new Error('SOURCE_EXECUTOR_NOT_INSTALLED');
+      this.sourceResources.authorize(selection,action,state,commandId);
+    }
     this.director.begin(view,selection.decision,priced,commandId);
     let approach=action.approach;
     if(action.type==='walkTo'&&!approach) {
@@ -355,16 +537,17 @@ export class LiveAgency {
       const end=route??{x:f.x,z:f.z,level:f.level??state.player?.level};
       if([end.x,end.z,end.level].every(Number.isFinite))approach={x:end.x,z:end.z,level:end.level};
     }
-    this.document.receipt={commandId,action:structuredClone(action),before:structuredClone(state),startedAt:this.clock(),scope:'task',methodId:selection.method.id,approach};
+    this.document.receipt={sourceTask:selection.task.sourceResource?structuredClone(selection.task.sourceResource):undefined,commandId,action:structuredClone(action),before:structuredClone(state),startedAt:this.clock(),scope:'task',methodId:selection.method.id,approach};
     if(action.type==='walkTo')this.document.route={goalKey:selection.decision.goal.key,methodId:selection.method.id,action:structuredClone(action)};
     this.save();return commandId;
   }
-  /** Urgent survival is independent of the goal; it cannot overwrite an unresolved ordinary intent. */
+  /** Urgent survival and a bounded neutral interface close are independent of
+   * the goal; neither can overwrite an unresolved ordinary intent. */
   beginSafety(action:LiveCandidate,state:LiveState,commandId:string=randomUUID()):string {
     if(this.document.safetyReceipt)throw new Error('RECONCILE_SAFETY_ACTION_FIRST');
     if(this.quarantinedTransaction(commandId)||this.document.historicalRetirements?.some(r=>r.commandId===commandId))throw new Error('HISTORICAL_COMMAND_ID_CANNOT_BE_REUSED');
     action=bindItems(action,state);
-    if(!safetyAction(state,action))throw new Error('NOT_AN_URGENT_SAFETY_ACTION');
+    if(!safetyAction(state,action)&&!neutralInterfaceRecovery(state,action))throw new Error('NOT_AN_URGENT_SAFETY_ACTION');
     this.document.safetyReceipt={commandId,action:structuredClone(action),before:structuredClone(state),startedAt:this.clock(),scope:'safety'};
     this.save();return commandId;
   }
@@ -374,6 +557,9 @@ export class LiveAgency {
     const receipt=safety?this.document.safetyReceipt:this.document.receipt;
     if(!receipt && this.document.lastCommands.includes(commandId))return;
     if(!receipt||receipt.commandId!==commandId)throw new Error('OUTCOME_WITHOUT_MATCHING_INTENT');
+    if(receipt.sourceTask)this.sourceResources?.reconcileSpend(commandId,receipt.before,after,receipt.action);
+    if(receipt.sourceTask)verification=this.sourceResources?.outcome(receipt.sourceTask,receipt.before,after,receipt.action,verification)
+      ??{status:'unknown',evidence:[],reason:'Source catalogue required to reconcile this receipt.'};
     const historical=verification.historical===true&&verification.status==='interrupted'
       &&verification.evidence.includes('historical-context-retired')&&historicalTraversal(receipt.action,receipt.before)
       &&historicalWindowReady(receipt.before,after,this.clock(),this.observer,receipt.historical,true);
@@ -388,6 +574,27 @@ export class LiveAgency {
     }
     if(verification.status==='verified') {
       this.document.acquisition??=emptyAcquisition();rememberAcquisitionSources(this.document.acquisition,receipt.before,after,receipt.action,this.clock());
+      // The dispatcher deliberately strips controller-only fields before it
+      // sends a CLI command.  The intent receipt retains them, but a generic
+      // scan may also have been selected while an exploration survey is
+      // active (for example to refresh a collision edge).  Attribute that
+      // scan to the active survey as well.  Otherwise each successful scan
+      // is invisible to `needsSurveyObservation`, causing a read-only scan
+      // loop with no new world evidence or route decision.
+      const activeSurvey=this.director.memory.active?.id;
+      const receiptSurvey=receipt.methodId?.startsWith('survey:')
+        ?receipt.methodId.slice('survey:'.length):undefined;
+      const surveyRouteId=typeof receipt.action.fields?.surveyRouteId==='string'
+        ?receipt.action.fields.surveyRouteId
+        // The director can complete/defer the active goal while recording a
+        // terminal receipt. Its method id is stable across that transition.
+        :receiptSurvey??(activeSurvey?.startsWith('survey:')?activeSurvey.slice('survey:'.length):undefined);
+      if(receipt.action.type==='scanNearbyLocs'&&surveyRouteId) {
+        this.document.knowledge.surveyObservations??={};
+        this.document.knowledge.surveyObservations[surveyRouteId]={at:this.clock(),tick:Number(after.tick),lifeId:Number(after.player?.lifeId),
+          context:capabilityContext(after),learningRevision:this.director.memory.learningRevision??0,
+          failureAt:this.document.knowledge.routeFailures?.[surveyRouteId]?.at};
+      }
       if(receipt.action.type==='interactLoc') {
         const loc=(receipt.before.nearbyLocs??[]).find((l:any)=>l.id===receipt.action.fields?.locId&&l.x===receipt.action.fields?.x&&l.z===receipt.action.fields?.z);
         const option=(loc?.optionsWithIndex??[]).find((o:any)=>o.opIndex===receipt.action.fields?.optionIndex);
@@ -397,6 +604,17 @@ export class LiveAgency {
           const key=`${Number(loc.id)}:${Number(loc.x)}:${Number(loc.z)}:${Number(loc.level??receipt.before.player?.level??0)}:${Number(option.opIndex)}`;
           this.document.knowledge.interactions[key]={name:String(loc.name),id:Number(loc.id),x:Number(loc.x),z:Number(loc.z),level:Number(loc.level??receipt.before.player?.level??0),option:String(option.text),at:this.clock(),evidence:`own-interaction:${receipt.before.tick}->${after.tick}`};
         }
+      }
+    }
+    if(verification.status==='rejected'&&receipt.action.type==='interactLoc') {
+      const loc=(receipt.before.nearbyLocs??[]).find((l:any)=>l.id===receipt.action.fields?.locId&&l.x===receipt.action.fields?.x&&l.z===receipt.action.fields?.z);
+      const option=(loc?.optionsWithIndex??[]).find((o:any)=>o.opIndex===receipt.action.fields?.optionIndex);
+      if(loc&&option&&/^(open|climb(?:-up|-down)?|enter|cross|use)$/i.test(String(option.text))) {
+        const fact=discoveryFact(loc,Number(option.opIndex));
+        this.document.knowledge.unavailableInteractions??={};
+        this.document.knowledge.unavailableInteractions[fact]={at:this.clock(),until:this.clock()+15*60_000,
+          context:capabilityContext(after),learningRevision:this.director.memory.learningRevision??0,
+          reason:verification.reason??'explicit interaction refusal'};
       }
     }
     if(verification.status==='interrupted')this.document.interruptions=[...(this.document.interruptions??[]),{at:this.clock(),receipt:structuredClone(receipt),reason:verification.reason??'interrupted'}].slice(-16);
@@ -445,6 +663,20 @@ export class LiveAgency {
           // The historical effect remains unknown. Retire only this bounded
           // approach; generic discovery/alternative plans compete on the next tick.
           const reason='QUIESCENT_INTERACTION_REPLAN: '+(verification.reason??'Historical effect unknown; current state is quiet.');
+          // The experiment is deliberately not replayed and it does not prove
+          // that this object or the whole discovery capability is broken. Hold
+          // only this observed interaction, so another nearby object or an
+          // ordinary productive goal can compete immediately.
+          if(receipt.action.type==='interactLoc') {
+            const loc=(receipt.before.nearbyLocs??[]).find((l:any)=>l.id===receipt.action.fields?.locId&&l.x===receipt.action.fields?.x&&l.z===receipt.action.fields?.z);
+            const option=(loc?.optionsWithIndex??[]).find((o:any)=>o.opIndex===receipt.action.fields?.optionIndex);
+            if(loc&&option) {
+              const fact=discoveryFact(loc,Number(option.opIndex));
+              this.document.knowledge.unavailableInteractions??={};
+              this.document.knowledge.unavailableInteractions[fact]={at:this.clock(),until:this.clock()+EXECUTOR_EPISODE_RECHECK_MS,
+                context:capabilityContext(after),learningRevision:this.director.memory.learningRevision??0,reason};
+            }
+          }
           this.director.deferCurrent(this.clock(),reason,verification.evidence);
           delete this.document.route;this.document.blocked=reason;
         }
@@ -462,13 +694,28 @@ export class LiveAgency {
     // A terminally exhausted navigation attempt is a refusal of this approach,
     // not authority to keep the same exploration goal idle for another timeout.
     const nav=receipt.execution?.navigation,active=this.director.memory.active;
+    // The navigator may report a conditional-edge failure as "replanning"
+    // after it quarantines that edge. Once this action has ended without a
+    // movement dispatch, retaining the old survey gives the planner no next
+    // executable step. Release that one route so another safe frontier or
+    // ordinary goal can compete; do not turn the obstacle into a global ban.
     if(!safety&&!this.document.receipt&&!this.document.safetyReceipt&&active&&verification.status==='interrupted'
-      &&verification.evidence.length&&nav?.status==='blocked'
-      &&/^(door-retry-budget|empty-route|partial-path|unverified-collision-coverage|transition-required|no-progress|leg-timeout)$/.test(nav.reason??'')) {
+      &&verification.evidence.length&&(nav?.status==='blocked'||(nav?.status==='replanning'&&nav?.movementDispatched===false))
+      &&/^(door-did-not-open|door-retry-budget|empty-route|partial-path|unverified-collision-coverage|transition-required|no-progress|leg-timeout|map-initialization-timeout)$/.test(nav.reason??'')) {
       const routeId=receipt.methodId?.startsWith('survey:')?receipt.methodId.slice(7):undefined;
       const route=routeId?this.document.knowledge.routes[routeId]:undefined;
-      if(route)this.deferSurvey(route,after,'EXHAUSTED_NAVIGATION: '+nav.reason);
-      else if(active.domain==='exploration'&&active.id===receipt.methodId)this.deferCurrent(after,'EXHAUSTED_NAVIGATION: '+nav.reason);
+      // A route-owned survey has its own reversible route record.  For every
+      // other goal, the failed approach belongs to the selected method rather
+      // than to the whole capability: retire this bounded attempt, cool down
+      // only that method/context pair, and let fresh evidence choose the next
+      // safe plan.  Leaving a non-exploration parent active here used to
+      // produce a retained-but-idle objective after a partial path.
+      if(route&&(active.id==='survey:'+routeId||active.investigation?.id==='survey:'+routeId)) {
+        this.deferSurvey(route,after,'EXHAUSTED_NAVIGATION: '+nav.reason,false);
+      } else {
+        if(receipt.methodId)this.director.executorUnavailable(this.catalogue(after).view,receipt.methodId,this.clock());
+        this.deferCurrent(after,'EXHAUSTED_NAVIGATION: '+nav.reason,false);
+      }
     }
     this.save();
   }
@@ -485,7 +732,7 @@ export class LiveAgency {
       :verifiedAt!==null?'verified'
       :this.document.receipt||this.document.safetyReceipt?'executing'
       :observation?.connected===true&&ageMs!==null&&ageMs<=120_000?'observing':'alive';
-    return {source:'agency-v2.json',acquisition:this.document.acquisition,routeFailures:this.document.knowledge.routeFailures,preparation:this.document.preparation,updatedAt:this.document.updatedAt,buildReadiness:this.document.buildReadiness,development:this.document.development,
+    return {sourceResources:this.sourceResources?.brief(),source:'agency-v2.json',acquisition:this.document.acquisition,routeFailures:this.document.knowledge.routeFailures,preparation:this.document.preparation,updatedAt:this.document.updatedAt,buildReadiness:this.document.buildReadiness,development:this.document.development,
       lastObservation:this.document.lastObservation,lastOutcome:this.document.lastOutcome,losses:(this.document.losses??[]).slice(-8),
       progressHealth:{...health,stage:health.stalled?'stalled':stage,connected:observation?.connected===true,ageMs,lastObservationAt:observation?.at??null,
         lastVerifiedOutcomeAt:verifiedAt,lastObjectiveProgressAt:objectiveAt,lastSupportProgressAt:supportAt,
@@ -493,7 +740,7 @@ export class LiveAgency {
         preparationOnlyStreak:this.director.memory.active?.preparationOnlyStreak??0},
       transactionQuarantine:(this.document.transactionQuarantine??[]).slice(-8).map(({originalReceipt,...brief})=>brief),
       historicalRetirements:(this.document.historicalRetirements??[]).slice(-8).map(({receipt,...brief})=>brief),
-      discoveryRetryAt:this.document.discoveryRetryAt,
+      discoveryRetryAt:this.document.discoveryRetryAt,executorEpisode:this.document.executorEpisode,
       goal:this.director.memory.active,pending:brief(this.pending()),safetyPending:brief(this.pending('safety')),blocked:this.document.blocked};
   }
 }
@@ -509,6 +756,14 @@ export function safetyAction(state:LiveState,action:LiveCandidate):boolean {
   if(action.type!=='useInventoryItem')return false;
   const item=(state.inventory??[]).find((i:any)=>i.slot===action.fields?.slot);
   return hp<max && (item?.optionsWithIndex??[]).some((o:any)=>o.opIndex===action.fields?.optionIndex&&/^eat$/i.test(String(o.text)));
+}
+
+/** A neutral UI close has no value transfer or dialogue choice.  It is allowed
+ * only against an interface observed open in this exact state, and is used to
+ * return to a planning-safe view after bounded executor exhaustion. */
+export function neutralInterfaceRecovery(state:LiveState,action:LiveCandidate):boolean {
+  if(action.type==='closeShop')return state.shop?.isOpen===true;
+  return action.type==='closeModal'&&(state.bank?.isOpen===true||state.dialog?.isOpen===true||state.modalOpen===true);
 }
 
 /** Authorize by the selected live option, not by action-name regexes. */

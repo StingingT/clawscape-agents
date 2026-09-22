@@ -9,6 +9,13 @@
     "check:agency": "node scripts/check-agency.cjs",
     "journals:inspect": "node --experimental-strip-types scripts/inspect-journals.ts",
     "status:export": "bun scripts/status-export.ts",
-    "knowledge:refresh-drops": "bun scripts/refresh-drop-leads.ts"
+    "knowledge:refresh-drops": "bun scripts/refresh-drop-leads.ts",
+    "team:setup": "bun scripts/team.ts setup",
+    "team:doctor": "bun scripts/team.ts doctor",
+    "team:ui": "bun scripts/team.ts ui",
+    "team:run": "bun scripts/team.ts run",
+    "team:herdr": "bun scripts/team.ts herdr",
+    "test:team": "node --experimental-strip-types --test tests/team/*.test.ts",
+    "check:team": "node scripts/check-team.cjs"
   }
 }

@@ -114,6 +114,10 @@ export class LiveNavigator {
     while(this.route.legs[this.cursor]&&same(o.position,this.route.legs[this.cursor]!.to))this.cursor++;
     if(this.cursor>=this.route.legs.length){
       if(!same(o.position,this.route.endpoint))return this.fail(hint,'OFF_ROUTE');
+      // A collision worker may have proved a safe endpoint short of the
+      // desired hint. Stop there and hand the fresh local scene back to the
+      // planner; this is not arrival and must not retry the same blind route.
+      if(this.route.approachOnly)return {blocked:'FRONTIER_REACHED',route:this.route};
       return {arrived:true,route:this.route};
     }
     const leg=this.route.legs[this.cursor]!;

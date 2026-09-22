@@ -1,0 +1,17 @@
+{
+  "acquisition_routes.jsonl": "2282bd66efb1c43da41095306ffcde692e85c3fab0e62f01963995fe044bed6f",
+  "coverage.json": "7dafdc45ddda11b95eeb6cc79ce28a6dcb56f620c8ae7ef6886ed31f112ca5f8",
+  "drop_tables.jsonl": "18ff2d34a891ed3f178143f713a4dc21dfd7c3d6b4bff92b8bd4c0b8a396aba4",
+  "items.jsonl": "7fc5e4f0432a099b1d80bfdda40f7d52c9dc32c0ce637b9b70ff01509504c0d1",
+  "legacy_leads.jsonl": "58e884ef32486ab357fa62b121bf857c0089394be20d433f539f8aae58d326e7",
+  "locations.jsonl": "f100c8c31978f3d6646bd91b7f3b8eb398d8fa7f5e23ffa870d620c79cba00ac",
+  "manifest.json": "cdf98b079808170116f0e7b6902b9b02e974113879a915e3092aaf619b19203c",
+  "npcs.jsonl": "df8c0b6c3c5a1575ea89b6ab20a079a7ab11447fe51b416b85ff78056595503b",
+  "provenance.jsonl": "3e21a8ad867d5540da1446f3ae43e08f71fb27ad77e6d331c4973b8fbb8f5c3d",
+  "raw_skill_configs.jsonl": "ce1c016d071cf7034a97246c2387d792f9ad55a2916f501e1cbe52d87dd39dd4",
+  "recipes.jsonl": "0992449ddebd576e208303300adb7fb5ac6542506ffc9b409157063c67ca0933",
+  "runecrafting.jsonl": "4fa6a0b0017bb104159668ea3d2bf2a85c56b1f04ff5ba31789db35b899bdc2b",
+  "shops.jsonl": "6e093fa198e060a6c3a469c4314fa4de8e9015b130bbf6260f6bc3465458d62c",
+  "unresolved.jsonl": "afd0beb81132326d9212c52bac2748bb6b2da5fd7126f47ff6fe46fe66d9ab02",
+  "validation.json": "c87d4378fba43924c2550e9e82d104ffd02ad99e3a438ef012f04b7c10ddf766"
+}

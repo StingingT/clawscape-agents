@@ -1,3 +1,4 @@
+import { searchApproaches, respectsPlanningCaps, type PlanAnalysis } from './goal-planner.ts';
 import { recordProgress, PROGRESS_TIMEOUT_MS } from './progress.ts';
 import type { Budget, Decision, Facts, Goal, Identity, Memory, Method, MethodStats, Observation, Opportunity, Outcome, Plan, Requirement, SupportGoal } from './types.ts';
 
@@ -25,7 +26,7 @@ function validateView(memory: Memory, view: Observation): void {
 }
 function permitted(method: Method, view: Observation): boolean {
   const protectedSkills = view.strategy?.protectedSkills ?? [];
-  return !protectedSkills.some(skill => (method.effects['xp:' + skill] ?? 0) > 0)
+  return respectsPlanningCaps(view,method) && !protectedSkills.some(skill => (method.effects['xp:' + skill] ?? 0) > 0)
     && Object.keys(method.effects).every(fact => !/^(action:|goal:)/.test(fact)) && view.capabilities.includes(method.capability) && method.risk !== 'pvp' && method.risk !== 'unknown'
     && (method.risk === 'safe' || view.budget.maxDeaths > 0)
     && [method.costGp, method.lossBoundGp, method.durationMs].every(finiteNonnegative)
@@ -48,10 +49,17 @@ function methodScore(memory: Memory, context: string, method: Method): number {
   return method.costGp + 3 * method.lossBoundGp + method.durationMs / 1000 + measuredCost + failurePenalty;
 }
 
+/** Public diagnostic uses exactly the Director's capability/risk/cooldown gate. */
+export function analyzePlan(memory: Memory, view: Observation, goal: Opportunity, methods: Method[]): PlanAnalysis {
+  validateView(memory, view);
+  return searchApproaches(memory,view,goal,methods.filter(m=>available(memory,view,m)),m=>methodScore(memory,view.context,m));
+}
+
 /** Bounded prerequisite planning. The executor re-observes after every step. */
 export function makePlan(memory: Memory, view: Observation, goal: Opportunity, methods: Method[]): Plan | undefined {
   validateView(memory, view);
   if (!outcomeTarget(goal.target)) return;
+  if(view.goalPlanning)return analyzePlan(memory,view,goal,methods).plan;
   const candidates = methods.filter(m => available(memory, view, m))
     .sort((a, b) => methodScore(memory, view.context, a) - methodScore(memory, view.context, b) || a.id.localeCompare(b.id));
   let facts = { ...view.facts };
@@ -96,6 +104,7 @@ export class Director {
   private review(at: number, result: 'success' | 'partial' | 'failure', reason: string, evidence: string[]) {
     const goal = this.memory.active;
     if (!goal) return;
+    if(goal.plan?.approachId)for(const child of goal.supportGoals??[])if(child.status!=='satisfied')child.status='cancelled';
     this.memory.reviews.push({ goal: structuredClone(goal), at, result, reason, evidence: [...evidence] });
     // Summaries are bounded; durable method aggregates remain available to future decisions.
     this.memory.reviews = this.memory.reviews.slice(-256);
@@ -116,6 +125,7 @@ export class Director {
         const node: SupportGoal = { id, parentId, target: { ...target }, purpose,
           reason: purpose === 'investigate-blocker' ? 'Investigate an alternative while preserving the blocked parent objective.' :
             `Prepare ${target.fact} >= ${target.minimum} for ${goal.id}.`,
+          ...(plan.approachId?{approachId:plan.approachId,budgetRootKey:goal.key,stopWhen:{...target},reviewAt:view.at+60_000}:{}),
           evidence: [...(goal.investigation?.evidence ?? goal.evidence)],
           status: met(view.facts, target) ? 'satisfied' : 'pending' };
         nodes.set(id, node); parentId = id;
@@ -124,10 +134,40 @@ export class Director {
     }
     const first = plan.steps[0]!;
     if (first.supportGoalId) nodes.get(first.supportGoalId)!.status = 'active';
-    goal.supportGoals = [...nodes.values()].slice(-20);
+    if(plan.approachId){
+      const activeChain=new Set<string>();let id=first.supportGoalId;
+      while(id&&nodes.has(id)&&!activeChain.has(id)){activeChain.add(id);id=nodes.get(id)!.parentId;}
+      goal.supportGoals=[...[...nodes.values()].filter(n=>activeChain.has(n.id)),...[...nodes.values()].filter(n=>!activeChain.has(n.id))].slice(0,20);
+    }else goal.supportGoals = [...nodes.values()].slice(-20);
     goal.plan = structuredClone(plan); goal.planContext = view.context;
     if (purpose === 'prerequisite') delete goal.blocker;
     return { type: 'execute', goal: structuredClone(goal), plan, step: first };
+  }
+
+  /** Versioned intention review. Keep all world knowledge and reconcile in-flight commands first. */
+  retireUnjustifiedIntents(retired:Set<string>,at:number):void {
+    if(this.memory.pending)return;
+    const g=this.memory.active;if(!g)return;
+    const archive=(id:string)=>{
+      this.memory.intentPolicy??={version:1,archived:[]};
+      if(!this.memory.intentPolicy.archived.some(x=>x.goalId===id))this.memory.intentPolicy.archived.push({goalId:id,at,
+        reason:'Legacy bundled destination has no current resource/access/curiosity purpose.'});
+      this.memory.intentPolicy.archived=this.memory.intentPolicy.archived.slice(-128);
+    };
+    if(retired.has(g.id)&&!g.evidence.some(e=>/operator|user-issued/i.test(e))){archive(g.id);
+      this.review(at,'partial','Archived obsolete seed-derived intention; location knowledge and learning were preserved.',g.evidence);return;}
+    if(g.investigation&&retired.has(g.investigation.id)){archive(g.investigation.id);delete g.investigation;delete g.plan;}
+    const obsolete=(g.supportGoals??[]).filter(n=>retired.has('survey:'+n.target.fact.replace(/^visited:/,'')));
+    for(const n of obsolete){n.status='cancelled';archive('survey:'+n.target.fact.replace(/^visited:/,''));}
+    if(obsolete.length)delete g.plan;
+    // Old saved plans need not contain supportGoal records. Do not resume an obsolete leaf under a valid parent.
+    const obsoleteSteps=(g.plan?.steps??[]).filter(s=>retired.has(s.methodId));
+    for(const step of obsoleteSteps)archive(step.methodId);
+    if(obsoleteSteps.length)delete g.plan;
+    if(g.requestedSupport?.target.fact.startsWith('visited:')){
+      const id='survey:'+g.requestedSupport.target.fact.slice(8);
+      if(retired.has(id)&&!g.requestedSupport.evidence.some(e=>/operator|user-issued/i.test(e))){archive(id);delete g.requestedSupport;delete g.plan;}
+    }
   }
 
   /** Obsolete scenery goals are retired only when no executor command is pending. */
@@ -139,6 +179,15 @@ export class Director {
     }
     g.supportGoals=(g.supportGoals??[]).filter(n=>!n.target.fact.startsWith('visited:observed:')||routes.has(n.target.fact.slice(8))).slice(-20);
     if(g.investigation?.target.fact.startsWith('visited:observed:')&&!routes.has(g.investigation.target.fact.slice(8)))delete g.investigation;
+  }
+  /** Discovery is a close-range experiment.  If the observed object is no
+   * longer a currently eligible local candidate, retain no fictitious route to
+   * it; the next plan must start from the fresh scene instead. */
+  retireObsoleteDiscovery(tasks:Set<string>,at:number):void {
+    if(this.memory.pending)return;
+    const goal=this.memory.active;
+    if(goal?.id.startsWith('discover:')&&!tasks.has(goal.id))
+      this.review(at,'partial','Retired stale local discovery objective; the object is no longer an eligible close-range experiment.',[]);
   }
   /** A failed survey is evidence about that route, not failure of a crafting parent. */
   deferSurvey(routeId:string,at:number,reason:string,evidence:string[]):void {
@@ -154,6 +203,20 @@ export class Director {
     if(this.memory.pending)throw new Error('RECONCILE_PENDING_ACTION_FIRST');
     if(!this.memory.active)return;
     this.review(at,'partial',reason,evidence);
+  }
+
+  /** The planner selected a registered method, but its concrete executor had
+   * no safe action for this fresh observation.  This is neither a dispatched
+   * attempt nor evidence that the goal is impossible.  It only prevents the
+   * exact method/context pair from being selected again before the next short
+   * recheck or verified learning revision. */
+  executorUnavailable(view:Observation,methodId:string,at:number):void {
+    validateView(this.memory,view);
+    if(!methodId.trim()||!Number.isFinite(at))throw new Error('INVALID_EXECUTOR_UNAVAILABLE');
+    const stats=this.memory.methods[methodKey(view.context,methodId)]??=emptyStats();
+    stats.viability='temporarily-poor';
+    stats.cooldownUntil=Math.max(stats.cooldownUntil,at+30_000);
+    stats.knowledgeRevision=view.knowledgeRevision??this.memory.learningRevision??0;
   }
 
   /** Refresh the food dependency, not the strategic objective or a pending receipt. */
@@ -176,7 +239,7 @@ export class Director {
     if(target.fact==='coins')goal.workingReserveGp=Math.max(goal.workingReserveGp??0,target.minimum);
   }
 
-  next(view: Observation, opportunities: Opportunity[], methods: Method[]): Decision {
+  next(view: Observation, opportunities: Opportunity[], methods: Method[], preferredGoalId?: string): Decision {
     validateView(this.memory, view);
     if (this.memory.pending) return { type: 'reconcile', pending: structuredClone(this.memory.pending) };
     const active = this.memory.active;
@@ -194,7 +257,7 @@ export class Director {
         active.blocker.at=view.at;active.blocker.recheckAt=view.at+30_000;
         if ((active.blocker.attempts??0)>=3) {
           this.review(view.at,'partial','The preparation chain remained non-productive after bounded rechecks; select a fresh method from current evidence.',[active.blocker.reason]);
-          return this.next(view,opportunities,methods);
+          return this.next(view,opportunities,methods,preferredGoalId);
         }
         return { type: 'blocked', reason: active.blocker.reason, missingCapabilities: [] };
       } else {
@@ -232,7 +295,7 @@ export class Director {
            // state. Reconsider the normal opportunity set after three rechecks.
            if((previousBlocker.attempts??0)>=3) {
              this.review(view.at,'partial','The current plan remained non-executable after bounded rechecks; reconsider goals from fresh evidence.',[previousBlocker.reason]);
-             return this.next(view,opportunities,methods);
+             return this.next(view,opportunities,methods,preferredGoalId);
            }
          }
         const leads = opportunities.filter(g => g.source==='investigation' && g.investigates?.includes(active.target.fact)
@@ -256,7 +319,8 @@ export class Director {
         const role = Math.max(-2, Math.min(2, this.memory.preferences[goal.domain] ?? 0));
         const need = goal.source === 'need' ? 30 : goal.source === 'unlock' ? 6 : 0;
         const curiosity = goal.source === 'frontier' || goal.source === 'investigation' ? 2 : 0;
-        const score = (goal.priority === 'maintenance' ? -100 : 0) + need + role + curiosity - (plan ? plan.costGp + 3 * plan.lossBoundGp + plan.durationMs / 1000 : Infinity) / 100;
+        const preference = preferredGoalId === goal.id ? 5 : 0;
+        const score = preference + (goal.priority === 'maintenance' ? -100 : 0) + need + role + curiosity - (plan ? plan.costGp + 3 * plan.lossBoundGp + plan.durationMs / 1000 : Infinity) / 100;
         return { goal, plan, score };
       }).filter(entry => entry.plan?.steps[0]).sort((a, b) => b.score - a.score || a.goal.id.localeCompare(b.goal.id));
     const selected = ranked[0];

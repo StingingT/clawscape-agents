@@ -12,3 +12,13 @@ test('worker ready signal enables navigation and close releases the worker',asyn
 test('missing worker startup signal has a bounded timeout',async()=>{
   const w=worker(),nav=new LiveNavigator(()=>w as any);await expect(nav.waitUntilReady(5)).rejects.toThrow('COLLISION_WORKER_TIMEOUT');nav.close();
 });
+test('a verified collision frontier moves to its endpoint but never claims arrival',async()=>{
+  const w:any=worker();
+  w.postMessage=(request:any)=>queueMicrotask(()=>w.onmessage({data:{id:request.id,hash:'test',hint:request.to,
+    endpoint:{x:11,z:10,plane:0},approachOnly:true,legs:[{to:{x:11,z:10,plane:0},doors:[]}]}}));
+  const nav=new LiveNavigator(()=>w);w.onmessage({data:{ready:true}});await nav.waitUntilReady(100);
+  const start:any={position:{x:10,z:10,plane:0},life_id:1};const target:any={x:30,z:10,plane:0};
+  const first=await nav.next(start,target);expect(first.intent).toEqual({operation:'move',destination:{x:11,z:10,plane:0}});
+  const frontier=await nav.next({...start,position:{x:11,z:10,plane:0}},target);
+  expect(frontier.blocked).toBe('FRONTIER_REACHED');expect(frontier.arrived).toBeUndefined();nav.close();
+});

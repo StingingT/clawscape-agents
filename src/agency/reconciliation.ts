@@ -5,17 +5,18 @@ const qty = (items: any[] | undefined, id: any) => (items ?? []).filter(i => Str
 const carried = (state: LiveState) => [...(state.inventory ?? []), ...(state.equipment ?? [])];
 
 /**
- * Nearby scenery is useful for collision/pathing, but not every tree or wall is a
- * destination worth turning into a support goal. Bundled/source routes remain valid;
- * observed routes are promoted only when their object name resembles a service,
- * transition, landmark, or deliberately interactive point of interest.
+ * Nearby scenery is useful for collision/pathing, but a map route needs traversal
+ * evidence, not a guessed meaning based on an object's display name.  The
+ * advanced controller formerly persisted its own documented map leads; those
+ * entries are retired on sight so that controller cannot reuse a scripted
+ * destination after the bootstrap was removed.  Other legacy route formats
+ * remain compatible pending their shared, separately tested migration.
  */
 export function meaningfulFrontierRoute(route: Route): boolean {
+  const evidence=String(route.evidence);
+  if(/^documented lead;/i.test(evidence))return false;
   if (!route.id.startsWith('observed:')) return true;
-  const name = String(route.evidence.split(':').at(-1) ?? '').trim().toLowerCase();
-  if (!name) return false;
-  if (/^(tree|dead tree|oak|yew|willow|maple|bush|plant|fern|rock|wall|fence|hedge|henge|spear wall)$/i.test(name)) return false;
-  return /bank|booth|chest|furnace|anvil|range|altar|shop|store|market|portal|entrance|exit|stairs|staircase|ladder|trapdoor|door|gate|bridge|tunnel|cave|dungeon|mine|guild|tower|castle|monastery|temple|dock|boat|ship|ferry|well|ruin|sign|lever|passage/i.test(name);
+  return /^own-transition:\d+:\d+:(open|climb(?:-up|-down)?|enter|cross)$/i.test(evidence);
 }
 
 export type DeathReconciliation = {

@@ -2,7 +2,9 @@ import {mkdirSync,appendFileSync,writeFileSync,readFileSync,existsSync} from 'no
 import {resolve} from 'node:path';
 import {acquireController} from '../src/controller-lease';
 import {inspectProgress} from './agency-status.ts';
+import {teamEnabled} from '../src/team/storage.ts';
 const root=resolve(import.meta.dir,'..'), logs=resolve(root,'data/supervisor');
+if(teamEnabled(root)){console.log('Clawscape team control is enabled; legacy watchdog will not start agents.');process.exit(0);}
 mkdirSync(logs,{recursive:true});
 const release=acquireController(resolve(logs,'supervisor.lock'));
 const jobs=[

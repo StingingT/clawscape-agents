@@ -1,4 +1,5 @@
 import { homedir } from 'node:os';
+import { checkWorkerDispatch } from './team/worker.ts';
 import { resolve } from 'node:path';
 
 // Use the installed upstream skill without editing the game checkout. The
@@ -13,6 +14,7 @@ export function skillCommand(character: string, args: string[], env = process.en
 }
 
 export async function callSkill(character: string, args: string[], home: string): Promise<Record<string, any>> {
+  if (args[0]==='act'||args[0]==='connect') checkWorkerDispatch(character);
   const child = Bun.spawn(skillCommand(character, args), {
     stdout: 'pipe', stderr: 'pipe', env: { ...process.env, CLAWSCAPE_HOME: home },
   });

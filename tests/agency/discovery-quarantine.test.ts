@@ -22,12 +22,37 @@ test('an adjacent observed obstruction may be tested even when its footprint is 
   assert.ok(c.opportunities.some(o=>o.id==='discover:discovered:interaction:41:11:10:0:1'));
   assert.doesNotThrow(()=>authorizeAction(s,{id:'try',type:'interactLoc',fields:{locId:41,x:11,z:10,optionIndex:1}},safeMethod,0));
 });
+test('a local Search action is not promoted into a navigation-discovery route',()=>{
+ const s=state({nearbyLocs:[{id:42,name:'Crate',x:11,z:10,level:0,reachable:true,distance:1,optionsWithIndex:[{opIndex:1,text:'Search'}]}]});
+ const c=buildCatalogue(identity,s,emptyKnowledge(),defaultPolicy,['discovery'],createMemory(identity),1000);
+ assert.equal(c.opportunities.some(o=>o.id.includes('discovered:interaction:42:')),false);
+});
+
+test('an ambiguous Use action is not promoted into a navigation-discovery route',()=>{
+ const s=state({nearbyLocs:[{id:43,name:'Bank booth',x:11,z:10,level:0,reachable:true,distance:1,optionsWithIndex:[{opIndex:1,text:'Use'}]}]});
+ const c=buildCatalogue(identity,s,emptyKnowledge(),defaultPolicy,['discovery'],createMemory(identity),1000);
+ assert.equal(c.opportunities.some(o=>o.id.includes('discovered:interaction:43:')),false);
+});
+
+test('a bounded unknown interaction pauses discovery without suppressing other capabilities',()=>{
+  const s=state({nearbyLocs:[{id:41,name:'Observed door',x:11,z:10,level:0,reachable:false,distance:1,optionsWithIndex:[{opIndex:1,text:'Open'}]}]});
+  const k=emptyKnowledge();k.discoveryHold={until:10_000,context:'same',learningRevision:0,reason:'outcome unknown'};
+  const c=buildCatalogue(identity,s,k,defaultPolicy,['discovery','gathering'],createMemory(identity),1_000);
+  assert.equal(c.opportunities.some(o=>o.id.startsWith('discover:')),false);
+  assert.ok(c.opportunities.some(o=>o.domain==='gathering'));
+});
 
 test('an unreachable transition farther away is not authority for an interaction',()=>{
   const s=state({nearbyLocs:[{id:41,name:'Observed door',x:12,z:10,level:0,reachable:false,distance:2,optionsWithIndex:[{opIndex:1,text:'Open'}]}]});
   const c=buildCatalogue(identity,s,emptyKnowledge(),defaultPolicy,['discovery'],createMemory(identity),1000);
   assert.equal(c.opportunities.some(o=>o.id.startsWith('discover:')),false);
   assert.throws(()=>authorizeAction(s,{id:'try',type:'interactLoc',fields:{locId:41,x:12,z:10,optionIndex:1}},safeMethod,0),/FRESH_LOC_OPTION_REQUIRED/);
+});
+
+test('a reachable but non-adjacent object is not promoted into a local discovery experiment',()=>{
+  const s=state({nearbyLocs:[{id:41,name:'Observed door',x:14,z:10,level:0,reachable:true,distance:4,optionsWithIndex:[{opIndex:1,text:'Open'}]}]});
+  const c=buildCatalogue(identity,s,emptyKnowledge(),defaultPolicy,['discovery'],createMemory(identity),1000);
+  assert.equal(c.opportunities.some(o=>o.id.startsWith('discover:')),false);
 });
 
 test('no strategic plan exposes bounded local collision-verified probes as maintenance, not a scripted activity',()=>{
@@ -43,11 +68,25 @@ test('no strategic plan exposes bounded local collision-verified probes as maint
   }
 });
 
-test('local probes are bounded after two recent probe completions',()=>{
+test('local probes are bounded after two recent unproductive probe completions',()=>{
   const memory=createMemory(identity);const template:any={domain:'exploration',target:{fact:'visited:x',minimum:1},reason:'probe',evidence:['own'],source:'frontier',key:'k',context:'c',startedAt:1,budget:{spendableGp:0,maxLossGp:0,maxDeaths:0,maxDurationMs:1},baseline:0,spentGp:0,lostGp:0,deaths:0,elapsedMs:0,attempts:0,noProgress:0};
-  memory.reviews=[{goal:{...template,id:'local-probe:a'},at:900,result:'success',reason:'done',evidence:[]},{goal:{...template,id:'local-probe:b'},at:950,result:'success',reason:'done',evidence:[]}];
+  memory.reviews=[{goal:{...template,id:'local-probe:a'},at:900,result:'partial',reason:'done',evidence:[]},{goal:{...template,id:'local-probe:b'},at:950,result:'partial',reason:'done',evidence:[]}];
   const c=buildCatalogue(identity,state(),emptyKnowledge(),defaultPolicy,['exploration'],memory,1000);
   assert.equal(c.opportunities.some(o=>o.id.startsWith('survey:local-probe:')),false);
+});
+
+test('an executorless probe does not consume the local navigation budget',()=>{
+  const memory=createMemory(identity);const template:any={domain:'exploration',target:{fact:'visited:x',minimum:1},reason:'probe',evidence:['own'],source:'frontier',key:'k',context:'c',startedAt:1,budget:{spendableGp:0,maxLossGp:0,maxDeaths:0,maxDurationMs:1},baseline:0,spentGp:0,lostGp:0,deaths:0,elapsedMs:0,attempts:0,noProgress:0};
+  memory.reviews=[{goal:{...template,id:'local-probe:a'},at:900,result:'partial',reason:'Selected task has no feasible current executor step.',evidence:[]},{goal:{...template,id:'local-probe:b'},at:950,result:'partial',reason:'fresh-no-executor: gathering',evidence:[]}];
+  const c=buildCatalogue(identity,state(),emptyKnowledge(),defaultPolicy,['exploration'],memory,1000);
+  assert.ok(c.opportunities.some(o=>o.id.startsWith('survey:local-probe:')));
+});
+
+test('verified local mapping does not consume the failed-probe cooldown',()=>{
+  const memory=createMemory(identity);const template:any={domain:'exploration',target:{fact:'visited:x',minimum:1},reason:'probe',evidence:['own'],source:'frontier',key:'k',context:'c',startedAt:1,budget:{spendableGp:0,maxLossGp:0,maxDeaths:0,maxDurationMs:1},baseline:0,spentGp:0,lostGp:0,deaths:0,elapsedMs:0,attempts:0,noProgress:0};
+  memory.reviews=[{goal:{...template,id:'local-probe:a'},at:900,result:'success',reason:'mapped',evidence:['own displacement']},{goal:{...template,id:'local-probe:b'},at:950,result:'success',reason:'mapped',evidence:['own displacement']}];
+  const c=buildCatalogue(identity,state(),emptyKnowledge(),defaultPolicy,['exploration'],memory,1000);
+  assert.ok(c.opportunities.some(o=>o.id.startsWith('survey:local-probe:')));
 });
 
 function fixture(t:any){

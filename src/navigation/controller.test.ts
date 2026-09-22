@@ -105,8 +105,24 @@ test('escape with an unchanged closed gate is bounded and retains cooldown', asy
   try {
     let result: any;
     for (let i = 0; i < 4; i++) result = await nav.escape(structuredClone(s));
-    expect(result.navigation.status).toBe('blocked'); expect(commands).toBe(3);
+    // The unchanged option is not treated as proof by itself: one planned
+    // movement leg is tried, then the observed lack of movement cools it down.
+    expect(result.navigation.status).toBe('blocked'); expect(commands).toBe(2);
   } finally { nav.close(); rmSync(dir, { recursive: true }); }
+});
+
+test('a gate that retains Open after interaction is verified by successful traversal', async () => {
+  const dir=mkdtempSync(join(tmpdir(),'claw-nav-test-')),door={x:101,z:100,level:0};
+  let s:any={...state(),nearbyLocs:[{...door,id:7,name:'Gate',reachable:true,optionsWithIndex:[{text:'Open',opIndex:1}]}]};
+  const commands:any[]=[];
+  const nav=new Navigator({state:async()=>structuredClone(s),act:async(type:string,fields:any)=>{commands.push({type,fields});return{};},wait:async()=>{
+    s.tick+=2;const last=commands.at(-1);if(last?.type==='walkTo'){s.player.worldX=last.fields.x;s.player.worldZ=last.fields.z;}return structuredClone(s);
+  }},join(dir,'navigation.json'),async(_from,to)=>({legs:[{target:to,doors:[door]}]}));
+  try {
+    const result=await nav.step(goal,structuredClone(s));
+    expect(result.navigation.status).toBe('arrived');
+    expect(commands.map(c=>c.type)).toEqual(['interactLoc','walkTo']);
+  } finally {nav.close();rmSync(dir,{recursive:true});}
 });
 
 test('a partial route ending adjacent never proves arrival or an interaction approach', async () => {
@@ -115,6 +131,16 @@ test('a partial route ending adjacent never proves arrival or an interaction app
   try {
     expect((await nav.assess(start, goal)).status).toBe('blocked');
     expect((await nav.step(goal, state())).navigation.reason).toBe('partial-path'); expect(commands).toBe(0);
+  } finally { nav.close(); rmSync(dir, { recursive: true }); }
+});
+test('read-only assessment exposes only planner-identified conditional transitions', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'claw-nav-test-'));
+  const door={x:15,z:10,level:0,shape:0,angle:3};
+  const nav = new Navigator({ state: async () => state(), act: async () => ({}), wait: async () => state() }, join(dir, 'navigation.json'), async () => ({ legs: [{ target: goal, doors: [door] }] }));
+  try {
+    const result=await nav.assess(start,goal);
+    expect(result.status).toBe('ready');
+    expect((result as any).doors).toEqual([door]);
   } finally { nav.close(); rmSync(dir, { recursive: true }); }
 });
 test('planned route is persisted and reused after controller restart', async () => {

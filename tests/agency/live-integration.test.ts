@@ -8,7 +8,7 @@ import {LiveAgency,isSelection,authorizeAction,safetyAction,type Selection} from
 import {defaultPolicy,emptyKnowledge,observeFacts,capabilityContext,buildCatalogue} from '../../src/agency/world-model.ts';
 import {createMemory} from '../../src/agency/director.ts';
 import {verifyActionOutcome} from '../../src/action-outcome.ts';
-import {agencyState,agencyCandidate,arbiterVerification,urgentDecision} from '../../agents/advanced/src/agency-bridge.ts';
+import {agencyState,agencyCandidate,arbiterVerification,observedVerification,urgentDecision} from '../../agents/advanced/src/agency-bridge.ts';
 
 const identity={agent:'test',world:'test-server',revision:'test-rules'};
 const shrimp=(slot:number)=>({id:315,name:'Shrimps',slot,count:1,optionsWithIndex:[{text:'Eat',opIndex:1}]});
@@ -203,6 +203,14 @@ test('Astra normalizes base skills, actual XP and separate identical food items'
   const o:any={character:'astra',world:'test',session_id:'s',profile_id:'p',seq:1,tick:1,connected:true,hp:10,max_hp:10,life_id:1,respawns:0,position:{x:1,z:1,plane:0},
     inventory:[0,1].map(slot=>({slot,id:315,name:'Shrimps',count:1,options:[{index:1,text:'Eat'}]})),equipment:[],skills:[{name:'Attack',current:15,base:10,xp:100}],bank:{open:false,items:null},shop_open:false,dialog:{open:false,waiting:false,text:'',options:[]},entities:[]};
   const facts=observeFacts(agencyState(o),emptyKnowledge());assert.equal(facts.food,2);assert.equal(facts['xp:attack'],100);assert.equal(facts['level:attack'],10);
+});
+test('Astra forwards fresh bounded server feedback to retire a refused interaction',()=>{
+  const before:any={character:'astra',world:'test',session_id:'s',profile_id:'p',seq:1,tick:1,connected:true,hp:10,max_hp:10,life_id:1,respawns:0,position:{x:1,z:1,plane:0},
+    skills:[],capacity:28,inventory:[],equipment:[],bank:{open:false,items:null},shop_open:false,dialog:{open:false,waiting:false,text:'',options:[]},feedback:[],danger:{active:false,damage_margin:0},unavailable:[],activity:{animation:-1,target_index:-1,target_type:'none',last_damage_tick:-1,modal_open:false,modal_id:-1,style:0,styles:[],design_open:false},
+    entities:[{kind:'object',ref:'gate',index:null,content_id:1,name:'Observed object',position:{x:1,z:2,plane:0},reachable:true,options:[{index:1,text:'Open'}]}]};
+  const after={...before,tick:2,seq:2,feedback:["The gate is locked securely, it won't open!"]};
+  const result=observedVerification(agencyState(before),agencyState(after),{type:'interactLoc',fields:{locId:1,x:1,z:2,optionIndex:1}});
+  assert.equal(result.status,'rejected');assert.match(result.reason??'',/refusal/);
 });
 test('Astra intent mapping uses actual NPC refs and observed attack indices',()=>{
   const o:any={inventory:[],entities:[{ref:'goblin:7',kind:'npc',index:7,content_id:1,position:{x:1,z:1,plane:0}}]};

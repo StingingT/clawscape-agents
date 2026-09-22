@@ -139,6 +139,19 @@ test('an interrupted runtime cannot inherit another controllers partially measur
   a=f.open();f.time(130_000);assert.equal(a.settleStep('old-traversal',state({tick:7})),undefined);assert.ok(a.pending());
 });
 
+test('restart recovery retires a stale non-transactional interaction from two fresh current observations',t=>{
+  const f=fixture(t),a=f.agency,before=state({tick:9,nearbyLocs:[{id:71,name:'Door',x:11,z:10,level:0,reachable:true,optionsWithIndex:[{opIndex:1,text:'Open'}]}]});
+  const selected=a.plan(before);assert.ok(isSelection(selected));
+  const action={id:'old-probe',type:'interactLoc',fields:{locId:71,x:11,z:10,optionIndex:1}};
+  a.begin(selected,action,before,'old-probe');a.record('old-probe',before,{status:'unknown',reason:'outcome unavailable',evidence:[]});
+  f.time(100_000);
+  const first=state({tick:1,worldEpoch:'new-epoch'}),stable=state({tick:2,worldEpoch:'new-epoch'});
+  assert.equal(a.retireRestartPending('task',first,stable,'original action clock reset'),true);
+  assert.equal(a.pending(),undefined);
+  assert.match(a.summary().lastOutcome?.reason??'',/RESTART_UNATTRIBUTED_NONTRANSACTIONAL_INTERACTION/);
+  assert.equal(a.director.memory.reviews.some(r=>r.result==='success'),false);
+});
+
 test('unknown choices, rewards and absent original objects cannot use ordinary traversal retirement',()=>{
   const before=state({nearbyLocs:[{id:71,name:'Reward chest',x:11,z:10,level:0,optionsWithIndex:[{opIndex:1,text:'Open'}]}]});
   for(const action of [{type:'interactLoc',fields:{locId:71,x:11,z:10,optionIndex:1}},
@@ -152,11 +165,14 @@ test('a historical marker without a measured matching window cannot clear the re
   assert.equal(a.pending()?.commandId,'old-traversal');assert.equal(a.summary().lastOutcome?.status,'unknown');
 });
 
-test('exhausted navigation releases its bounded survey and selects a different feasible goal',t=>{
+test('an unopenable conditional route releases its bounded survey and selects a different feasible goal',t=>{
   const f=fixture(t,['exploration']),a=f.agency,before=state();const selected=a.plan(before);assert.ok(isSelection(selected));
   const route=selected.task.route!;assert.ok(route);
   const action={id:'nav',type:'walkTo',fields:{x:route.x,z:route.z,level:route.level}};
-  a.begin(selected,action,before,'failed-probe');const result={navigation:{status:'blocked',reason:'door-retry-budget',movementDispatched:false}};
+  // The navigator first labels a failed conditional door as replanning after
+  // quarantining the edge. The completed action cannot continue that trip, so
+  // the agency must release the one survey for a fresh alternative.
+  a.begin(selected,action,before,'failed-probe');const result={navigation:{status:'replanning',reason:'door-did-not-open',movementDispatched:false}};
   a.rememberExecution('failed-probe',result);f.time(2000);const after=state({tick:50_001});
   const checked=verifyActionOutcome(before,after,action,result);assert.equal(checked.interrupted,true);
   a.record('failed-probe',after,{status:'interrupted',evidence:checked.evidence,reason:checked.reason});
@@ -189,11 +205,12 @@ test('repeated reports of one planner refusal cannot move its recheck deadline f
   assert.equal(memory.active?.id,'goalB');
 });
 
-test('exhausted discovery has an explicit bounded retry time and does not suppress normal production',()=>{
+test('failed discovery has an explicit bounded retry time and does not suppress normal production',()=>{
   const memory=createMemory(identity);const template:any={domain:'exploration',target:{fact:'visited:x',minimum:1},reason:'probe',evidence:['own'],source:'frontier',key:'k',context:'c',startedAt:1,budget:{spendableGp:0,maxLossGp:0,maxDeaths:0,maxDurationMs:1},baseline:0,spentGp:0,lostGp:0,deaths:0,elapsedMs:0,attempts:1,noProgress:0};
-  memory.reviews=[{goal:{...template,id:'survey:local-probe:a'},at:900,result:'success',reason:'done',evidence:['own']},
+  memory.reviews=[{goal:{...template,id:'survey:local-probe:a'},at:900,result:'partial',reason:'exhausted',evidence:['own']},
     {goal:{...template,id:'survey:local-probe:b'},at:950,result:'partial',reason:'exhausted',evidence:['own']}];
-  const c=buildCatalogue(identity,state(),emptyKnowledge(),defaultPolicy,['exploration','production'],memory,1000);
+  const productive=state({inventory:[{id:1,name:'Observed craft input',count:1,slot:0,optionsWithIndex:[{opIndex:2,text:'Craft'}]}]});
+  const c=buildCatalogue(identity,productive,emptyKnowledge(),defaultPolicy,['exploration','production'],memory,1000);
   assert.equal(c.discoveryRetryAt,600_900);assert.equal(c.opportunities.some(o=>o.id.startsWith('survey:local-probe:')),false);
   const decision=new Director(memory).next(c.view,c.opportunities,c.methods);assert.equal(decision.type,'execute');
   if(decision.type==='execute')assert.equal(decision.goal.id,'production-batch');

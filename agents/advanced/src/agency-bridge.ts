@@ -18,6 +18,12 @@ export function agencyState(o: Observation): Record<string, any> {
     skills:o.skills.map(s=>({name:s.name,baseLevel:s.base,level:s.current,experience:s.xp})),inventory:o.inventory.map(item),equipment:o.equipment.map(item),
     bank:{isOpen:o.bank.open,items:o.bank.items?.map(item)},shop:{isOpen:o.shop_open},modalOpen:o.activity?.modal_open??o.activity?.design_open,
     dialog:{isOpen:o.dialog.open,isWaiting:o.dialog.waiting,text:o.dialog.text,options:o.dialog.options},
+    // The advanced observer deliberately stores only bounded text feedback.
+    // Preserve it for action-outcome reconciliation so an explicit server
+    // refusal can retire the *exact* safe experiment instead of remaining
+    // unknown until its timeout.  Feedback is evidence only: it can reject an
+    // interaction, never authorize or synthesize one.
+    gameMessages:(o.feedback??[]).map(text=>({text})),
     combatStyle:{currentStyle:o.activity?.style,styles:(o.activity?.styles??[]).map(s=>({index:s.index,trainsSkills:s.skill.split(',').map(k=>k.trim().toLowerCase())})),weaponName:o.equipment.find(i=>/sword|scimitar|bow|staff|dagger|mace/i.test(i.name))?.name},
     nearbyNpcs:o.entities.filter(e=>e.kind==='npc').map(entity),nearbyLocs:o.entities.filter(e=>e.kind==='object').map(entity),
     groundItems:o.entities.filter(e=>e.kind==='ground_item').map(entity),

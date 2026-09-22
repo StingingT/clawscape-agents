@@ -1,0 +1,10 @@
+{
+  "errorCount": 0,
+  "errors": [],
+  "passed": true,
+  "warnings": [
+    "Static source extraction only; running server, live observations and executor support are unverified.",
+    "Acquisition coverage is partial. Missing routes do not imply that an item is unobtainable.",
+    "Conditional/drop/fishing leads and variable-yield recipes require the documented semantics adapter."
+  ]
+}

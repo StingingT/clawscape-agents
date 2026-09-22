@@ -118,6 +118,8 @@ export type EconomyMemory = {
   metal?: MetalMemory;
   bowmaking?: BowMemory;
   bankItems?: any[]; processing?: string; product?: string; selling?: boolean;
+  /** A queue may be waited on only while its observed input/output signature changes. */
+  activeWait?: { kind:string; signature:string; polls:number };
   harvest?: { id: number; x: number; z: number }; goal?: string; reason?: string;
   selectedSite?: string; batches?: number;
   missingResource?: { site: string; polls: number; tick: number };
@@ -140,6 +142,12 @@ export function selectWoodSite(s: any) { return woodSites(s)[0]!; }
 const resource = (i: any) => isFletchedOutput(i) || /^(logs|oak logs|willow logs|maple logs|yew logs|magic logs|arrow shaft.*|.*ore|.*bar)$/i.test(i.name);
 function walk(id: string,p: any,reason: string): Action[] { return [{id,type:'walkTo',fields:{x:p.x,z:p.z,level:p.level ?? 0,reason},waitTicks:2}]; }
 function close(): Action[] { return [{id:'economy-close-interface',type:'closeModal',waitTicks:1}]; }
+function activeWait(m:EconomyMemory,kind:string,signature:string):boolean {
+  const previous=m.activeWait;
+  m.activeWait=previous?.kind===kind&&previous.signature===signature
+    ? {...previous,polls:previous.polls+1}:{kind,signature,polls:1};
+  return m.activeWait.polls<=3;
+}
 export function bankAt(s: any, preferred?: typeof BANKS[number], blocked: (id: string) => boolean = () => false, unavailable: Record<string, number> = {}): Action[] {
   const booth = (s.nearbyLocs ?? []).find((l: any) => /bank booth|bank chest/i.test(l.name) && l.reachable === true && l.optionsWithIndex?.some((o: any) => /^use-quickly$|^bank$/i.test(o.text)));
   if (booth) return [{id:'economy-open-bank',type:'interactLoc',fields:{x:booth.x,z:booth.z,locId:booth.id,optionIndex:booth.optionsWithIndex.find((o: any)=>/^use-quickly$|^bank$/i.test(o.text)).opIndex},waitTicks:2}];
@@ -169,7 +177,7 @@ export function economyNext(s: any,m: EconomyMemory, blocked: (id: string) => bo
   const site = woodSites(s,processLogs).find(p => (!intent?.site||p.name===intent.site) && !blocked('economy-site-'+p.name) && (m.siteCooldowns?.[p.name] ?? 0) <= Date.now());
   m.selectedSite = site?.name;
   const useBank = (preferred?: typeof BANKS[number]) => bankAt(s, preferred, blocked, m.bankCooldowns ??= {});
-  if (m.processing && !inv.some((i:any)=>String(i.name).toLowerCase() === m.processing)) { delete m.processing; delete m.product; }
+  if (m.processing && !inv.some((i:any)=>String(i.name).toLowerCase() === m.processing)) { delete m.processing; delete m.product; delete m.activeWait; }
   if (s.bank?.isOpen) {
     m.bankItems = s.bank.items ?? [];
     const material = inv.find((i:any)=>resource(i) && String(i.name).toLowerCase() !== m.processing && !m.selling);
@@ -238,7 +246,14 @@ export function economyNext(s: any,m: EconomyMemory, blocked: (id: string) => bo
   if (processLogs && m.processing) {
     // A Make-10 queue owns the character until it finishes. Reopening the
     // product dialog cancels that queue, even though dispatch reported success.
-    if (Number(s.player?.animId) >= 0) return [{id:'economy-continue-production',type:'wait',waitTicks:2}];
+    if (Number(s.player?.animId) >= 0) {
+      const input=inv.find((i:any)=>String(i.name).toLowerCase()===m.processing);
+      const signature=[s.player?.animId,input?.id,input?.count,skillLevel(s,'fletching')].join(':');
+      if(activeWait(m,'production',signature))return [{id:'economy-continue-production',type:'wait',waitTicks:2}];
+      // Animation alone is not durable proof that a queue is still alive.
+      // Re-observe/replan after a bounded unchanged window.
+      delete m.processing;delete m.product;delete m.activeWait;
+    } else delete m.activeWait;
     const log = inv.find((i:any)=>String(i.name).toLowerCase()===m.processing);
     const recipe = log && (intent?.recipe??fletchingRecipe(log.name,fletch));
     if (recipe) {

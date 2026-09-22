@@ -1,3 +1,4 @@
+import type { PlanningContext, PlanningTrace } from './goal-planner.ts';
 import type { ProgressLedger } from './progress.ts';
 /** Planner contracts. A fact is an agent's own observation, never a peer's assertion. */
 export type Domain = 'combat' | 'crafting' | 'gathering' | 'exploration' | 'social';
@@ -33,12 +34,16 @@ export type Observation = Identity & {
   capabilities: string[];
   /** Incremented by verified learning, not ticks, movement or untested messages. */
   knowledgeRevision?: number;
-  strategy?: { id: string; protectedSkills: string[] };
+  strategy?: { id: string; protectedSkills: string[]; levelCaps?:Record<string,number> };
+  /** Active only after the prerequisite planner rollout gate. */
+  goalPlanning?: PlanningContext;
   /** Fresh own balances; bank funds are not spendable at a shop until withdrawn. */
   funding?: { carriedGp: number; bankGp: number; reserveGp: number; evidence: string[] };
 };
 export type Method = {
   id: string;
+  /** Source-backed numeric XP, unlike the legacy xp:activity flag. */
+  training?: { profileId:string; xp:Record<string,number>; maximumXp?:Record<string,number>; evidence:string[] };
   capability: string;
   domain: Domain;
   prerequisites: Requirement[];
@@ -63,10 +68,11 @@ export type Step = {
 export type SupportGoal = {
   id: string; parentId: string; target: Requirement;
   purpose: 'prerequisite' | 'investigate-blocker' | 'incidental';
-  reason: string; status: 'pending' | 'active' | 'satisfied';
+  reason: string; status: 'pending' | 'active' | 'satisfied' | 'cancelled';
+  approachId?:string; budgetRootKey?:string; stopWhen?:Requirement; reviewAt?:number;
   evidence: string[];
 };
-export type Plan = { steps: Step[]; costGp: number; lossBoundGp: number; durationMs: number };
+export type Plan = { approachId?:string; planningTrace?:PlanningTrace; steps: Step[]; costGp: number; lossBoundGp: number; durationMs: number };
 export type Goal = Opportunity & {
   key: string;
   context: string;
@@ -136,6 +142,7 @@ export type Memory = Identity & {
   pending?: Pending;
   sequence: number;
   learningRevision?: number;
+  intentPolicy?: {version:1; archived:Array<{goalId:string;at:number;reason:string}>};
   progress?: ProgressLedger;
   methods: Record<string, MethodStats>;
   goalCooldowns: Record<string, number>;

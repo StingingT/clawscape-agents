@@ -1,0 +1,46 @@
+{
+  "schema_version": "1.0",
+  "profile_id": "clawscape-local-6ce55b0953e8-b14369672a24",
+  "server_build": null,
+  "content_hash": "6ce55b0953e8d6e79a5dbc05f0d245ecda8948cb6839e4415526b721bfea2896",
+  "revision": "d177ab6730ec5166db8d28e73c2d7d3bb3b22a27",
+  "rules_hash": "b14369672a24796a3decee0a1ca94628d9a00f68a8dc7cf1a144c152b2c2458f",
+  "customizations": [
+    "vendored LostCity revision 274 per PATCHES.md",
+    "source default XP multiplier 25; deployed value unknown",
+    "custom XP curve; do not import OSRS XP tables",
+    "Clawscape account/session and observer integration"
+  ],
+  "tick_model": {
+    "source": "CLI local counter advances on game tick callback; online interval unknown",
+    "milliseconds": null,
+    "authoritative_epoch": false
+  },
+  "capabilities": [
+    "read_player_snapshot"
+  ],
+  "unsupported_features": [
+    "live_actions_release_gated",
+    "authoritative_world_epoch",
+    "server_fenced_lease",
+    "server_action_deduplication",
+    "server_action_status",
+    "cancel_already_applied_command",
+    "spawn_generation",
+    "live_threat_model",
+    "live_full_trip",
+    "online_research",
+    "model_provider"
+  ],
+  "knowledge_policy": "Minimum filtered player state. No hidden world export or full collision map in runtime.",
+  "audit_evidence": [
+    "src/cli.ts",
+    "src/game-runtime.ts",
+    "src/local-config.ts",
+    "upstream/sdk/types.ts",
+    "upstream/server/webclient/src/bot/ActionExecutor.ts",
+    "upstream/server/PATCHES.md",
+    "upstream/sdk/pathfinding.ts",
+    "docs/agent_source_audit.md"
+  ]
+}

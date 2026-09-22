@@ -1,0 +1,10 @@
+{
+  "generated_at": "2026-09-07T20:26:10.360Z",
+  "source_root": "C:\\Users\\guyro\\Documents\\Guy\\tmp\\clawscape",
+  "revision": "d177ab6730ec5166db8d28e73c2d7d3bb3b22a27",
+  "contentHash": "6ce55b0953e8d6e79a5dbc05f0d245ecda8948cb6839e4415526b721bfea2896",
+  "rulesHash": "b14369672a24796a3decee0a1ca94628d9a00f68a8dc7cf1a144c152b2c2458f",
+  "content_files": 2573,
+  "rules_files": 557,
+  "scope": "Local source only, excludes deployed config, map assets, cache and world saves. Not online-build attestation."
+}

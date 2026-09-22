@@ -46,7 +46,10 @@ self.onmessage = ({ data: { id, from, to, blocked = [], interaction, questTravel
     }
     if (blocked.some((d: any) => d.x===3107 && d.z===3162 && d.level===0)) throw new Error('quest-door-blocked');
     const turns = map.findLongPath(from.level, from.x, from.z, to.x, to.z, 500, blocked);
-    if (distance(turns.at(-1) ?? from, to)) throw new Error('partial-path');
+    // A partial route is useful *only* as a collision-covered exploration
+    // frontier.  Preserve that fact for the controller; it must never be
+    // relabelled as arrival at `to` or used for an interaction at `to`.
+    const partial = distance(turns.at(-1) ?? from, to) !== 0;
     let previous = from, unmappedTiles = 0;
     const legs = splitRoute(from, turns).map(target => {
       const tiles = samples(previous, target);
@@ -64,7 +67,7 @@ self.onmessage = ({ data: { id, from, to, blocked = [], interaction, questTravel
       return { target, doors };
     });
     const interactionValid = interaction ? rsmod.reached(to.level, to.x, to.z, interaction.x, interaction.z, interaction.width, interaction.height, 1, interaction.angle, interaction.shape, 0) : undefined;
-    self.postMessage({ id, legs, hash, unmappedTiles, interactionValid });
+    self.postMessage({ id, legs, hash, unmappedTiles, interactionValid, partial });
   } catch (error) { self.postMessage({ id, error: String(error) }); }
   finally { for(const t of addedFloors)rsmod.changeFloor(t.x,t.z,0,false); }
 };

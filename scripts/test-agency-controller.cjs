@@ -8,19 +8,24 @@ const vm=require('node:vm');
 const assert=require('node:assert/strict');
 const source=readFileSync('src/agent.ts','utf8');
 const parsed=ts.createSourceFile('src/agent.ts',source,ts.ScriptTarget.Latest,true);
-const wanted=['runEpisode','actionsForTask','executeAgencyAction','verification'];
+const wanted=['runEpisode','actionsForTask','executeAgencyAction','verification','plannedTransitionObservation'];
 const extracted=parsed.statements.filter(s=>ts.isFunctionDeclaration(s)&&wanted.includes(s.name?.text)).map(s=>s.getText(parsed)).join('\n');
 assert.equal(parsed.statements.filter(s=>ts.isFunctionDeclaration(s)&&wanted.includes(s.name?.text)).length,wanted.length);
 const js=ts.transpileModule(extracted,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS}}).outputText;
-async function runScenario({blocked=false,unknown=false,deny=false,movement=false,mapWait=false,legacyNavigation=false,combatGoal=false,badStyle=false,meleeGoal=false,rebound=false,missingInput=false}={}){
-  const {LiveAgency,isSelection}=await import('../src/agency/live-adapter.ts');
+async function runScenario({teamStopped=false,blocked=false,unknown=false,staleDesign=false,neutralCloseRejected=false,retryHeld=false,deny=false,movement=false,mapWait=false,legacyNavigation=false,combatGoal=false,badStyle=false,meleeGoal=false,rebound=false,missingInput=false}={}){
+  const {LiveAgency,isSelection,neutralInterfaceRecovery,stateProvesAcknowledgementStillRequired}=await import('../src/agency/live-adapter.ts');
   const {bindItems,resolveItems,MissingItem}=await import('../src/agency/item-intents.ts');
   const {verifyActionOutcome}=await import('../src/action-outcome.ts');
   const {recoverLegacyJournals}=await import('../src/agency/journal-recovery.ts');
+  const {workerMode}=await import('../src/team/worker.ts');
+  const {cliActionFields}=await import('../src/cli-action-fields.ts');
+  const {freshObservedLocAction,observedDiscoveryTransition,productiveProductionCandidates,taskMustCloseInheritedBank,taskOwnsBankExecutor}=await import('../src/agency/actionability.ts');
+  const {capabilityContext}=await import('../src/agency/world-model.ts');
   const {seedProvisionHistory}=await import('../tests/agency/provision-fixture.ts');
   const dir=mkdtempSync(join(tmpdir(),'agency-controller-'));
   try{
     let now=1000,ids=0,mutationCalls=0,planned=false,legs=0,assessments=0,mapWaited=false,itemChanged=false;
+    if(teamStopped){require('node:fs').mkdirSync(join(dir,'data/team-control'),{recursive:true});writeFileSync(join(dir,'data/team-control/enabled.json'),'{}');}
     class TestDate extends Date { static now(){return now;} }
     const identity={agent:'test',world:'test',revision:'test'};
     const goalSkill=meleeGoal?'strength':'ranged';
@@ -44,12 +49,28 @@ async function runScenario({blocked=false,unknown=false,deny=false,movement=fals
     if(legacyNavigation)writeFileSync(legacyPath,JSON.stringify({commandId:'test-old-bank-for-fishing-tool-funds',
       actionId:'bank-for-fishing-tool-funds',type:'walkTo',fields:{x:50,z:1,level:0},status:'failed',beforeState:structuredClone(state)}));
     const originalPlan=agency.plan.bind(agency);agency.plan=(s)=>{planned=true;return blocked?{type:'blocked',reason:'test refusal',missingCapabilities:[]}:originalPlan(s);};
+    if(neutralCloseRejected||retryHeld) {
+      const originalEligible=agency.eligible.bind(agency);
+      agency.eligible=(action,s)=>(neutralCloseRejected&&action.type==='closeModal')||retryHeld?false:originalEligible(action,s);
+    }
     if(unknown){const p=originalPlan(state);agency.begin(p,{id:'buy-arrows',type:'wait'},state,'old-command');agency.record('old-command',state,{status:'unknown',evidence:[]});
       // Use a still-unresolved shop intent for the actual episode reconciliation branch.
       agency.document.receipt.action={id:'buy-arrows',type:'shopBuy',fields:{slot:0,amount:1}};}
+    if(staleDesign){
+      // Simulate a controller inherited from a run that reported an appearance
+      // acknowledgement but never observed its closure. Its result must remain
+      // unknown, expire administratively, and allow generic bank recovery.
+      const p=originalPlan(state);agency.begin(p,{id:'accept-design',type:'acceptCharacterDesign',waitTicks:1},state,'old-design');
+      agency.record('old-design',state,{status:'unknown',evidence:[],reason:'design closure not observed'});
+      now+=31_000;
+      agency.document.executorEpisode={at:now,context:capabilityContext(state),learningRevision:agency.director.memory.learningRevision??0,
+        executorRevision:identity.revision,
+        failures:['one','two','three'],recheckAt:now+60_000};
+    }
     if(deny)agency.begin=()=>{throw new Error('TEST_PRE_DISPATCH_REFUSAL');};
     const environment={
-      agency,steps:8,character:'test',role:'brawler',build:'melee',forumEnabled:false,training:combatGoal?{
+      workerMode:a=>workerMode(a,{CLAWSCAPE_TEAM_ROOT:dir},now),
+      agency,steps:(staleDesign||neutralCloseRejected||retryHeld)?1:8,character:'test',role:'brawler',build:'melee',forumEnabled:false,training:combatGoal?{
         observe(){},beforeAction(){},next(s,probe,leadIds,skill){
           assert.ok(leadIds.includes('lumbridge-chickens'),'guide leads were not forwarded to training');
           assert.equal(skill,goalSkill,'task skill was not forwarded to training');
@@ -61,9 +82,10 @@ async function runScenario({blocked=false,unknown=false,deny=false,movement=fals
       loadActionIntent:()=>undefined,actionIntentPath:legacyPath,finishActionIntent:()=>{},
       dataDir:dir,existsSync:require('node:fs').existsSync,resolve:require('node:path').resolve,
       recoverLegacyJournals:(dir,id,options)=>recoverLegacyJournals(dir,id,{...options,now}),process:{env:{CLAWSCAPE_SERVER:'test'}},
-      bindItems,resolveItems,MissingItem,stateFrom:v=>v.state,isSelection,verifyActionOutcome,available:v=>v,choose:(_,v)=>v[0],stateKey:()=>'',
+      bindItems,resolveItems,MissingItem,cliActionFields,freshObservedLocAction,observedDiscoveryTransition,productiveProductionCandidates,taskOwnsBankExecutor,taskMustCloseInheritedBank,stateFrom:v=>v.state,isSelection,neutralInterfaceRecovery,stateProvesAcknowledgementStillRequired,verifyActionOutcome,available:v=>v,choose:(_,v)=>v[0],stateKey:()=>'',
       position:s=>({x:s.player.worldX,z:s.player.worldZ,level:s.player.level}),
       navigator:{
+        isReady:()=>true,
         assessApproach:async(_from,destination)=>{assessments++;return {status:'ready',destination};},
         step:async destination=>{
           assert.ok(agency.pending(),'movement needs durable receipt');
@@ -77,9 +99,14 @@ async function runScenario({blocked=false,unknown=false,deny=false,movement=fals
       },
       urgentAgencyAction:()=>undefined,validateMetal:()=>true,validateBow:()=>true,validateFishing:()=>true,
       equipmentGoals:{validate:()=>true},observeAgencyResult:()=>{},appendFileSync:()=>{},experiencePath:'unused',
-      randomUUID:()=>`command-${++ids}`,dialogCandidates:()=>[],bankingCandidates:()=>{
+      plannerStatusReporter:{shouldReport:()=>false},
+      randomUUID:()=>`command-${++ids}`,dialogCandidates:()=>[],productionCandidates:()=>{
         assert.ok(planned,'Legacy executor was called BEFORE the Director');
-        if(combatGoal&&state.inventory.length>=3)return [{id:'close-bank',type:'closeModal',waitTicks:1}];
+        if(neutralCloseRejected||(combatGoal&&state.inventory.length>=3))return [{id:'close-bank',type:'closeModal',waitTicks:1}];
+        return [{id:'withdraw-food',type:'bankWithdraw',fields:{slot:state.bank.items[0]?.slot,amount:1},waitTicks:1}];
+      },bankingCandidates:()=>{
+        assert.ok(planned,'Legacy executor was called BEFORE the Director');
+        if(neutralCloseRejected||(combatGoal&&state.inventory.length>=3))return [{id:'close-bank',type:'closeModal',waitTicks:1}];
         return [{id:'withdraw-food',type:'bankWithdraw',fields:{slot:state.bank.items[0]?.slot,amount:1},waitTicks:1}];
       },
       cliCall:async args=>{
@@ -99,6 +126,8 @@ async function runScenario({blocked=false,unknown=false,deny=false,movement=fals
               return {state:structuredClone(state)};
             }
           }
+          if(staleDesign&&args[1]==='closeModal'){state.bank.isOpen=false;return {state:structuredClone(state)};}
+          if(neutralCloseRejected&&args[1]==='closeModal'){state.bank.isOpen=false;return {state:structuredClone(state)};}
           assert.equal(args[1],'bankWithdraw');if(rebound)assert.equal(JSON.parse(args[3]).slot,9,'packet must use the new slot for the captured item ID');
           const receipt=agency.pending();assert.ok(receipt,'Action dispatched without durable intent');
           assert.match(receipt.commandId,/^command-/);
@@ -120,17 +149,22 @@ async function runScenario({blocked=false,unknown=false,deny=false,movement=fals
       assert.equal(recovery.entries[0].outcome,'interrupted');
       assert.equal(JSON.parse(readFileSync(legacyPath,'utf8')).status,'failed','original record is preserved');
     }
-    if(blocked||unknown||deny||missingInput)assert.equal(mutationCalls,0,'A planner refusal/unknown intent fell through to real execution');
+    if(staleDesign||neutralCloseRejected){assert.equal(mutationCalls,1,'bounded neutral interface recovery must dispatch exactly one close action');assert.equal(state.bank.isOpen,false);assert.equal(agency.pending(),undefined);}
+    else if(retryHeld){assert.equal(mutationCalls,0,'retry backoff must not dispatch or classify a concrete action as an executor failure');assert.equal(agency.summary().executorEpisode,undefined);assert.ok(agency.director.memory.active,'retry backoff must retain the selected goal');}
+    else if(teamStopped||blocked||unknown||deny||missingInput)assert.equal(mutationCalls,0,'A planner refusal/unknown intent fell through to real execution');
     else{assert.equal(mutationCalls,combatGoal?(badStyle?4:5):3);if(movement){assert.equal(legs,3);assert.equal(assessments,1);assert.equal(agency.pending(),undefined);}assert.equal(agency.director.memory.reviews.length,badStyle?0:1);if(!badStyle)assert.equal(agency.director.memory.reviews[0].result,'success');}
     if(missingInput){assert.equal(agency.summary().acquisition.need.name,'Shrimps');assert.equal(agency.director.memory.active.id,'supply-food');}
     return {mutationCalls,reviews:agency.director.memory.reviews.length};
   }finally{rmSync(dir,{recursive:true,force:true});}
 }
 async function runGatherScenario(){
-  const {LiveAgency,isSelection}=await import('../src/agency/live-adapter.ts');
+  const {LiveAgency,isSelection,stateProvesAcknowledgementStillRequired}=await import('../src/agency/live-adapter.ts');
   const {bindItems,resolveItems,MissingItem}=await import('../src/agency/item-intents.ts');
   const {verifyActionOutcome}=await import('../src/action-outcome.ts');
   const {recoverLegacyJournals}=await import('../src/agency/journal-recovery.ts');
+  const {workerMode}=await import('../src/team/worker.ts');
+  const {cliActionFields}=await import('../src/cli-action-fields.ts');
+  const {freshObservedLocAction,observedDiscoveryTransition,productiveProductionCandidates,taskMustCloseInheritedBank,taskOwnsBankExecutor}=await import('../src/agency/actionability.ts');
   const dir=mkdtempSync(join(tmpdir(),'gather-controller-'));
   try {
     let now=1000,ids=0,harvests=0,deposits=0,bankOpens=0;
@@ -142,16 +176,18 @@ async function runGatherScenario(){
       nearbyNpcs:[{id:1,index:5,name:'Banker',reachable:true,optionsWithIndex:[{opIndex:1,text:'Bank'}]}]};
     const agency=new LiveAgency(join(dir,'agency-v2.json'),{agent:'test',world:'test',revision:'test'},
       {supported:['gathering','food','bank'],now:()=>now});
-    const env={agency,steps:11,character:'test',role:'resource',build:'melee',forumEnabled:false,console:{log(){},error(){}},Date:TestDate,
+    const env={workerMode:a=>workerMode(a,{CLAWSCAPE_TEAM_ROOT:dir},now),agency,steps:11,character:'test',role:'resource',build:'melee',forumEnabled:false,console:{log(){},error(){}},Date:TestDate,
       loadActionIntent:()=>undefined,actionIntentPath:join(dir,'action-intent.json'),finishActionIntent(){},
       dataDir:dir,existsSync:require('node:fs').existsSync,resolve:require('node:path').resolve,
-      recoverLegacyJournals,process:{env:{CLAWSCAPE_SERVER:'test'}},bindItems,resolveItems,MissingItem,stateFrom:v=>v.state,isSelection,verifyActionOutcome,
-      available:v=>v,choose:(_,v)=>v[0],stateKey:()=>'',training:undefined,
-      urgentAgencyAction:()=>undefined,validateMetal:()=>true,validateBow:()=>true,validateFishing:()=>true,
+      recoverLegacyJournals,process:{env:{CLAWSCAPE_SERVER:'test'}},bindItems,resolveItems,MissingItem,cliActionFields,freshObservedLocAction,observedDiscoveryTransition,productiveProductionCandidates,taskOwnsBankExecutor,taskMustCloseInheritedBank,stateProvesAcknowledgementStillRequired,stateFrom:v=>v.state,isSelection,verifyActionOutcome,
+       available:v=>v,choose:(_,v)=>v[0],stateKey:()=>'',training:undefined,
+       navigator:{isReady:()=>true},
+       urgentAgencyAction:()=>undefined,validateMetal:()=>true,validateBow:()=>true,validateFishing:()=>true,
       equipmentGoals:{validate:()=>true},observeAgencyResult(){},appendFileSync(){},experiencePath:'unused',randomUUID:()=>`gather-${++ids}`,
+      plannerStatusReporter:{shouldReport:()=>false},
       economyCandidates:()=>[{id:'chop-tree',type:'interactLoc',fields:{locId:1276,x:2,z:1,optionIndex:1},waitTicks:1}],localEconomyDiscovery:()=>[],
       bankAt:()=>{assert.equal(state.inventory.length,6,'do not bank a half-empty resource bag');return [{id:'open-bank',type:'interactNpc',fields:{npcIndex:5,optionIndex:1},waitTicks:1}];},
-      bankingCandidates:()=>{const log=state.inventory.find(i=>i.id===1511);return log?[{id:'deposit-log',type:'bankDeposit',fields:{slot:log.slot,amount:1},waitTicks:1}]:[{id:'close-bank',type:'closeModal',waitTicks:1}];},
+      productionCandidates:()=>{const log=state.inventory.find(i=>i.id===1511);return log?[{id:'deposit-log',type:'bankDeposit',fields:{slot:log.slot,amount:1},waitTicks:1}]:[{id:'close-bank',type:'closeModal',waitTicks:1}];},bankingCandidates:()=>{const log=state.inventory.find(i=>i.id===1511);return log?[{id:'deposit-log',type:'bankDeposit',fields:{slot:log.slot,amount:1},waitTicks:1}]:[{id:'close-bank',type:'closeModal',waitTicks:1}];},
       cliCall:async args=>{
         now+=100;state.tick++;
         if(args[0]==='act'){
@@ -167,7 +203,9 @@ async function runGatherScenario(){
       },
     };
     const context=vm.createContext(env);vm.runInContext(js,context);await context.runEpisode();
-    assert.equal(harvests,5);assert.equal(bankOpens,1);assert.equal(deposits,5);
+    assert.equal(harvests,5,'gathering cycle should harvest one full inventory');
+    assert.equal(bankOpens,1,'gathering cycle should use one bank visit');
+    assert.equal(deposits,5,'gathering cycle should store every gathered log');
     assert.equal(agency.director.memory.reviews[0].result,'success');
     assert.equal(agency.director.memory.reviews[0].goal.target.fact,'gathering:banked');
     assert.ok(!agency.director.memory.reviews[0].goal.supportGoals.some(s=>s.target.fact==='food'));
@@ -176,7 +214,7 @@ async function runGatherScenario(){
 }
 (async()=>{
   const results=[];
-  for(const scenario of [{},{rebound:true},{missingInput:true},{blocked:true},{unknown:true},{deny:true},{movement:true},{movement:true,mapWait:true},{movement:true,legacyNavigation:true},{combatGoal:true},{combatGoal:true,badStyle:true},{combatGoal:true,meleeGoal:true},{combatGoal:true,meleeGoal:true,badStyle:true}])results.push({scenario,...await runScenario(scenario)});
+  for(const scenario of [{},{teamStopped:true},{rebound:true},{missingInput:true},{blocked:true},{unknown:true},{staleDesign:true},{neutralCloseRejected:true},{retryHeld:true},{deny:true},{movement:true},{movement:true,mapWait:true},{movement:true,legacyNavigation:true},{combatGoal:true},{combatGoal:true,badStyle:true},{combatGoal:true,meleeGoal:true},{combatGoal:true,meleeGoal:true,badStyle:true}])results.push({scenario,...await runScenario(scenario)});
   results.push(await runGatherScenario());
   console.log(JSON.stringify({controllerChecks:results.length,passed:results.length,results},null,2));
 })().catch(e=>{console.error(e);process.exitCode=1;});

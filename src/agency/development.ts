@@ -126,7 +126,7 @@ export function reviewDevelopment(current:Development,state:LiveState,memory:Mem
   return d;
 }
 export function strategyView(d:Development|undefined):Observation['strategy'] {
-  return d&&{id:d.id,protectedSkills:Object.keys(d.protectedXp)};
+  return d&&{id:d.id,protectedSkills:Object.keys(d.protectedXp),...(d.levelCaps?{levelCaps:{...d.levelCaps}}:{})};
 }
 export function allowedTraining(d:Development|undefined,trained:string[],state?:LiveState):boolean {
   const observed=state?skills(state):{};
@@ -173,7 +173,7 @@ export function guardDevelopment(d:Development|undefined,state:LiveState,
   const attack=action.type==='interactNpc'&&/^attack$/i.test(String(option)),styleChange=action.type==='setCombatStyle';
   const item=(state.inventory??[]).find((i:any)=>i.slot===f.slot);
   const bury=action.type==='useInventoryItem'&&(item?.optionsWithIndex??[]).some((o:any)=>o.opIndex===f.optionIndex&&/^bury$/i.test(String(o.text)));
-  const reward=action.type==='clickDialogOption'||action.type==='castSpell';
+  const reward=(action.type==='clickDialogOption'&&action.fields?.resourceDialog!==true)||action.type==='castSpell';
   if(!attack&&!styleChange&&!bury&&!reward)return;
   if(protectedXpChanged(d,state))throw new Error('PURE_BUILD_XP_BOUNDARY_CHANGED');
   const index=styleChange?f.style:state.combatStyle?.currentStyle;

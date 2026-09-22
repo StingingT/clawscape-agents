@@ -52,3 +52,27 @@ test('no collision-covered survey approach reports the real refusal instead of g
  try{const r=await nav.assessApproach({x:10,z:10,level:0},{x:20,z:20,level:0});expect(r.status).toBe('blocked');expect(r.reason).toContain('unverified-collision-coverage');}
  finally{nav.close();rmSync(root,{recursive:true,force:true});}
 });
+
+test('partial collision-covered routes become frontiers without being treated as target arrival',async()=>{
+ const root=mkdtempSync(join(tmpdir(),'survey-frontier-'));
+ const from={x:10,z:10,level:0},target={x:900,z:10,level:0},frontier={x:500,z:10,level:0};
+ const nav=new Navigator({state:async()=>({}),wait:async()=>({}),act:async()=>({})},join(root,'nav.json'),async()=>({partial:true,unmappedTiles:0,legs:[{target:frontier,doors:[]}]}));
+ try{
+  expect((await nav.assess(from,target)).status).toBe('blocked');
+  const result=await nav.assessFrontier(from,target);
+  expect(result.status).toBe('frontier');
+  expect((result as any).destination).toEqual(frontier);
+  expect((result as any).destination).not.toEqual(target);
+ } finally{nav.close();rmSync(root,{recursive:true,force:true});}
+});
+
+test('unmapped and empty partial routes cannot become exploration frontiers',async()=>{
+ const root=mkdtempSync(join(tmpdir(),'survey-frontier-refusal-'));
+ const from={x:10,z:10,level:0},target={x:900,z:10,level:0};
+ const nav=new Navigator({state:async()=>({}),wait:async()=>({}),act:async()=>({})},join(root,'nav.json'),async()=>({partial:true,unmappedTiles:1,legs:[{target:{x:500,z:10,level:0},doors:[]}]}));
+ try{
+  const result=await nav.assessFrontier(from,target);
+  expect(result.status).toBe('blocked');
+  expect((result as any).reason).toBe('unverified-collision-coverage');
+ } finally{nav.close();rmSync(root,{recursive:true,force:true});}
+});

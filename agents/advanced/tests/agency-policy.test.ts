@@ -40,6 +40,12 @@ test('discovery uses only a currently observed reachable transition option',()=>
   const d=new LivePolicy().next(o,{id:'discover-local',kind:'discovery'});
   expect(d.blocked).toBeUndefined();expect(d.intent).toEqual({operation:'interact',entity_ref:'object-44',option_index:7});
 });
+test('a remote reachable object is not treated as a local recovery experiment',()=>{
+  const o=observed();o.entities.push({kind:'object',ref:'object-45',index:45,content_id:902,name:'Unnamed object',position:{x:3236,z:3230,plane:0},reachable:true,
+    options:[{index:7,text:'Open'}]});
+  const d=new LivePolicy().next(o,{id:'discover-local',kind:'discovery'});
+  expect(d.blocked).toBe('NO_LOCAL_RECOVERY_EXPERIMENT');expect(d.intent).toBeUndefined();
+});
 
 test('Astra partial movement completes the action observation without losing its exploration task',()=>{
   const before=observed(),policy=new LivePolicy(),task={id:'survey:site',kind:'exploration' as const,route:{id:'site',x:3240,z:3240,level:0,evidence:'own observed site'}};

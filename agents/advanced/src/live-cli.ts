@@ -1,3 +1,4 @@
+import { workerMode, checkWorkerStart } from '../../../src/team/worker.ts';
 import { finalizeQuarantinedAction } from './transaction-quarantine.ts';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { resolve, join } from 'node:path';
@@ -18,6 +19,7 @@ import { acquireController } from '../../../src/controller-lease.ts';
 import { runWithStartupStatus, readRequiredJson, checkedUpstream, type StartupContext } from './startup.ts';
 import { agencyState, agencyCandidate, arbiterVerification, observedVerification, urgentDecision } from './agency-bridge.ts';
 import { recoverableExecutorBlock } from './replanning.ts';
+import { StatusReporter } from '../../../src/agency/status-report.ts';
 
 const codeRoot=resolve(import.meta.dir,'..');
 const argv=process.argv.slice(2),mode=argv[0]??'status';
@@ -28,6 +30,7 @@ const brief=(o:Observation)=>({tick:o.tick,connected:o.connected,position:o.posi
   lifeId:o.life_id,respawns:o.respawns,skills:o.skills,inventory:o.inventory.map(i=>({name:i.name,count:i.count})),
   equipment:o.equipment.map(i=>({name:i.name,count:i.count}))});
 export async function main(context:StartupContext){
+  if(['run','pilot'].includes(mode))checkWorkerStart('astra');
   const {root,data}=context;
   mkdirSync(data,{recursive:true});
   if(mode==='status'){
@@ -138,6 +141,7 @@ export async function main(context:StartupContext){
     foodRequirement:o=>agency?.tripPreparation(agencyState(o),'combat').foodTarget ?? 1};
   const arbiter=new ActionArbiter(store,adapter,safety);
   let activeGoal='initialise',actions=0,verified=0,failed=0,lastProgress=Date.now();
+  const consoleStatusReporter=new StatusReporter();
   const deadline=Date.now()+Math.min(config.max_session_minutes*60,Number(option('seconds',mode==='pilot'?'120':String(config.max_session_minutes*60))))*1000;
   let pilotMoved=false,pilotInteracted=false,pilotDestination:Observation['position']=null;
   const publish=(status:string,why:string)=>{
@@ -147,7 +151,12 @@ export async function main(context:StartupContext){
       authority:'single cooperating local controller; server fencing unavailable',npcSpendingGp:0,
       navigation,agency:agency?.summary(),
       research:research?{status:research.status,suggestedMonsters:research.suggestedMonsters,rejected:research.rejected,fetchedAt:research.fetchedAt}:null};
-    context.publish(status,why,{...result,retryable:status==='RECONCILIATION_REQUIRED'?false:undefined});console.log(JSON.stringify({time:result.time,status,goal:activeGoal,reason:why,tick:latest?.tick,hp:latest?.hp,position:latest?.position,actions,verified,failed}));
+    context.publish(status,why,{...result,retryable:status==='RECONCILIATION_REQUIRED'?false:undefined});
+    // Keep the machine-readable status current for Herdr while avoiding an
+    // endless console stream of the same blocked/reconciling heartbeat.
+    const consoleResult={time:result.time,status,goal:activeGoal,reason:why,tick:latest?.tick,hp:latest?.hp,position:latest?.position,actions,verified,failed};
+    const consoleKey=JSON.stringify({status,goal:consoleResult.goal,reason:why,actions,verified,failed,pending:result.pending});
+    if(consoleStatusReporter.shouldReport(consoleKey))console.log(JSON.stringify(consoleResult));
   };
   try{
     context.publish('RECONCILING','CHECKING_EXECUTOR_AND_LEGACY_JOURNALS');
@@ -161,9 +170,14 @@ export async function main(context:StartupContext){
       agency=new LiveAgency(join(data,'agency-v2.json'),{agent:latest.character,world:latest.world,revision:profile.profile_id},{
         supported:['food','bank','equipment','combat','exploration','discovery'],preferences:{exploration:2,combat:1},
         policy:existsSync(settings)?readRequiredJson(settings,'AGENCY_POLICY_MISSING','AGENCY_POLICY_INVALID'):{},
-        routes:[{id:'documented-draynor-approach',x:3088,z:3226,level:0,evidence:'documented lead; still requires collision-safe travel and own arrival'},
-          {id:'documented-goblin-area',x:3252,z:3230,level:0,evidence:'documented lead; no encounter claimed before observation'},
-          {id:'documented-chicken-area',x:3232,z:3295,level:0,evidence:'documented lead; no encounter claimed before observation'}],
+        // Herdr supplies the installed source digest.  An executor-capability
+        // episode belongs to the exact executor build that produced it; a
+        // deployed recovery must receive one fresh planning pass rather than
+        // inheriting an obsolete local failure.
+        executorRevision:process.env.CLAWSCAPE_EXECUTOR_REVISION,
+        // No character-specific destinations.  The shared world model starts
+        // with bounded local probes and persists only routes this character
+        // has personally observed and verified.
       });
     }
     // Explicit renewal around potentially expensive journal scans prevents scheduler/SQLite stalls from
@@ -194,6 +208,9 @@ export async function main(context:StartupContext){
     queueResearch();
     publish('RUNNING','Connected; waiting for verified effects');
     while(Date.now()<deadline&&!revoked){
+      const teamMode=workerMode('astra');
+      if(teamMode==='stopped'){reason='TEAM_STOPPED';break;}
+      if(teamMode==='paused'){publish('PAUSED','Team paused; no new actions dispatched');await sleep(700);continue;}
       const previous=latest;
       latest=await adapter.snapshot();
       if(previous){
@@ -392,14 +409,17 @@ export async function main(context:StartupContext){
 
   }
   } finally {
-    try {
+    // The inner session has already published its terminal state.  Cleanup is
+    // best-effort: a closed map worker, SQLite handle, or lease file must not
+    // turn a completed bounded session into STARTUP_FAILED and make Herdr
+    // classify a normal controller rotation as an operator-attention fault.
     if(renewal)clearInterval(renewal);
-    navigator?.close();
+    try { navigator?.close(); } catch { /* terminal status is already durable */ }
     if(store) {
-      try { if(lease&&store.control().lease===lease)store.setControl('STOPPED'); }
-      finally { store.close(); }
+      try { if(lease&&store.control().lease===lease)store.setControl('STOPPED'); } catch { /* lease may already be released */ }
+      try { store.close(); } catch { /* do not overwrite a completed run */ }
     }
-    } finally { releaseController(); }
+    try { releaseController(); } catch { /* process exit releases an abandoned local lock */ }
   }
 }
 if(import.meta.main) await runWithStartupStatus(codeRoot,process.argv.slice(2),main);

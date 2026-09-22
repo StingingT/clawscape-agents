@@ -1,4 +1,19 @@
-import { test, expect } from 'bun:test';
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { contextKey } from './adaptive-combat.ts';
+// Minimal assertions for this existing suite, portable between Node and Bun.
+const expect=(actual:any)=>({
+  toBe:(value:any)=>assert.equal(actual,value),
+  toEqual:(value:any)=>assert.deepEqual(actual,value),
+  toHaveLength:(value:number)=>assert.equal(actual.length,value),
+  toBeDefined:()=>assert.notEqual(actual,undefined),
+  toBeUndefined:()=>assert.equal(actual,undefined),
+  toBeGreaterThan:(value:number)=>assert.ok(actual>value),
+  toContain:(value:any)=>assert.ok(actual.includes(value)),
+  toThrow:(text:string)=>assert.throws(actual,(error:any)=>String(error).includes(text)),
+  toMatchObject:(value:any)=>{for(const [key,v] of Object.entries(value))assert.deepEqual(actual[key],v);},
+  not:{toBe:(value:any)=>assert.notEqual(actual,value),toContain:(value:any)=>assert.ok(!actual.includes(value))},
+});
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -135,7 +150,7 @@ test('strong comparable measured performance can outweigh an untested higher-tie
   const s = state();
   s.inventory = [{ name: 'Shrimps', count: 8, slot: 0, optionsWithIndex: [{ text: 'Eat', opIndex: 1 }] }];
   s.equipment = [{ name: 'Iron scimitar', count: 1, slot: 3 }];
-  d.memory.sites.cows.stats['melee:Iron scimitar:def0:skill2'] = { encounters: 20, kills: 20, productive: 20, xp: 10000, ticks: 100, damage: 0, food: 0, ammo: 0, escapes: 0, deaths: 0 };
+  d.memory.sites.cows.stats['exact:'+contextKey(s,'melee')] = { encounters: 20, kills: 20, productive: 20, xp: 10000, ticks: 100, damage: 0, food: 0, ammo: 0, escapes: 0, deaths: 0 };
   const action = (await d.next(s, route))[0];
   expect(action.fields?.trainingSite).toBe('cows');
 }));
@@ -218,7 +233,7 @@ test('a fence detour cannot change the committed approach midway through travel'
 }));
 
 test('costly repeated higher-tier outcomes overcome its exploration bonus', fixture(async d => {
-  const s=state(),key='melee:Iron scimitar:def0:skill2';
+  const s=state(),key='exact:'+contextKey(s,'melee');
   d.memory.sites.cows.stats[key]={encounters:10,kills:10,productive:10,xp:500,ticks:100,damage:0,food:0,ammo:0,escapes:0,deaths:0};
   d.memory.sites.barbarians.stats[key]={encounters:10,kills:0,productive:0,xp:10,ticks:1000,damage:500,food:100,ammo:0,escapes:5,deaths:2};
   expect((await d.next(s,route))[0].fields?.trainingSite).toBe('cows');
@@ -260,7 +275,7 @@ test('a death does not become a successful full-trip return', fixture(d=>{
 
 const guideCatalog:Catalog={...catalog,sites:catalog.sites.map(s=>({...s,id:s.id==='chickens'?'east-chickens':s.id==='cows'?'east-cows':'village-barbarians'}))};
 test('superior measured full-trip performance outweighs a recommended-site prior', fixture(async d=>{
-  const s=state(),key='melee:Iron scimitar:def0:skill2:target-strength';s.skills.push({name:'defence',level:1,experience:0});
+  const s=state();s.skills.push({name:'defence',level:1,experience:0});const key='exact:'+contextKey(s,'melee')+':target-strength';
   d.memory.sites['east-chickens'].tripStats={[key]:{trips:1,xp:10,ticks:500,food:1,ammo:0,spentGp:1}};
   d.memory.sites['east-cows'].tripStats={[key]:{trips:3,xp:900,ticks:90,food:0,ammo:0,spentGp:0}};
   const a=(await d.next(s,route,['lumbridge-chickens'],'strength'))[0];

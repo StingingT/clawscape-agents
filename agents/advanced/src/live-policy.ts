@@ -47,7 +47,10 @@ const pickupAvailable = (e: Entity) => !!option(e, /^(take|pick-up|pick up)$/)
   || (e.options.length === 0 && e.reachable === true);
 const bankOption = (e: Entity) => option(e, e.kind === "object" && normalize(e.name) === "bank booth"
   ? /^(bank|use-bank|use bank|use-quickly)$/ : /^(bank|use-bank|use bank)$/);
-const transitionOption = (e: Entity) => option(e, /^(open|climb(?:-up|-down)?|enter|cross|use)$/);
+// "Use" is a service verb in this client as well as a traversal verb.  A
+// navigation experiment must be an explicit movement interaction; otherwise
+// an innocent bank/service UI can be misclassified as a discovered route.
+const transitionOption = (e: Entity) => option(e, /^(open|climb(?:-up|-down)?|enter|cross)$/);
 
 // Conservative policy ceilings, NOT deployed-server measurements. Exact low-level variants only.
 // Modern public guides are dated hints; the main supervisor/profile must validate compatibility.
@@ -499,7 +502,10 @@ export class LivePolicy {
   private localDiscovery(o: Observation, goal: string): LiveDecision {
     const candidate=o.entities
       .filter(e=>e.kind==='object'&&!!transitionOption(e)&&e.position.plane===o.position!.plane
-        &&(e.reachable===true||distance(o.position!,e.position)<=1)
+        // Reachable is an advisory field, not proof that a remote object can
+        // be interacted with from here.  Keep recovery experiments adjacent
+        // enough to verify their outcome without inventing a route.
+        &&distance(o.position!,e.position)<=3
         &&(!goal.startsWith('discover:discovered:interaction:')
           ||goal===`discover:discovered:interaction:${e.content_id}:${e.position.x}:${e.position.z}:${e.position.plane}:${transitionOption(e)!.index}`))
       .sort((a,b)=>distance(o.position!,a.position)-distance(o.position!,b.position)
