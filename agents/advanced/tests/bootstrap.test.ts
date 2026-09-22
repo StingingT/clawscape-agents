@@ -5,7 +5,11 @@ import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 const entry=resolve(import.meta.dir,'../src/live-entry.ts');
 function run(root:string,file=entry,mode='run') {
-  return spawnSync(process.execPath,[file,mode,'--runtime-root',root],{encoding:'utf8',timeout:5000,env:{...process.env,CLAWSCAPE_ASTRA_HOME:root}});
+  // These are standalone bootstrap cases. A parent Herdr session is a separate
+  // controller boundary and must not pre-empt the configuration being tested.
+  const {CLAWSCAPE_TEAM_SESSION:_session,CLAWSCAPE_TEAM_ROOT:_root,CLAWSCAPE_TEAM_AGENT:_agent,...standaloneEnv}=process.env;
+  return spawnSync(process.execPath,[file,mode,'--runtime-root',root],{encoding:'utf8',timeout:5000,env:{
+    ...standaloneEnv,CLAWSCAPE_ASTRA_HOME:root,CLAWSCAPE_TEAM_ROOT:root}});
 }
 function temporary(f:(dir:string)=>void){const dir=mkdtempSync(join(tmpdir(),'astra-bootstrap-'));try{f(dir);}finally{rmSync(dir,{recursive:true,force:true});}}
 

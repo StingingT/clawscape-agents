@@ -9,6 +9,16 @@ const no=(reason:string,uncertain=true):ActionVerification=>({verified:false,evi
 const interrupted=(reason:string):ActionVerification=>({verified:false,uncertain:false,interrupted:true,evidence:[reason],reason});
 const menu=(e:any,index:any)=>(e?.optionsWithIndex??[]).find((o:any)=>o.opIndex===index)?.text??'';
 const opened=(s:any)=>s.bank?.isOpen===true||s.shop?.isOpen===true||s.dialog?.isOpen===true||s.modalOpen===true;
+const messageKey=(m:any)=>`${Number(m?.tick??-1)}:${String(m?.type??'')}:${String(m?.text??'')}`;
+const messages=(state:any):any[]=>Array.isArray(state?.gameMessages)?state.gameMessages:Array.isArray(state?.messages)?state.messages:[];
+/** System/chat feedback is an observed game outcome, not an instruction.  Keep
+ * this deliberately narrow: only explicit refusal language from messages that
+ * appeared after the action can settle a non-transactional interaction. */
+function explicitInteractionRefusal(before:any,after:any):string|undefined {
+  const seen=new Set(messages(before).map(messageKey));
+  const fresh=messages(after).filter((m:any)=>!seen.has(messageKey(m))).map((m:any)=>String(m?.text??'').trim()).filter(Boolean);
+  return fresh.find((text:string)=>/\b(locked|cannot|can't|unable|won't|not allowed|requires|need|nothing)\b/i.test(text));
+}
 
 function requestedProductionPanel(before:any,after:any,action:ActionLike):boolean {
   if(before.interface?.isOpen===true || after.interface?.isOpen!==true)return false;
@@ -101,6 +111,24 @@ export function verifyActionOutcome(before:any,after:any,action:ActionLike,resul
   let option='';
   if(type==='interactNpc')option=menu((before.nearbyNpcs??[]).find((n:any)=>n.index===f.npcIndex),f.optionIndex);
   if(type==='interactLoc')option=menu((before.nearbyLocs??[]).find((n:any)=>n.id===f.locId&&n.x===f.x&&n.z===f.z),f.optionIndex);
+  if(['interactLoc','interactNpc','talkToNpc','pickupItem','useItemOnLoc'].includes(type)) {
+    const refusal=explicitInteractionRefusal(before,after);
+    if(refusal)return no(`server reported interaction refusal: ${refusal}`,false);
+  }
+  // Discovery asks a falsifiable question: does this object change traversal?
+  // Opening an interface answers a different question.  Treat it as an
+  // interrupted experiment rather than allowing an unrelated bank, shop, or
+  // dialogue effect to count as progress for navigation.  The rule is based
+  // solely on the action's expected effect and observed UI state; it has no
+  // object, map, or character-specific exception.
+  if(type==='interactLoc' && f.expectedEffect==='world-transition' && !opened(before) && opened(after))
+    return interrupted('transition hypothesis opened an interface instead of changing traversal');
+  if(type==='interactLoc' && f.expectedEffect==='access-clue') {
+    const beforeItems=JSON.stringify(before.inventory??[]),afterItems=JSON.stringify(after.inventory??[]);
+    const afterLoc=(after.nearbyLocs??[]).find((n:any)=>n.id===f.locId&&n.x===f.x&&n.z===f.z);
+    if(beforeItems!==afterItems||!afterLoc||!same((before.nearbyLocs??[]).find((n:any)=>n.id===f.locId&&n.x===f.x&&n.z===f.z)?.optionsWithIndex,afterLoc.optionsWithIndex))
+      return yes('observed searchable object changed or yielded an item');
+  }
   if(/^attack$/i.test(option)) {
     const b=before.player.combat,a=after.player.combat;
     const correct=a?.inCombat===true&&a.targetType==='npc'&&a.targetIndex===f.npcIndex;
@@ -114,7 +142,10 @@ export function verifyActionOutcome(before:any,after:any,action:ActionLike,resul
   if(/talk/i.test(option))return !same(before.dialog,after.dialog)?yes('target dialogue advanced'):no('target dialogue not observed');
   if(/^open$/i.test(option)) {
     const loc=(after.nearbyLocs??[]).find((n:any)=>n.x===f.x&&n.z===f.z&&n.id===f.locId);
-    return !loc||!/^open$/i.test(menu(loc,f.optionIndex))?yes('requested obstruction changed'):no('obstruction unchanged');
+    // This is a fresh, complete post-action observation of the same object.
+    // If it still offers Open, the transition hypothesis is falsified for the
+    // current context; keeping it UNKNOWN would only replay the same probe.
+    return !loc||!/^open$/i.test(menu(loc,f.optionIndex))?yes('requested obstruction changed'):no('obstruction unchanged',false);
   }
   const skill=/net|bait|lure|fish/i.test(option)?'fishing':/chop/i.test(option)?'woodcutting':/mine/i.test(option)?'mining':'';
   if(skill&&xp(after,skill)>xp(before,skill)&&!same(before.inventory,after.inventory))return yes(`${skill} output and XP observed`);

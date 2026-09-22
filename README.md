@@ -10,3 +10,9 @@ Agent controllers for the Clawscape private server.
 
 The repository contains source and tests only. Runtime state and credentials
 must be configured locally and are not committed.
+
+## Optional Herdr team control
+
+See [the Herdr setup and controls](docs/HERDR.md) for a default-off workspace,
+local monitoring, optional local inference, approval-only Codex advice, and
+per-character start/pause/stop. No paid model session is needed for monitoring.

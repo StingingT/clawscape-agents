@@ -33,15 +33,50 @@ test('saved probes become available again after a genuine productive-progress st
   assert.ok(probes(buildCatalogue(identity, state(10, 4), knowledge, defaultPolicy, ['exploration'], memory, 302001)).length);
 });
 
-test('real survey-prefixed reviews consume the bounded discovery budget, including failed attempts', () => {
+test('unproductive survey-prefixed reviews consume the bounded discovery budget', () => {
   const knowledge = emptyKnowledge(), memory = createMemory(identity);
   buildCatalogue(identity, state(), knowledge, defaultPolicy, ['exploration'], memory, 1000);
   memory.reviews = [
-    { goal: { id: 'survey:local-probe:13:10:0' }, at: 1500, result: 'success' },
+    { goal: { id: 'survey:local-probe:13:10:0' }, at: 1500, result: 'partial' },
     { goal: { id: 'survey:local-probe:7:10:0' }, at: 1600, result: 'partial' },
   ] as any;
   assert.equal(probes(buildCatalogue(identity, state(), knowledge, defaultPolicy, ['exploration'], memory, 1700)).length, 0);
   assert.ok(probes(buildCatalogue(identity, state(), knowledge, defaultPolicy, ['exploration'], memory, 602000)).length);
+});
+
+test('a verified observed route reopens only its own area after earlier probe failures', () => {
+  const knowledge = emptyKnowledge(), memory = createMemory(identity);
+  buildCatalogue(identity, state(), knowledge, defaultPolicy, ['exploration'], memory, 1000);
+  memory.reviews = [
+    { goal: { id: 'survey:local-probe:13:10:0' }, at: 1500, result: 'partial' },
+    { goal: { id: 'survey:local-probe:7:10:0' }, at: 1600, result: 'partial' },
+    { goal: { id: 'survey:observed:123:12:10:0' }, at: 1700, result: 'success' },
+  ] as any;
+  assert.ok(probes(buildCatalogue(identity, state(), knowledge, defaultPolicy, ['exploration'], memory, 1800)).length,
+    'verified non-probe map progress makes earlier same-area failures stale');
+});
+
+test('a successful tiny local probe cannot erase its own bounded failure budget', () => {
+  const knowledge = emptyKnowledge(), memory = createMemory(identity);
+  buildCatalogue(identity, state(), knowledge, defaultPolicy, ['exploration'], memory, 1000);
+  memory.reviews = [
+    { goal: { id: 'survey:local-probe:13:10:0' }, at: 1500, result: 'partial' },
+    { goal: { id: 'survey:local-probe:7:10:0' }, at: 1600, result: 'partial' },
+    { goal: { id: 'survey:local-probe:12:10:0' }, at: 1700, result: 'success' },
+  ] as any;
+  assert.equal(probes(buildCatalogue(identity, state(), knowledge, defaultPolicy, ['exploration'], memory, 1800)).length, 0);
+});
+
+test('probe history limits repeated experiments in one area but not a newly reached area', () => {
+  const knowledge = emptyKnowledge(), memory = createMemory(identity);
+  memory.reviews = [
+    { goal: { id: 'survey:local-probe:13:10:0' }, at: 1500, result: 'partial' },
+    { goal: { id: 'survey:local-probe:7:10:0' }, at: 1600, result: 'partial' },
+  ] as any;
+  assert.equal(probes(buildCatalogue(identity, state(10, 3), knowledge, defaultPolicy, ['exploration'], memory, 1700)).length, 0);
+  // A different coarse cell gains only its normal bounded local experiments;
+  // this is not a location-specific route or instruction.
+  assert.ok(probes(buildCatalogue(identity, state(42, 3), knowledge, defaultPolicy, ['exploration'], memory, 1700)).length);
 });
 
 test('a verified partial probe remains executable until arrival instead of cancelling itself on progress', t => {

@@ -1,3 +1,5 @@
+import { AdaptiveRuntime, type AdaptiveOptions } from './adaptive-runtime.ts';
+import { emptyAdaptive, contextKey, beginEncounter, observeEncounter, finishEncounter, readinessDecision, abortExperiment, type AdaptiveMemory } from './adaptive-combat.ts';
 import { combatEvents, observedPlayerIndex, ownKill } from '../combat-evidence.ts';
 import { guidePrior, inspectTrainingLeads } from './guide-leads.ts';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -12,15 +14,16 @@ type Outcomes = { encounters: number; kills: number; productive: number; xp: num
 type TripStats={trips:number;xp:number;ticks:number;food:number;ammo:number;spentGp:number};
 type Trip={goalKey:string;skill:string;life:number;startTick:number;lastTick:number;startedAt:number;siteId?:string;context?:string;xp:number;food:number;ammo:number;spentGp:number;mixed:boolean;checkpoint?:string};
 type Site = { id: string; name: string; monsterId: number; combatLevel: number; points: Tile[]; source: 'guide' | 'observed'; evidence: string; guideIds: string[]; firstSeen?: string; lastSeen?: string; sightings: number; cooldownUntil: number; failures: number; stats: Record<string, Outcomes>; tripStats?:Record<string,TripStats>; observationPasses: number; lastObservationTick?: number; emptySinceTick?: number };
-type Encounter = { siteId: string; index: number; monsterId: number; life: number; tick: number; context: string; xp: number; ticks: number; damage: number; food: number; ammo: number; confirmedKill: boolean; ownPlayerIndex?:number|null; clearedTick?:number; lastObservedTick?:number };
-type Knowledge = { trip?:Trip; completedTrips?:Array<Trip & {endTick:number;result:'returned-to-bank'|'interrupted'}>; sites: Record<string, Site>; observations: Record<string, any>; commitment?: { siteId: string; since: number; encounters: number; approaches?: Tile[] }; exploration: { window: number; trips: number }; pending?: Encounter; status?: any; lastObserved?: string; retryAt?: number };
+type Encounter = { mixed?:boolean; siteId: string; index: number; monsterId: number; life: number; tick: number; context: string; xp: number; ticks: number; damage: number; food: number; ammo: number; confirmedKill: boolean; ownPlayerIndex?:number|null; clearedTick?:number; lastObservedTick?:number };
+type Knowledge = { adaptive?:AdaptiveMemory; trip?:Trip; completedTrips?:Array<Trip & {endTick:number;result:'returned-to-bank'|'interrupted'}>; sites: Record<string, Site>; observations: Record<string, any>; commitment?: { siteId: string; since: number; encounters: number; approaches?: Tile[] }; exploration: { window: number; trips: number }; pending?: Encounter; status?: any; lastObserved?: string; retryAt?: number };
 const fresh = (): Knowledge => ({ sites: {}, observations: {}, exploration: { window: 0, trips: 0 } });
 const outcomes = (): Outcomes => ({ encounters: 0, kills: 0, productive: 0, xp: 0, ticks: 0, damage: 0, food: 0, ammo: 0, escapes: 0, deaths: 0 });
 const at = (s: any): Tile => ({ x: s.player.worldX, z: s.player.worldZ, level: s.player.level });
 const xp = (s: any) => (s.skills ?? []).filter((v: any) => /^(attack|strength|defence|ranged|magic|hitpoints)$/i.test(v.name)).reduce((n: number, v: any) => n + Number(v.experience ?? 0), 0);
 const ammo = (s: any) => [...(s.inventory ?? []), ...(s.equipment ?? [])].filter(i => hasUsableArrows(s.combatStyle?.weaponName ?? '', [i])).reduce((n, i) => n + Number(i.count), 0);
 const metal = (name: string) => ['bronze', 'iron', 'steel', 'black', 'mithril', 'adamant', 'rune'].findIndex(m => name.toLowerCase().includes(m)) + 1;
-const context = (s: any, ranged: boolean) => `${ranged ? 'ranged' : 'melee'}:${s.combatStyle?.weaponName ?? 'unknown'}:def${Math.floor(skillLevel(s, 'defence') / 10)}:skill${Math.floor(skillLevel(s, ranged ? 'ranged' : 'strength') / 10)}`;
+// Exact-context keys only for NEW statistics; coarse historical records are preserved as legacy.
+const context = (s:any,ranged:boolean) => 'exact:'+contextKey(s,ranged?'ranged':'melee');
 export function trainingReadiness(s: any, m: Monster, ranged: boolean, foodTarget = 0): string | undefined {
   if (!s.player || s.player.isDead || isThreatened(s) || s.bank?.isOpen || s.shop?.isOpen || s.dialog?.isOpen) return 'safety-or-interface';
   if ((s.inventory?.length ?? 28) >= 28) return 'inventory-full';
@@ -50,12 +53,14 @@ export function trainingReadiness(s: any, m: Monster, ranged: boolean, foodTarge
 }
 export class TrainingDiscovery {
   readonly memory: Knowledge;
+  readonly adaptive: AdaptiveRuntime;
   private document: { version: number; character: string; worlds: Record<string, Knowledge> };
   private preferredLeadIds:readonly string[]=[];
   private selectedSkill?:string;
+  private lastAdaptiveState?:any;
   private foodTarget=0;
   private routeCache = new Map<string, { until: number; route: Route }>();
-  constructor(private file: string, readonly character: string, readonly catalog: Catalog, private ranged = false, private economy = false, private now = Date.now) {
+  constructor(private file: string, readonly character: string, readonly catalog: Catalog, private ranged = false, private economy = false, private now = Date.now, adaptiveOptions:AdaptiveOptions={}) {
     this.document = { version: 1, character, worlds: {} };
     if (existsSync(file)) {
       const saved = JSON.parse(readFileSync(file, 'utf8'));
@@ -63,6 +68,8 @@ export class TrainingDiscovery {
       this.document = saved;
     }
     this.memory = this.document.worlds[catalog.namespace] ??= fresh();
+    this.memory.adaptive ??= emptyAdaptive();
+    this.adaptive = new AdaptiveRuntime(this.memory.adaptive,character,catalog.namespace,adaptiveOptions,now);
     for (const h of catalog.sites) this.memory.sites[h.id] ??= {
       id: h.id, name: h.name, monsterId: h.monster.id, combatLevel: h.monster.combatLevel,
       points: h.points, source: 'guide', evidence: h.source, guideIds: h.guideIds,
@@ -117,19 +124,24 @@ export class TrainingDiscovery {
       delete this.memory.trip;
     }
   }
-  save() { writeFileSync(this.file, JSON.stringify(this.document, null, 2) + '\n'); }
+  save() { writeFileSync(this.file, JSON.stringify(this.document, null, 2) + '\n'); this.adaptive.publish(); }
+  equipmentTrial(s:any,skill:string) { this.selectedSkill=skill;const result=this.adaptive.gearAction(s,skill);this.save();return result; }
   timedOut(s: any) { return !!this.memory.pending && s.player?.lifeId === this.memory.pending.life && s.tick > this.memory.pending.tick + 180; }
   validateAction(s: any, action: Action) {
+    if(action.fields?.adaptiveExperiment||action.fields?.adaptiveEvidence)return this.adaptive.validateGear(s,action,this.selectedSkill??(this.ranged?'ranged':'strength'));
     const site = this.memory.sites[action.fields?.trainingSite];
     const monster = this.catalog.monsters.find(m => m.id === site?.monsterId);
-    if (!site || !monster || site.cooldownUntil > this.now() || trainingReadiness(s, monster, this.ranged, this.foodTarget)) return false;
+    if (!site || !monster || !this.adaptive.candidateReview(s,monster.id,monster.combatLevel).eligible || site.cooldownUntil > this.now() || trainingReadiness(s, monster, this.ranged, this.foodTarget)) return false;
     if (action.type === 'walkTo') return site.points.some(p => p.x === action.fields?.x && p.z === action.fields?.z && p.level === action.fields?.level);
     const target = s.nearbyNpcs?.find((n: any) => n.index === action.fields?.npcIndex);
-    return !!target && target.hp !== 0 && this.monster(target)?.id === monster.id && target.reachable === true && target.inCombat !== true && target.distance <= 8 && target.optionsWithIndex?.some((o: any) => o.opIndex === action.fields?.optionIndex && /^attack$/i.test(o.text));
+    return !!target && this.adaptive.attackMatches(s,target,site.id,this.selectedSkill??(this.ranged?'ranged':'strength')) && target.hp !== 0 && this.monster(target)?.id === monster.id && target.reachable === true && target.inCombat !== true && target.distance <= 8 && target.optionsWithIndex?.some((o: any) => o.opIndex === action.fields?.optionIndex && /^attack$/i.test(o.text));
   }
-  actionFailed() { this.finish(false, false); this.save(); }
+  actionFailed() { this.finish(false, false); abortExperiment(this.memory.adaptive!,'Action outcome failed or unresolved; stop experimental sequence.',this.now()); this.save(); }
   private monster(n: any) { return this.catalog.monsters.find(m => m.id === n.id && m.name.toLowerCase() === String(n.name).toLowerCase() && m.combatLevel === n.combatLevel); }
   observe(s: any) {
+    if(this.memory.adaptive?.pending&&this.lastAdaptiveState&&this.adaptive.settings().recording)
+      observeEncounter(this.memory.adaptive,this.lastAdaptiveState,s,{type:'observe'},this.now());
+    this.lastAdaptiveState=structuredClone(s);
     if (!s.player || !validTile(at(s))) return;
     const stamp = `${s.player.lifeId}:${s.tick}`;
     if (this.memory.lastObserved === stamp) return;
@@ -160,26 +172,40 @@ export class TrainingDiscovery {
   private finish(escaped: boolean, dead: boolean) {
     const e = this.memory.pending;
     if (!e) return;
+    if(this.memory.adaptive?.pending)finishEncounter(this.memory.adaptive,dead?'death':escaped?'retreat':'unresolved',this.now());
     const site = this.memory.sites[e.siteId];
-    if (site) {
+    if (site && !e.mixed) {
       const stats = site.stats[e.context] ??= outcomes();
       stats.encounters++; stats.kills += Number(e.confirmedKill); stats.productive += Number(e.xp > 0 && !escaped && !dead);
       stats.xp += e.xp; stats.ticks += e.ticks; stats.damage += e.damage; stats.food += e.food; stats.ammo += e.ammo; stats.escapes += Number(escaped); stats.deaths += Number(dead);
       if (escaped || dead) this.block(site.id, dead ? 'death-observed' : 'retreat-observed', dead ? 30 * 60_000 : 5 * 60_000);
       else if (e.xp > 0) { site.observationPasses = 0; if (this.memory.commitment?.siteId === site.id) this.memory.commitment.encounters++; }
     }
+    if(site&&e.mixed&&(escaped||dead))this.block(site.id,dead?'death-observed':'retreat-observed',dead?30*60_000:5*60_000);
     delete this.memory.pending;
   }
   beforeAction(s: any, action: Action) {
+    this.lastAdaptiveState=structuredClone(s);
+    if(action.type!=='interactNpc')return;
+    if(action.id.startsWith('training-attack-')&&this.memory.pending)this.finish(false,false);
+    const observed=s.nearbyNpcs?.find((n:any)=>n.index===action.fields?.npcIndex);
+    if(this.adaptive.settings().recording&&observed?.optionsWithIndex?.some((o:any)=>o.opIndex===action.fields?.optionIndex&&/^attack$/i.test(o.text))){
+      const site=action.fields?.trainingSite??'observed:'+observed.id+':'+s.player?.level+':'+Math.floor(Number(s.player?.worldX)/16)+':'+Math.floor(Number(s.player?.worldZ)/16);
+      const tag=this.adaptive.attackTag(s,observed,site,this.selectedSkill??(this.ranged?'ranged':'strength'));
+      beginEncounter(this.memory.adaptive!,s,observed,site,this.character,this.catalog.namespace,this.adaptive.session,this.now(),tag);this.save();
+    }
     if (!action.id.startsWith('training-attack-')) return;
-    if (this.memory.pending) this.finish(false, false);
     const n = s.nearbyNpcs?.find((n: any) => n.index === action.fields?.npcIndex), siteId = action.fields?.trainingSite;
     if (!n || !this.monster(n) || !this.memory.sites[siteId]) return;
     this.memory.pending = { siteId, index: n.index, monsterId: n.id, life: s.player.lifeId, tick: s.tick, context: context(s, this.ranged), xp: 0, ticks: 0, damage: 0, food: 0, ammo: 0, confirmedKill: false, ownPlayerIndex:observedPlayerIndex(s.player?.index),lastObservedTick:s.tick };
   }
   afterAction(before: any, after: any, action: Action) {
+    if(this.adaptive.settings().recording)observeEncounter(this.memory.adaptive!,before,after,action,this.now());
+    else if(this.memory.adaptive?.pending)finishEncounter(this.memory.adaptive,'interrupted',this.now());
     this.recordTrip(before,after,action);
+    this.lastAdaptiveState=structuredClone(after);
     const e = this.memory.pending;
+    if(e&&(context(before,this.ranged)!==e.context||context(after,this.ranged)!==e.context))e.mixed=true;
     if (e && after.tick>(e.lastObservedTick??e.tick)) {
       e.lastObservedTick=after.tick;
       const dead = after.player?.isDead || after.player?.lifeId !== e.life || Number(after.player?.respawnCount ?? 0) > Number(before.player?.respawnCount ?? 0);
@@ -202,6 +228,8 @@ export class TrainingDiscovery {
       if(!fighting)e.clearedTick??=after.tick;
       if (dead || reset || reused || action.type === 'retreat' || e.confirmedKill || (!fighting && after.tick >= (e.clearedTick??after.tick) + 3)) this.finish(action.type === 'retreat', !!dead);
     }
+    const pending=this.memory.adaptive?.pending;
+    if(pending&&!this.memory.pending&&after.player?.combat?.inCombat!==true&&after.tick>pending.startTick+6)finishEncounter(this.memory.adaptive!,'unresolved',this.now());
     this.observe(after); this.save();
   }
   block(siteId: string, reason: string, duration = 5 * 60_000) {
@@ -221,7 +249,11 @@ export class TrainingDiscovery {
     if (this.routeCache.size > 128) this.routeCache.delete(this.routeCache.keys().next().value!);
     return route;
   }
-  private score(site: Site, s: any, cost: number) {
+  private score(site:Site,s:any,cost:number) {
+    const base=this.baseScore(site,s,cost),decision=readinessDecision(this.memory.adaptive!,{...s,__adaptiveAgent:this.character},this.catalog.namespace,site.monsterId,site.id,this.selectedSkill??(this.ranged?'ranged':'strength'));
+    return base+(this.adaptive.settings().decisions==='on'?decision.score:0);
+  }
+  private baseScore(site: Site, s: any, cost: number) {
     const m = this.catalog.monsters.find(m => m.id === site.monsterId)!;
     const stats = site.stats[context(s, this.ranged)];
     const trip=site.tripStats?.[context(s,this.ranged)+':target-'+(this.selectedSkill??(this.ranged?'ranged':'strength'))];
@@ -261,16 +293,19 @@ export class TrainingDiscovery {
     if (now - this.memory.exploration.window >= 10 * 60_000) this.memory.exploration = { window: now, trips: 0 };
     let candidates = Object.values(this.memory.sites).filter(site => {
       const m = this.catalog.monsters.find(m => m.id === site.monsterId);
-      return m && site.cooldownUntil <= now && !trainingReadiness(s, m, this.ranged, this.foodTarget) && site.points.some(p => p.level === origin.level);
+      return m && this.adaptive.candidateReview(s,m.id,m.combatLevel).eligible && site.cooldownUntil <= now && !trainingReadiness(s, m, this.ranged, this.foodTarget) && site.points.some(p => p.level === origin.level);
     });
     // Harder monsters are trials, not mandates. Sparse comparable evidence
     // gets a small, decaying bonus; measured risk and throughput remain decisive.
     const tierBias = (site: Site) => 1 / Math.sqrt(1 + (site.stats[context(s,this.ranged)]?.encounters ?? 0));
     const viable = candidates.sort((a, b) => tierBias(b) + this.score(b, s, Math.min(...b.points.map(p => distance(origin, p)))) - tierBias(a) - this.score(a, s, Math.min(...a.points.map(p => distance(origin, p)))));
     const commitment = this.memory.commitment;
+    const experiment=this.adaptive.check(s,this.selectedSkill??(this.ranged?'ranged':'strength'));
+    const experimentalSite=experiment&&viable.find(site=>site.id===experiment.siteId);
+    if(experiment&&!experimentalSite)abortExperiment(this.memory.adaptive!,'Benchmark is no longer independently eligible.',this.now());
     const committed = viable.find(site => site.id === commitment?.siteId);
     const hold = committed && commitment && (now - commitment.since < 180_000 || commitment.encounters < 3) && now - commitment.since < 600_000;
-    const ordered = hold ? [committed] : [...(committed ? [committed] : []), ...viable.filter(v => v !== committed)].slice(0, 8);
+    const ordered = experimentalSite ? [experimentalSite] : hold ? [committed] : [...(committed ? [committed] : []), ...viable.filter(v => v !== committed)].slice(0, 8);
     const choices: { site: Site; point: Tile; cost: number; score: number }[] = [];
     let loading = false;
     for (const site of ordered) {
@@ -301,9 +336,11 @@ export class TrainingDiscovery {
     let chosen = choices[0];
     const current = choices.find(c => c.site.id === commitment?.siteId);
     // After minimum residence, a small score fluctuation still cannot cause hopping.
-    if (current && (hold || !chosen || chosen.score < current.score + 1.5)) chosen = current;
+    if (!experimentalSite && current && (hold || !chosen || chosen.score < current.score + 1.5)) chosen = current;
     if (!chosen) { this.memory.retryAt = now + 30_000; return wait('no-viable-reachable-site'); }
     const { site, point } = chosen;
+    this.memory.adaptive!.lastDecision={at:now,siteId:site.id,targetId:site.monsterId,progression:this.adaptive.candidateReview(s,site.monsterId,site.combatLevel),skill:this.selectedSkill,mode:this.adaptive.settings().decisions,sharedEvidence:this.adaptive.sharedHints(site.monsterId,site.id),
+      ...readinessDecision(this.memory.adaptive!,{...s,__adaptiveAgent:this.character},this.catalog.namespace,site.monsterId,site.id,this.selectedSkill??(this.ranged?'ranged':'strength'))};
     if (this.memory.commitment?.siteId !== site.id) {
       if (!site.sightings) this.memory.exploration.trips++;
       this.memory.commitment = { siteId: site.id, since: now, encounters: 0 };
@@ -312,6 +349,9 @@ export class TrainingDiscovery {
     this.memory.status = { selectedSite: site.id, source: site.source, guideIds: site.guideIds, routeCost: chosen.cost, score: chosen.score, predictedReachable: true, liveVerified: false, guideLeads:inspectTrainingLeads(leadIds,this.catalog.sites.map(s=>s.id)) };
     const target = (s.nearbyNpcs ?? []).filter((n: any) => this.monster(n)?.id === site.monsterId && n.hp !== 0 && n.reachable === true && n.inCombat !== true && Number(n.distance) <= 8 && n.optionsWithIndex?.some((o: any) => /^attack$/i.test(o.text)) && site.points.some(p => distance(p, { x: n.tileX ?? n.x, z: n.tileZ ?? n.z, level: s.player.level }) <= 20)).sort((a: any, b: any) => a.distance - b.distance)[0];
     if (target) {
+      this.adaptive.propose(s,target,site.id,this.selectedSkill??(this.ranged?'ranged':'strength'),this.memory.trip?.goalKey??'current-combat-objective');
+      const kit=this.adaptive.gearAction(s,this.selectedSkill??(this.ranged?'ranged':'strength'));
+      if(kit.action){this.save();return [kit.action];}
       site.observationPasses = 0; delete site.emptySinceTick; this.save();
       return [{ id: `training-attack-${site.id}`, type: 'interactNpc', fields: { npcIndex: target.index, optionIndex: target.optionsWithIndex.find((o: any) => /^attack$/i.test(o.text)).opIndex, trainingSite: site.id }, waitTicks: 6 }];
     }

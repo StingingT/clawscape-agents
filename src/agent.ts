@@ -15,6 +15,7 @@ import { loadBuildRules } from './agency/build-rules.ts';
 import { TrainingDiscovery, trainingReadiness } from './training/discovery';
 import { acquireController } from './controller-lease';
 import { callSkill } from './skill-cli';
+import { cliActionFields } from './cli-action-fields.ts';
 import { actionReady } from './action-cooldown';
 import { advanceFoodBatch, loweDoor, rawFish, bankFood, type FoodBatch } from './food-batch';
 import { mustEscape } from './escape-policy';
@@ -39,13 +40,17 @@ import { beginActionIntent, finishActionIntent, loadActionIntent, type ActionInt
 import { verifyActionOutcome } from './action-outcome';
 import { observeWorld, recordRouteResult } from './shared-world';
 import { recoverLegacyJournals } from './agency/journal-recovery.ts';
-import { LiveAgency, isSelection, type Selection, type Verification } from './agency/live-adapter.ts';
+import { LiveAgency, isSelection, neutralInterfaceRecovery, stateProvesAcknowledgementStillRequired, type Selection, type Verification } from './agency/live-adapter.ts';
+import { observedGatheringActions, observedMissingGatheringTool } from './agency/observed-gathering.ts';
+import { StatusReporter } from './agency/status-report.ts';
+import { freshObservedLocAction, observedDiscoveryTransition, productiveProductionCandidates, safeResourceDialogOption, taskMustCloseInheritedBank, taskOwnsBankExecutor } from './agency/actionability.ts';
 import type { Task, TaskKind, Route } from './agency/world-model.ts';
 import { acquisitionActions, type AcquisitionHint } from './agency/acquisition.ts';
 import { incidentalBankable } from './agency/incidental.ts';
 import { loadDropIndex } from './agency/drop-leads.ts';
 import { bindItems, resolveItems, MissingItem, type ItemRef } from './agency/item-intents.ts';
 import { randomUUID } from 'node:crypto';
+import { workerMode, checkWorkerStart } from './team/worker.ts';
 
 type Json = Record<string, unknown>;
 type GameState = {
@@ -167,6 +172,7 @@ let training: TrainingDiscovery | undefined;
 let travelAction: Candidate | null = null;
 let peerMarket: PeerMarket | undefined;
 let agency: LiveAgency | undefined;
+const plannerStatusReporter = new StatusReporter();
 let marketRetryAt=0;
 const workPath = resolve(dataDir, 'work-state.json');
 const actionIntentPath = resolve(dataDir, 'action-intent.json');
@@ -498,20 +504,21 @@ async function discussForumProblem(message: string): Promise<void> {
 }
 
 function economyCandidates(state: GameState): Candidate[] {
-  if ((state.inventory?.length ?? 0) >= 28) return [];
-  const result: Candidate[] = [];
-  for (const loc of state.nearbyLocs ?? []) {
-    const name = text(loc.name);
-    // Do not continually interrupt gathering or attempt locked skill tiers.
-    if (harvestLevel(name) > level(state, 'woodcutting')) continue;
-    if (!(state.inventory ?? []).concat(state.equipment ?? []).some(i => /axe/i.test(text(i.name)) && !/pickaxe/i.test(text(i.name)))) continue;
-    const options = Array.isArray(loc.optionsWithIndex) ? loc.optionsWithIndex as Json[] : [];
-    const action = options.find((option) => /chop|mine|fish|thieve|steal/i.test(text(option.text)));
-    if (loc.reachable === true && action && typeof loc.x === "number" && typeof loc.z === "number" && typeof loc.id === "number" && typeof action.opIndex === "number") {
-      result.push({ id: "economy-" + name + "-" + loc.id + "-" + loc.x + "-" + loc.z, type: "interactLoc", fields: { x: loc.x, z: loc.z, locId: loc.id, optionIndex: action.opIndex }, waitTicks: 5 });
-    }
-  }
-  return result.sort((a, b) => Number((state.nearbyLocs ?? []).find(l => l.id === a.fields?.locId && l.x === a.fields?.x)?.distance ?? 99) - Number((state.nearbyLocs ?? []).find(l => l.id === b.fields?.locId && l.x === b.fields?.x)?.distance ?? 99));
+  return observedGatheringActions(state,level(state,'woodcutting')) as Candidate[];
+}
+
+/** Resolve an observed missing tool only through a source the agent already
+ * owns or has personally observed.  Resource scenery is evidence of a tool
+ * category, never authority to invent a shop, route, or item tier. */
+function observedGatheringToolPreparation(state: GameState): {id?:number;name:string;minimum:number}|undefined {
+  const missing=observedMissingGatheringTool(state);
+  if(!missing)return;
+  const matches=(name:unknown)=>missing.tool==='pickaxe'
+    ?/\bpickaxe\b/i.test(String(name))
+    :/\b(?:axe|hatchet)\b/i.test(String(name))&&!/\b(?:pickaxe|battleaxe)\b/i.test(String(name));
+  const sources=[...(state.bank?.isOpen===true?state.bank.items??[]:[]),...(work.bankItems??[]),...(state.shop?.isOpen===true?state.shop.shopItems??[]:[])];
+  const tool=sources.find((item:any)=>Number(item?.count??0)>0&&Number.isInteger(item?.id)&&matches(item.name));
+  return tool?{id:Number(tool.id),name:String(tool.name),minimum:1}:undefined;
 }
 
 const arrowRank = (name: string): number => {
@@ -753,16 +760,11 @@ function bankingCandidates(state: GameState, task?: Task): Candidate[] {
   // arrowheads, food or exploration supplies while Stinger searches for the
   // remaining recipe inputs.
   const excessArrowInputs = inventory.some(item => /arrow shaft/i.test(text(item.name)) && Number(item.count ?? 0) >= 100);
-  const recoveryCash = role !== 'economy' && !inventory.some(isFood) && !inventory.some(i => /small fishing net/i.test(String(i.name))) && coins < 5;
   // A full inventory is banked only when it actually holds materials. This
   // avoids pointless banking trips with nothing but essential equipment.
   const bank = state.bank ?? {};
   if (bank.isOpen === true) {
     work.bankItems = Array.isArray(bank.items) ? bank.items as Json[] : []; saveWork();
-    if(character==='stinger' && !inventory.some(i=>/small fishing net/i.test(String(i.name))) && coinsIn(inventory)<5) {
-      const cash=work.bankItems.find(i=>/^coins$/i.test(String(i.name))&&Number(i.count)>0);
-      if(cash)return [{id:'withdraw-net-budget',type:'bankWithdraw',fields:{slot:cash.slot,amount:Math.min(50,Number(cash.count))},waitTicks:2}];
-    }
     if (work.foodWithdrawalPending === 'raw' && inventory.some((item) => /^raw /i.test(String(item.name)))) {
       work.foodBatch = {phase: 'cook', startedAt: Date.now()}; saveWork();
       return [{ id: 'close-bank-to-cook-withdrawn-fish', type: 'closeModal', fields: { reason: 'cook the raw fish batch withdrawn from the bank' }, waitTicks: 1 }];
@@ -795,8 +797,6 @@ function bankingCandidates(state: GameState, task?: Task): Candidate[] {
     }
     const net = work.bankItems.find(i => /small fishing net/i.test(String(i.name)));
     if (role !== 'economy' && !inventory.some(isFood) && !inventory.some(i => /small fishing net/i.test(String(i.name))) && net) return [{ id: 'withdraw-food-tool', type: 'bankWithdraw', fields: { slot: net.slot, amount: 1 }, waitTicks: 2 }];
-    const bankCoins = work.bankItems.find(i => /^coins$/i.test(String(i.name)));
-    if (role !== 'economy' && !inventory.some(isFood) && coins < 5 && bankCoins) return [{ id: 'withdraw-recovery-cash', type: 'bankWithdraw', fields: { slot: bankCoins.slot, amount: Math.min(50, Number(bankCoins.count)) }, waitTicks: 2 }];
     if (work.foodBatch?.phase === 'bank') { delete work.foodBatch; saveWork(); }
     return [{ id: "close-bank-after-deposit", type: "closeModal", fields: { reason: "resume work after banking" }, waitTicks: 1 }];
   }
@@ -804,7 +804,7 @@ function bankingCandidates(state: GameState, task?: Task): Candidate[] {
   // Bank a near-full bag of materials before processing it, while still
   // retaining a deliberate food trip until the bag is genuinely full.
   const nearFullMaterials = inventory.length >= (task?.kind==='gathering'?Number(state.capacity??28):Number(state.capacity??28)-1) && bankableItems.length > 0;
-  if ((!inventoryFull || bankableItems.length === 0) && !nearFullMaterials && !urgentClutter && !excessArrowInputs && (surplusFood === 0||task?.kind==='gathering') && surplusCoins === 0 && !recoveryCash) return [];
+  if ((!inventoryFull || bankableItems.length === 0) && !nearFullMaterials && !urgentClutter && !excessArrowInputs && (surplusFood === 0||task?.kind==='gathering') && surplusCoins === 0) return [];
   const banker = (state.nearbyNpcs ?? []).find((npc) => npc.reachable === true && /banker/i.test(text(npc.name)) && typeof npc.index === "number");
   if (banker) {
     const option = (banker.optionsWithIndex as Json[] | undefined)?.find((item) => /bank|use/i.test(text(item.text)));
@@ -1199,26 +1199,70 @@ function localNavigationExperiments(state:GameState):Candidate[] {
     const distance=Math.max(Math.abs(Number(p.worldX)-loc.x),Math.abs(Number(p.worldZ)-loc.z));
     const samePlane=Number(loc.level??p.level??0)===Number(p.level??0);
     if(loc.reachable!==true&&!(samePlane&&distance<=1))return [];
-    const option=(loc.optionsWithIndex??[]).find((o:any)=>/^(open|climb(?:-up|-down)?|enter|cross|use)$/i.test(String(o.text)));
+    // "Use" is too ambiguous to be evidence of a traversable transition: it
+    // commonly opens a service interface.  Local navigation experiments must
+    // be limited to actions whose semantics explicitly describe access.
+    const option=(loc.optionsWithIndex??[]).find((o:any)=>/^(open|climb(?:-up|-down)?|enter|cross)$/i.test(String(o.text)));
     if(!option)return [];
     return [{loc,option,distance}];
   }).filter(v=>v.distance<=3).sort((a,b)=>a.distance-b.distance||a.loc.id-b.loc.id||a.loc.x-b.loc.x||a.loc.z-b.loc.z);
   return candidates.slice(0,8).map(chosen=>({id:`navigation-experiment-${chosen.loc.id}-${chosen.loc.x}-${chosen.loc.z}-${chosen.option.opIndex}`,type:'interactLoc',
     fields:{x:chosen.loc.x,z:chosen.loc.z,locId:chosen.loc.id,optionIndex:chosen.option.opIndex,
+      expectedEffect:'world-transition',
       reason:'test a nearby observed transition or obstruction before abandoning the route'},waitTicks:2}));
+}
+
+/**
+ * Collision planning can establish that a nearby edge crosses a door before
+ * the compact live observation exposes that object's id/options.  Ask for one
+ * fresh local observation before attempting the walk; after it, normal
+ * observed-object discovery owns the interaction.  This is intentionally
+ * derived from the current plan and state, never a named world object.
+ */
+function plannedTransitionObservation(state:GameState, doors:unknown):Candidate|undefined {
+  if(!Array.isArray(doors))return;
+  const p=state.player??{};
+  const door=(doors as any[]).find(d=>Number(d?.level??p.level??0)===Number(p.level??0)
+    &&Number.isInteger(d?.x)&&Number.isInteger(d?.z)
+    &&Math.max(Math.abs(Number(p.worldX)-Number(d.x)),Math.abs(Number(p.worldZ)-Number(d.z)))<=4);
+  if(!door)return;
+  const observed=(state.nearbyLocs??[]).some((loc:any)=>Number(loc.x)===Number(door.x)&&Number(loc.z)===Number(door.z)
+    &&Number(loc.level??p.level??0)===Number(door.level??p.level??0)
+    &&(loc.optionsWithIndex??[]).some((o:any)=>/^(open|climb(?:-up|-down)?|enter|cross)$/i.test(String(o.text))));
+  if(observed)return;
+  return {id:`observe-planned-transition:${door.x}:${door.z}:${door.level??p.level??0}`,type:'scanNearbyLocs',
+    fields:{radius:8,reason:'refresh metadata for a nearby collision-planned transition before attempting its edge'},waitTicks:2};
 }
 
 /** Task-specific executors are asked for actions only AFTER the Director chooses a goal. */
 async function actionsForTask(state: GameState, task: Task): Promise<Candidate[]> {
   if (state.player?.isDead === true) return [];
   if (state.player?.combat?.inCombat === true) return [{id:'continue-combat',type:'wait',waitTicks:2}];
-  if (state.modalOpen === true && state.inventory?.length === 0) return [{id:'accept-design',type:'acceptCharacterDesign',waitTicks:2}];
+  // A bank/shop also presents as a modal in this client. Only the narrower
+  // state predicate proves an appearance acknowledgement is appropriate.
+  if (stateProvesAcknowledgementStillRequired({id:'accept-design',type:'acceptCharacterDesign'},state))
+    return [{id:'accept-design',type:'acceptCharacterDesign',waitTicks:2}];
+  if(task.sourceResource)return (await agency.sourceActions(task,state,{bank:bankAt,
+    route:p=>navigator!.assessApproach(position(state),p)})).map(a=>({...a,waitTicks:a.waitTicks??2}));
   if (state.dialog?.isOpen === true) {
+    if(task.kind==='gathering') {
+      const optionIndex=safeResourceDialogOption(state.dialog.options);
+      if(optionIndex!==undefined)return [{id:`select-observed-resource-dialog-${optionIndex}`,type:'clickDialogOption',
+        fields:{optionIndex,resourceDialog:true,reason:'continue the single observed low-risk gathering action'},waitTicks:4}];
+    }
     if(task.kind==='production'&&work.economy){
       const metal=metalDialog(state,work.economy);if(metal)return [metal];
       const product=work.economy.product&&productionDialog(state.dialog.options??[],work.economy.product);
       if(product&&Number.isInteger(product.index))return [{id:'select-planned-product',type:'clickDialogOption',fields:{optionIndex:product.index},waitTicks:4}];
     }
+    // A dialog opened by an unrelated object is evidence about that object,
+    // not permission to select an arbitrary choice.  In particular, a bank
+    // booth can expose a dialogue while a discovery goal is active.  Only an
+    // explicitly planned production dialog has a goal-correlated option;
+    // every other dialog is closed and the original task is reviewed from
+    // the resulting world state.
+    if(task.kind!=='production')return [{id:'close-unplanned-dialog',type:'closeModal',waitTicks:1,
+      fields:{reason:'an unplanned dialogue cannot verify the active goal'}}];
     return dialogCandidates(state);
   }
   if ((state.inventory?.length ?? 0) === 0) {
@@ -1242,7 +1286,20 @@ async function actionsForTask(state: GameState, task: Task): Promise<Candidate[]
     if(result.reason)agency!.blocked(result.reason);
     return result.actions as Candidate[];
   }
-  if (state.bank?.isOpen === true) { const transaction=bankingCandidates(state,task);return transaction.length?transaction:[{id:'close-bank',type:'closeModal',waitTicks:1}]; }
+  // A selected production method owns its own bank protocol. Letting the
+  // generic safety/clutter routine run first can turn a crafting objective
+  // into withdraw/deposit coin churn without ever reaching its inputs.
+  if (state.bank?.isOpen === true&&taskMustCloseInheritedBank(task)) {
+    // A bank interface left open by an earlier activity is not a prerequisite
+    // for survey, combat, gathering, prayer, or exploration. Close it before
+    // executing that goal rather than turning unrelated deposits/withdrawals
+    // into apparent progress.
+    return [{id:'close-unneeded-bank-for-task',type:'closeModal',fields:{reason:`resume ${task.kind} goal; bank has no verified prerequisite`},waitTicks:1}];
+  }
+  if (state.bank?.isOpen === true&&!taskOwnsBankExecutor(task.kind)) {
+    const transaction=bankingCandidates(state,task);
+    return transaction.length?transaction:[{id:'close-bank',type:'closeModal',waitTicks:1}];
+  }
   switch(task.kind) {
     case 'food': return productionCandidates(state,true,task.target?.minimum);
     case 'ammunition': {
@@ -1264,8 +1321,10 @@ async function actionsForTask(state: GameState, task: Task): Promise<Candidate[]
     }
     case 'combat': {
       if(!state.combatStyle?.styles?.some((s:any)=>s.trainsSkills?.some((k:string)=>k.toLowerCase()===task.skill)))return [];
+      const investigation=training?.equipmentTrial?.(state,task.skill);
+      if(investigation?.action)return [investigation.action];
       const gear=gearCandidates(state,task.skill);
-      if(gear.length)return gear;
+      if(gear.length&&!investigation?.holdEquipment)return gear;
       return training ? training.next(state,(from,to)=>navigator!.assess(from,to),task.guideLeadIds,task.skill,task.foodTarget??0) : [];
     }
     case 'prayer': {
@@ -1279,21 +1338,46 @@ async function actionsForTask(state: GameState, task: Task): Promise<Candidate[]
       work.economy.tripFoodTarget=task.foodTarget??0;
       selectWork(state,work.economy);
       const result=economyNext(state,work.economy,id=>!actionReady(work.failures[id]));
-      saveWork(); return result;
+      saveWork(); return productiveProductionCandidates(state,result) as Candidate[];
     }
     case 'gathering': {
       if((state.inventory?.length??0)>=Number(state.capacity??28))return bankAt(state);
-      return [...economyCandidates(state),...localEconomyDiscovery(state)];
+      const actions=[...economyCandidates(state),...localEconomyDiscovery(state)];
+      if(actions.length)return actions;
+      const need=observedGatheringToolPreparation(state);
+      if(need){agency!.requestItem(need,state,'A reachable resource exposed a missing gathering tool; obtain it only through an already observed own source.');return [];}
+      return [];
     }
     case 'exploration': {
       if(!task.route)return [];
       const route=await navigator!.assessApproach(position(state),task.route);
       if(route.status==='loading-map')return [{id:'observe-map-load',type:'wait',waitTicks:2}];
       if(route.status!=='ready') {
+        // An exact route can stop at a collision-covered frontier.  Travel only
+        // to that verified endpoint, then let the normal fresh-observation
+        // discovery loop inspect any door, ladder, or entrance it reveals.
+        // This is not arrival at the survey target and carries no success
+        // credit until the original route is actually completed.
+        const frontier=await navigator!.assessFrontier(position(state),task.route);
+        if(frontier.status==='loading-map')return [{id:'observe-map-load',type:'wait',waitTicks:2}];
+        if(frontier.status==='frontier')return [{id:`frontier:${task.id}:${frontier.destination.x}:${frontier.destination.z}:${frontier.destination.level}`,
+          type:'walkTo',fields:{...frontier.destination,running:true,frontierFor:task.route.id,reason:frontier.reason},waitTicks:2}];
         const experiment=localNavigationExperiments(state);
         if(experiment.length)return experiment;
+        // Refresh the local observation once before declaring a collision gap a
+        // route failure.  A scan can reveal a newly observed door/ladder, but it
+        // is not itself progress and is bounded by the persisted route attempt.
+        if(agency!.needsSurveyObservation(task.route,state))return [{id:`observe-survey:${task.route.id}`,type:'scanNearbyLocs',
+          fields:{radius:12,surveyRouteId:task.route.id,reason:'refresh the observed local environment before deferring an unverified route'},waitTicks:2}];
         agency!.deferSurvey(task.route,state,route.reason??'No verified survey approach');return [];
       }
+      // A collision-planned transition may need a fresh live metadata scan,
+      // but it is still a survey observation.  Gate it through the persisted
+      // route observation record so a door that remains absent from the
+      // compact observation cannot generate an endless read-only scan loop.
+      const transitionScan=agency!.needsSurveyObservation(task.route,state)
+        ?plannedTransitionObservation(state,(route as any).doors):undefined;
+      if(transitionScan)return [transitionScan];
       return [{id:task.id,type:'walkTo',fields:{...route.destination,running:true,reason:task.route.evidence},waitTicks:2}];
     }
     case 'discovery': {
@@ -1302,8 +1386,7 @@ async function actionsForTask(state: GameState, task: Task): Promise<Candidate[]
         return task.id===`discover:discovered:interaction:${f.locId}:${f.x}:${f.z}:${f.level??state.player?.level??0}:${f.optionIndex}`;
       });
       if(experiment.length)return experiment;
-      const target=(state.nearbyLocs??[]).find((loc:any)=>loc.reachable===true&&(loc.optionsWithIndex??[]).some((o:any)=>
-        task.id===`discover:discovered:interaction:${loc.id}:${loc.x}:${loc.z}:${loc.level??state.player?.level??0}:${o.opIndex}`));
+      const target=observedDiscoveryTransition(state,task.id);
       if(!target)return []; // A vanished observation is not authority for a guessed interaction.
       const endpoint=await navigator!.assessApproach(position(state),{x:Number(target.x),z:Number(target.z),level:Number(target.level??state.player?.level??0)});
       if(endpoint.status==='loading-map')return [{id:'observe-discovery-route-load',type:'wait',waitTicks:2}];
@@ -1331,10 +1414,12 @@ async function executeAgencyAction(state:GameState,action:Candidate):Promise<{ne
   if(action.type==='wait') {
     const result=await cliCall(['wait',String(action.waitTicks)]);return {next:stateFrom(result),result};
   }
-  const fields:Json={...action.fields,reason:action.fields?.reason??action.id};
-  for(const key of ['trainingSite','goalMethod','defensiveGoal','expectedItemId','evidence','id'])delete fields[key];
-  if(action.type==='shopBuy'||action.type==='shopSell'){delete fields.itemId;delete fields.expectedPrice;}
   const type=action.type==='closeModal'&&state.shop?.isOpen?'closeShop':action.type;
+  // `fields` can include controller-only evidence such as expectedEffect. The
+  // CLI rejects unknown packet keys, which would otherwise leave an outcome
+  // unknown and pin the agent in reconciliation. Preserve that evidence in the
+  // receipt, but dispatch only the documented game action shape.
+  const fields:Json=cliActionFields(type,action.fields);
   const result=await cliCall(['act',type,'--json',JSON.stringify(fields)]);
   if(result.accepted===false||result.phase==='rejected'||result.success===false&&result.reason==='action_in_progress')return {next:state,result};
   return {next:stateFrom(await cliCall(['wait',String(action.waitTicks)])),result};
@@ -1385,6 +1470,9 @@ async function runEpisode(): Promise<void> {
     state=stable;
   }
   for(let step=0;step<steps;step++) {
+    const teamMode=workerMode(character);
+    if(teamMode==='stopped')break;
+    if(teamMode==='paused'){await Bun.sleep(700);step--;continue;}
     state=stateFrom(await cliCall(['state']));
     training?.observe(state);
     agency.catalogue(state);
@@ -1400,6 +1488,7 @@ async function runEpisode(): Promise<void> {
       const commandId=agency.beginSafety(emergency,state,randomUUID());
       try {
         const {next,result}=await executeAgencyAction(state,emergency);
+        training?.afterAction?.(state,next,emergency);
         agency.rememberExecution(commandId,result);
         agency.record(commandId,next,verification(verifyActionOutcome(state,next,emergency,result)));
         state=next;
@@ -1424,9 +1513,38 @@ async function runEpisode(): Promise<void> {
       if(check.verified)observeAgencyResult(pending.before,state,pending.action as Candidate);
     }
     // No legacy action candidates or synthetic per-click goals are constructed before this selection.
+    // A bounded no-executor episode may have been recorded while a service UI
+    // was open. Close only a non-transactional bank/shop interface through the
+    // normal intent journal, then re-observe and let planning start fresh.
+    const interfaceRecovery=agency.blockedInterfaceRecovery(state);
+    if(interfaceRecovery) {
+      const commandId=agency.beginSafety(interfaceRecovery,state,randomUUID());
+      try {
+        const {next,result}=await executeAgencyAction(state,interfaceRecovery);
+        agency.rememberExecution(commandId,result);
+        agency.record(commandId,next,verification(verifyActionOutcome(state,next,interfaceRecovery,result)));
+        state=next;
+      } catch(error) {
+        agency.record(commandId,state,{status:'unknown',evidence:[],reason:String(error)});
+      }
+      continue;
+    }
+    // Collision data is built asynchronously.  Do not create and immediately
+    // settle a route intent while it is unavailable: that records repeated
+    // read-only map preparations as apparent route work.  Safety and neutral
+    // interface recovery have already been considered above.
+    if(navigator?.isReady && !navigator.isReady()) {
+      state=stateFrom(await cliCall(['wait','3']));
+      continue;
+    }
     const planned=agency.plan(state);
     if(!isSelection(planned)) {
-      console.log(JSON.stringify({agency:planned.type,detail:planned,goal:agency.summary().goal}));
+      const goal=agency.summary().goal;
+      // A bounded recheck is deliberately quiet between observation points.
+      // Keep a first/changed report plus a minute heartbeat for diagnostics.
+      const report={agency:planned.type,detail:planned,goal};
+      const reportKey=JSON.stringify({type:planned.type,reason:planned.reason,goal:goal?.id});
+      if(plannerStatusReporter.shouldReport(reportKey))console.log(JSON.stringify(report));
       const blockedAfter=stateFrom(await cliCall(['wait','3']));
       // The same semantic clock serves both the executor and blocked planner.
       agency.checkProgress(blockedAfter);
@@ -1435,12 +1553,58 @@ async function runEpisode(): Promise<void> {
     }
     training?.beginTrial?.(state,planned.decision.goal);
     const committedRoute=agency.routeStep(planned,state);
-    const options=available(committedRoute?[committedRoute as Candidate]:await actionsForTask(state,planned.task)).filter(a=>agency!.eligible(a,state));
+    const rawOptions=available(committedRoute?[committedRoute as Candidate]:await actionsForTask(state,planned.task));
+    const options=rawOptions.filter(a=>agency!.eligible(a,state));
     if(!options.length){
-      if(planned.task.kind==='exploration'&&planned.task.route){
+      // A service view left open by a prior attempt must not turn a valid
+      // strategic selection into an executor-capability episode merely because
+      // the ordinary close action is inside its retry cooldown. Closing an
+      // observed, neutral interface moves no value and is journalled as safety;
+      // after a fresh observation the planner chooses again.
+      const neutralClose=rawOptions.find(action=>neutralInterfaceRecovery(state,action));
+      if(neutralClose){
+        const commandId=agency.beginSafety(neutralClose,state,randomUUID());
+        try {
+          const {next,result}=await executeAgencyAction(state,neutralClose);
+          agency.rememberExecution(commandId,result);
+          agency.record(commandId,next,verification(verifyActionOutcome(state,next,neutralClose,result)));
+          state=next;
+        } catch(error) {
+          agency.record(commandId,state,{status:'unknown',evidence:[],reason:String(error)});
+        }
+        continue;
+      }
+      // A concrete action that is temporarily retry-throttled is not an
+      // executor gap. Keep the committed goal, re-observe quietly, and let
+      // the existing retry clock decide when a fresh attempt is allowed. This
+      // prevents safe backoff after a rejected resource/route interaction
+      // from being misclassified as an idle capability episode.
+      const exhaustedRetry=rawOptions.length>0&&rawOptions.every(action=>agency!.retryExhausted(action,state));
+      if(rawOptions.length&&!exhaustedRetry){
+        const report={agency:'action-backoff',task:planned.task.id,method:planned.method.id,
+          actions:rawOptions.map(action=>({id:action.id,type:action.type})),reason:'all concrete actions are awaiting their persisted retry evidence window'};
+        if(plannerStatusReporter.shouldReport(JSON.stringify(report)))console.log(JSON.stringify(report));
+        // A longer read-only interval prevents an action cooldown from creating
+        // a high-frequency observation loop while preserving prompt safety and
+        // receipt reconciliation on the next controller step.
+        state=stateFrom(await cliCall(['wait','5']));
+        continue;
+      }
+      if(exhaustedRetry)console.log(JSON.stringify({agency:'action-exhausted',task:planned.task.id,method:planned.method.id,
+        reason:'Repeated identical action outcome exhausted; replan from current evidence rather than wait for another cooldown.'}));
+      console.log(JSON.stringify({agency:'executor-empty',task:{id:planned.task.id,kind:planned.task.kind,route:planned.task.route},
+        method:planned.method.id,interfaces:{bank:state.bank?.isOpen===true,shop:state.shop?.isOpen===true,dialog:state.dialog?.isOpen===true},
+        nearby:{locs:(state.nearbyLocs??[]).length,npcs:(state.nearbyNpcs??[]).length,groundItems:(state.groundItems??[]).length},
+        inventory:(state.inventory??[]).length,bankItems:(state.bank?.items??[]).length}));
+      // actionsForTask may already have recorded a concrete survey refusal
+      // (collision coverage, wrong plane, or a missing local transition). Do
+      // not replace that evidence with a generic "no executor" message: the
+      // next bounded recovery and Herdr diagnosis need the real capability gap.
+      const stillActive=agency.summary().goal?.id===planned.task.id;
+      if(planned.task.kind==='exploration'&&planned.task.route&&stillActive){
         agency.deferSurvey(planned.task.route,state,'Selected survey has no feasible executor step from the current context.');
-      } else if(!agency.summary().acquisition?.need || agency.summary().acquisition?.need?.optional) {
-        agency.deferCurrent(state,'Selected task has no feasible current executor step: '+planned.task.id);
+      } else if(stillActive&&(!agency.summary().acquisition?.need || agency.summary().acquisition?.need?.optional)) {
+        agency.deferCurrent(state,'Selected task has no feasible current executor step: '+planned.task.id,true,planned.method.id);
       }
       await cliCall(['wait','2']);continue;
     }
@@ -1461,9 +1625,15 @@ async function runEpisode(): Promise<void> {
       state=fresh;continue;
     }
     if(action.fields?.trainingSite&&!training?.validateAction(fresh,action)){state=fresh;continue;}
+    if(!freshObservedLocAction(fresh,action)){state=fresh;continue;}
     if(action.id.startsWith('goal-')&&!equipmentGoals.validate(fresh,action)){state=fresh;continue;}
     if(!validateMetal(fresh,action,state)||!validateBow(fresh,action,state)||!validateFishing(fresh,action,state)){state=fresh;continue;}
     state=fresh;
+    if(planned.task.sourceResource) {
+      try {const permitted=await agency.sourcePreflight(planned,action,state,{bank:bankAt,
+        route:p=>navigator!.assessApproach(position(state),p)});action={...permitted,waitTicks:permitted.waitTicks??action.waitTicks};}
+      catch(error){agency.blocked('Source-catalogue preflight refused: '+String(error));continue;}
+    }
     if(agency.prepareFunding(action,state))continue;
     const commandId=randomUUID();
     try { agency.begin(planned,action,state,commandId); }
@@ -1474,11 +1644,12 @@ async function runEpisode(): Promise<void> {
       const {next,result}=await executeAgencyAction(beforeActionState,action);
       agency.rememberExecution(commandId,result);
       const check=verifyActionOutcome(beforeActionState,next,action,result);
-      agency.record(commandId,next,verification(check));
-      if(check.verified)observeAgencyResult(beforeActionState,next,action);
+      const checked=agency.sourceOutcome(planned.task,beforeActionState,next,action,verification(check));
+      agency.record(commandId,next,checked);
+      if(checked.status==='verified')observeAgencyResult(beforeActionState,next,action);
       appendFileSync(experiencePath,JSON.stringify({at:new Date().toISOString(),commandId,goal:planned.decision.goal.id,
-        method:planned.method.id,action,outcome:verification(check)})+'\n');
-      console.log(JSON.stringify({agency:'step',commandId,goal:planned.decision.goal.id,supportGoal:planned.decision.step.supportGoalId,method:planned.method.id,action:action.type,outcome:verification(check)}));
+        method:planned.method.id,action,outcome:checked})+'\n');
+      console.log(JSON.stringify({agency:'step',commandId,goal:planned.decision.goal.id,supportGoal:planned.decision.step.supportGoalId,method:planned.method.id,action:action.type,outcome:checked}));
       const watchdogTripped=agency.checkProgress(next);
       state=next;
       if(watchdogTripped)continue;
@@ -1493,16 +1664,31 @@ async function runEpisode(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  checkWorkerStart(character);
   const releaseController = acquireController(resolve(dataDir, 'controller.lock'));
   try {
   peerMarket = new PeerMarket(resolve(root,'data/shared/market.sqlite'),character,gearCatalog,()=>Date.now(),process.env.CLAWSCAPE_SERVER??'https://clawscape.xyz');
   if (['clawscout', 'stinger', 'coincrafter', 'astra', 'featherer'].includes(character)) {
-    training = new TrainingDiscovery(resolve(dataDir, 'training-knowledge.json'), character, loadCatalog(), build === 'ranged-magic', false);
+    training = new TrainingDiscovery(resolve(dataDir, 'training-knowledge.json'), character, loadCatalog(), build === 'ranged-magic', false, Date.now, {
+      root, gearOptions:(s,skill)=>{
+        const slots:Record<string,number>={melee:3,bow:3,body:4,shield:5,legs:7,hands:9};
+        const owned=[...(s.inventory??[]),...(s.equipment??[])];
+        const options=gearCatalog.items.filter(g=>owned.some(i=>i.id===g.id)&&slots[g.family]!==undefined&&!g.tool)
+          .filter(g=>skill==='ranged'?g.family!=='melee':g.family!=='bow')
+          .map(g=>({id:g.id,slot:slots[g.family],name:g.name,allowed:usable(g,s),reason:'Existing reviewed gear requirements; rechecked before each experimental equip.'}));
+        if(skill==='ranged')for(const i of owned){
+          const rank=arrowRank(String(i.name));if(rank>0)options.push({id:i.id,slot:13,name:i.name,
+            allowed:rank<=bowArrowCap(String(s.combatStyle?.weaponName??''))&&Number(i.count)>=15,
+            reason:'Existing finished-arrow/bow compatibility plus carried reserve; not a new item definition.'});
+        }
+        return options;
+      }
+    });
   }
   const policyPath=resolve(dataDir,'agency-policy.json');
   const policy=existsSync(policyPath)?JSON.parse(readFileSync(policyPath,'utf8')):{};
   agency = new LiveAgency(resolve(dataDir,'agency-v2.json'), {agent:character,world:process.env.CLAWSCAPE_SERVER??'clawscape',revision:gearCatalog.namespace}, {
-    policy,
+    policy, sourceCatalogueRoot:root,
      supported:['food','ammunition','equipment','bank','combat','production','gathering','exploration','discovery','funds','prayer','acquisition'],
     developmentHint:build,
     dropLeads:loadDropIndex(existsSync(resolve(root,'data/shared/drop-leads.json'))?resolve(root,'data/shared/drop-leads.json'):resolve(root,'knowledge/2004scape-drop-leads.json')),
@@ -1515,6 +1701,7 @@ async function main(): Promise<void> {
         position:site.points[0]!,confidence:'unverified' as const,evidence:site.source+'; source spawn is not proof of a drop'})),
     ],
     buildRules:loadBuildRules(resolve(dataDir,'build-rules.json'),{world:process.env.CLAWSCAPE_SERVER??'clawscape',revision:gearCatalog.namespace}),
+    executorRevision:process.env.CLAWSCAPE_EXECUTOR_REVISION,
     preferences:role==='economy'?{crafting:2,gathering:1}:role==='resource'?{gathering:2}:{combat:2},
     routes:Object.entries(WORLD_ROUTES).map(([id,p])=>({id,...p,level:0,evidence:'bundled route lead; arrival not yet personally verified'})),
   });
@@ -1534,7 +1721,7 @@ async function main(): Promise<void> {
       await Bun.sleep(retryInMs);
     }
     if (forever) await Bun.sleep(Math.max(1000, intervalMs));
-  } while (forever);
+  } while (forever && workerMode(character)!=='stopped');
   } finally { navigator?.close(); peerMarket?.close(); releaseController(); }
 }
 

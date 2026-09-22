@@ -37,6 +37,9 @@ export class Navigator {
     this.worker.onerror = event => { this.fatal = event.message; for (const p of this.pending.values()) p.reject(new Error(event.message)); this.pending.clear(); };
   }
   close() { this.worker?.terminate(); }
+  /** True only once collision data is available for a real movement decision.
+   * Callers may safely wait without creating a route intent while it is false. */
+  isReady() { return this.ready; }
   async prepare(timeoutMs=60_000) {
     const deadline=Date.now()+timeoutMs;
     while(!this.ready) {
@@ -85,8 +88,33 @@ export class Navigator {
       if (plan.unmappedTiles > 0) return { status: 'blocked', reason: 'unverified-collision-coverage' };
       let previous = from, cost = 0;
       for (const leg of plan.legs) { cost += distance(previous, leg.target); previous = leg.target; }
-      return { status: 'ready', cost, conditionalDoors: plan.legs.reduce((n: number, l: Leg) => n + l.doors.length, 0), hash: plan.hash };
+      const doors = plan.legs.flatMap((leg: Leg) => leg.doors);
+      return { status: 'ready', cost, conditionalDoors: doors.length, doors, hash: plan.hash };
     } catch (error) { return { status: 'blocked', reason: String(error) }; }
+  }
+  /**
+   * Return a bounded, collision-covered frontier when an exact destination is
+   * not presently reachable.  This is deliberately separate from `assess`:
+   * callers may walk to the returned endpoint to inspect newly visible doors,
+   * ladders, or entrances, but may never claim the requested destination was
+   * reached.  Unmapped collision coverage is not a frontier.
+   */
+  async assessFrontier(from: Tile, to: Tile, timeoutMs=15_000) {
+    if (this.fatal) return { status: 'blocked' as const, reason: this.fatal };
+    if (!this.ready) return Date.now()-this.startupAt>60_000
+      ? { status: 'blocked' as const, reason: 'map-initialization-timeout' }
+      : { status: 'loading-map' as const };
+    if (from.level !== to.level) return { status: 'blocked' as const, reason: 'transition-required' };
+    try {
+      const plan = await this.plan(from, to, timeoutMs);
+      const destination = plan.legs?.at(-1)?.target as Tile | undefined;
+      if (!plan.partial || !destination || distance(destination, from) === 0)
+        return { status: 'blocked' as const, reason: 'no-new-partial-frontier' };
+      if (plan.unmappedTiles > 0)
+        return { status: 'blocked' as const, reason: 'unverified-collision-coverage' };
+      return { status: 'frontier' as const, destination, target: to, hash: plan.hash,
+        reason: 'collision-covered partial route; inspect the newly observed frontier before replanning' };
+    } catch (error) { return { status: 'blocked' as const, reason: String(error) }; }
   }
   /** A survey visits an observation side, not an object's impassable footprint.
    * Each candidate still passes the exact collision/coverage checks. No partial path
@@ -193,6 +221,7 @@ export class Navigator {
     const leg = this.legs[0];
     if (!leg) return this.block(state, to, 'empty-route');
     try {
+      let unconfirmedDoor = false;
       // Open only live ordinary doors on an edge required by this leg.
       for (const door of leg.doors) {
         const loc = state.nearbyLocs?.find((l: any) => l.level === door.level && l.x === door.x && l.z === door.z && l.reachable && /^(gate|door|large door)$/i.test(l.name) && l.optionsWithIndex?.some((o: any) => /^open$/i.test(o.text)));
@@ -207,9 +236,12 @@ export class Navigator {
           if (!current || !current.optionsWithIndex?.some((o: any) => /^open$/i.test(o.text))) { opened = true; break; }
         }
         if (!opened) {
-          this.doors.push({ door, until: Date.now() + 60_000 }); this.legs = []; this.expected = position(state);
-          if (++this.recoveries > 2) return this.block(state, to, 'door-retry-budget');
-          return this.record('replanning', state, { reason: 'door-did-not-open', movementDispatched:false });
+          // Some server objects retain an Open option after their collision
+          // state changes. The option list alone is therefore not sufficient
+          // evidence that the gate stayed closed. Try this already planned,
+          // bounded leg once; observed displacement proves passage, while a
+          // stationary result quarantines this route as before.
+          unconfirmedDoor = true;
         }
       }
       await this.dispatch('walkTo', { x: leg.target.x, z: leg.target.z, running: true });
@@ -224,7 +256,7 @@ export class Navigator {
           return this.record(distance(current, to) === 0 ? 'arrived' : 'progress', state, {movementDispatched:true, completedWaypoint:leg.target});
         }
         stationary = distance(previous, current) === 0 ? stationary + 2 : 0;
-        if (stationary >= 6) return this.block(state, to, 'no-progress',true);
+        if (stationary >= 6) return this.block(state, to, unconfirmedDoor ? 'door-did-not-open' : 'no-progress',true);
         previous = current;
       }
       return this.block(state, to, 'leg-timeout',true);

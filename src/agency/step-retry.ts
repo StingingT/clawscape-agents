@@ -26,6 +26,13 @@ export function retryAllowed(v: Viability | undefined, at: number, context: stri
   return !v || v.state === 'viable' || (at >= v.at &&
     (at >= v.retryAt || context !== v.context || learningRevision > v.learningRevision));
 }
+/** After a few identical rejected/unknown attempts, a cooldown must lead to
+ * replanning rather than becoming an endless thirty-minute wait. This is not
+ * a permanent blacklist: a material context or knowledge revision permits a
+ * new bounded experiment. */
+export function retryExhausted(v: Viability | undefined, context: string, learningRevision: number): boolean {
+  return !!v && v.state!=='viable' && v.attempts>=3 && v.context===context && learningRevision<=v.learningRevision;
+}
 export function recordViability(old: Viability | undefined, status: 'verified' | 'rejected' | 'interrupted',
   at: number, context: string, learningRevision: number, evidence: string[], reason: string): Viability {
   const attempts = (old?.attempts ?? 0) + 1;

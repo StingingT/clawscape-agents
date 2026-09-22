@@ -1,0 +1,2 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {capture} from '../../src/team/process.ts';
+test('capture preserves subprocess stderr and command on failure',async()=>{await assert.rejects(()=>capture({file:process.execPath,args:['-e',"console.error('HERDR_REAL_ERROR');process.exit(7)"],cwd:process.cwd()}),e=>{const s=String((e as Error).message);return s.includes('PROCESS_FAILED: 7')&&s.includes('HERDR_REAL_ERROR')&&s.includes('command:')});});

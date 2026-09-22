@@ -40,9 +40,13 @@ self.onmessage=({data})=>{
     const turns=map.findLongPath(from.plane,from.x,from.z,hint.x,hint.z,500)
       .map((p:any)=>({x:p.x,z:p.z,plane:p.level}));
     const endpoint:Tile=turns.at(-1)??from;
-    // An area hint may resolve to a reachable approach within TWO tiles. This
-    // is never proof that a bank/tree/service was reached or used.
-    if(distance(endpoint,hint)>2 || !turns.length&&distance(from,hint)>2)throw new Error('PARTIAL_PATH');
+    // A collision path can end at a verified frontier before the requested
+    // hint.  That is useful navigation evidence: move only to the endpoint,
+    // then let the fresh local observation discover a door, ladder, or other
+    // transition.  Do not call it arrival, and do not manufacture a direct
+    // route through the missing collision coverage.  With no movement at all
+    // there is no safe experiment, so retain the ordinary partial-path refusal.
+    if(!turns.length&&distance(from,hint)>2)throw new Error('PARTIAL_PATH');
     const points=expand(from,turns),doors=map.findDoorsAlongPath(points.map(p=>({...p,level:p.plane})));
     if(points.some(liveHazardAt))throw new Error('HAZARDOUS_ROUTE');
     const crossing=new Map<number,any[]>();

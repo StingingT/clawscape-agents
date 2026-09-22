@@ -12,7 +12,8 @@ async function withWorker(init:string,check:(nav:LiveNavigator,events:CollisionD
   mkdirSync(join(dir,'sdk'),{recursive:true});mkdirSync(join(dir,'server/vendor/rsmod-pathfinder'),{recursive:true});
   writeFileSync(join(dir,'sdk/collision-data.json'),'{}');
   writeFileSync(join(dir,'sdk/pathfinding.ts'),init);
-  writeFileSync(join(dir,'server/vendor/rsmod-pathfinder/rsmod-pathfinder.js'),'export function changeLoc() {}');
+  writeFileSync(join(dir,'server/vendor/rsmod-pathfinder/rsmod-pathfinder.js'),
+    'export const CollisionType={NORMAL:0};export function changeLoc(){};export function changeWall(){};export function canTravel(){return true;}');
   process.env.CLAWSCAPE_UPSTREAM=dir;
   const events:CollisionDiagnostic[]=[];
   const nav=new LiveNavigator(undefined,e=>events.push(e));
@@ -39,5 +40,19 @@ test('real worker initialization failure is reported before timeout without raw 
     expect(events.at(-1)?.status).toBe('failed');
     expect(JSON.stringify(events)).not.toContain('DO_NOT_PRINT_SECRET');
     expect(nav.isReady()).toBe(false);
+  });
+});
+
+test('real worker exposes a collision-verified partial path as a frontier, not a route error',async()=>{
+  await withWorker(`export async function initPathfinding(){};
+    export function findLongPath(){return [{x:3084,z:3200,level:0}]};
+    export function findDoorsAlongPath(){return []};`,async nav=>{
+    await nav.waitUntilReady(2_000);
+    const start:any={position:{x:3080,z:3200,plane:0},life_id:1};
+    const target:any={x:3090,z:3200,plane:0};
+    const first=await nav.next(start,target);
+    expect(first.intent).toEqual({operation:'move',destination:{x:3084,z:3200,plane:0}});
+    const frontier=await nav.next({...start,position:{x:3084,z:3200,plane:0}},target);
+    expect(frontier.blocked).toBe('FRONTIER_REACHED');expect(frontier.route?.approachOnly).toBe(true);
   });
 });

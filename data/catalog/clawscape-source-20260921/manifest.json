@@ -1,0 +1,59 @@
+{
+  "commit": "c3dcb8c718b0c1ac6a035bbf010da802921cd1f7",
+  "completeness": {
+    "acquisitionCoverage": "partial",
+    "itemRegistry": "complete",
+    "runtimeValidatedRoutes": 0
+  },
+  "generatorVersion": "source-catalogue-20260921.1",
+  "id": "clawscape-c3dcb8c718b0",
+  "integration": {
+    "activation": "candidate-only",
+    "legacyPlannerSafeWithoutAdapter": false,
+    "requiredCapabilities": [
+      "chop-observed-tree",
+      "cook-at-heat-source",
+      "craft-jewellery-at-furnace",
+      "defeat-and-loot",
+      "fill-container-at-water-source",
+      "fill-container-at-well",
+      "fire-at-pottery-oven",
+      "fish-observed-spot",
+      "identify-carried-herb",
+      "item-on-item",
+      "knife-on-log-select-product",
+      "mine-observed-rock",
+      "pickup",
+      "runecraft-at-matching-altar",
+      "shape-at-pottery-wheel",
+      "smelt-at-furnace",
+      "smith-at-anvil",
+      "spin-at-wheel",
+      "tanner-dialogue-select-product",
+      "trade-then-buy"
+    ],
+    "requiresSemanticsAdapter": true,
+    "semanticFeatures": [
+      "reusable-tools",
+      "conditional-consumption",
+      "variable-yields",
+      "access-alternatives",
+      "live-shop-prices",
+      "conditional-loot",
+      "per-branch-inventory-reservation",
+      "profile-qualified-evidence"
+    ]
+  },
+  "provenance": [
+    "p-8b9c55b9b80a87eaea"
+  ],
+  "registryHash": "sha256:358e01a1f2e3751e3d1f8c6704b2f248f8f160567a73eddfc53feeaaf49c7f77",
+  "repository": "uploaded-clawscape-server-source",
+  "schemaVersion": "existing-catalogue-plus-source-semantics-v1",
+  "serverConfirmed": false,
+  "sourceAdapterQualification": "qualified-against-supplied-source",
+  "sourceInputFingerprint": "sha256:58e873d5de5b1b7abfd4afe713d2528b5c7b96d0c63b68479087c48a76100d6c",
+  "unresolved": [
+    "See unresolved.jsonl and coverage.json; no claim of complete executable game knowledge."
+  ]
+}

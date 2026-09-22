@@ -1,0 +1,713 @@
+{
+  "evidence_type": "SYNTHETIC_ABSTRACT_TRIPS_NOT_REAL_GAME",
+  "generated_at": "2026-09-08T11:11:44.808Z",
+  "objective": "Fixed normalized progress and realized value minus nonmonetary scarcity",
+  "learning_frozen_in_evaluation": true,
+  "paid_api_calls": 0,
+  "curves": [
+    {
+      "training_episodes": 0,
+      "selected": "method-a",
+      "mean_saved_ms": 0,
+      "approximate_95_percent_interval_ms": [
+        0,
+        0
+      ],
+      "baseline": "scripted method-a; identical to deterministic planner with learning disabled in this fixture",
+      "pairs": [
+        {
+          "seed": 1000,
+          "baseline_ms": 303000,
+          "adaptive_ms": 303000,
+          "saved_ms": 0,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1001,
+          "baseline_ms": 300000,
+          "adaptive_ms": 300000,
+          "saved_ms": 0,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1002,
+          "baseline_ms": 303600,
+          "adaptive_ms": 303600,
+          "saved_ms": 0,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1003,
+          "baseline_ms": 300600,
+          "adaptive_ms": 300600,
+          "saved_ms": 0,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1004,
+          "baseline_ms": 304200,
+          "adaptive_ms": 304200,
+          "saved_ms": 0,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1005,
+          "baseline_ms": 301200,
+          "adaptive_ms": 301200,
+          "saved_ms": 0,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1006,
+          "baseline_ms": 304800,
+          "adaptive_ms": 304800,
+          "saved_ms": 0,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1007,
+          "baseline_ms": 301800,
+          "adaptive_ms": 301800,
+          "saved_ms": 0,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1008,
+          "baseline_ms": 305400,
+          "adaptive_ms": 305400,
+          "saved_ms": 0,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1009,
+          "baseline_ms": 302400,
+          "adaptive_ms": 302400,
+          "saved_ms": 0,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1010,
+          "baseline_ms": 306000,
+          "adaptive_ms": 306000,
+          "saved_ms": 0,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1011,
+          "baseline_ms": 303000,
+          "adaptive_ms": 303000,
+          "saved_ms": 0,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1012,
+          "baseline_ms": 300000,
+          "adaptive_ms": 300000,
+          "saved_ms": 0,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1013,
+          "baseline_ms": 303600,
+          "adaptive_ms": 303600,
+          "saved_ms": 0,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1014,
+          "baseline_ms": 300600,
+          "adaptive_ms": 300600,
+          "saved_ms": 0,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1015,
+          "baseline_ms": 304200,
+          "adaptive_ms": 304200,
+          "saved_ms": 0,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1016,
+          "baseline_ms": 301200,
+          "adaptive_ms": 301200,
+          "saved_ms": 0,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1017,
+          "baseline_ms": 304800,
+          "adaptive_ms": 304800,
+          "saved_ms": 0,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1018,
+          "baseline_ms": 301800,
+          "adaptive_ms": 301800,
+          "saved_ms": 0,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1019,
+          "baseline_ms": 305400,
+          "adaptive_ms": 305400,
+          "saved_ms": 0,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        }
+      ]
+    },
+    {
+      "training_episodes": 6,
+      "selected": "method-b",
+      "mean_saved_ms": 180000,
+      "approximate_95_percent_interval_ms": [
+        180000,
+        180000
+      ],
+      "baseline": "scripted method-a; identical to deterministic planner with learning disabled in this fixture",
+      "pairs": [
+        {
+          "seed": 1000,
+          "baseline_ms": 303000,
+          "adaptive_ms": 123000,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1001,
+          "baseline_ms": 300000,
+          "adaptive_ms": 120000,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1002,
+          "baseline_ms": 303600,
+          "adaptive_ms": 123600,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1003,
+          "baseline_ms": 300600,
+          "adaptive_ms": 120600,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1004,
+          "baseline_ms": 304200,
+          "adaptive_ms": 124200,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1005,
+          "baseline_ms": 301200,
+          "adaptive_ms": 121200,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1006,
+          "baseline_ms": 304800,
+          "adaptive_ms": 124800,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1007,
+          "baseline_ms": 301800,
+          "adaptive_ms": 121800,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1008,
+          "baseline_ms": 305400,
+          "adaptive_ms": 125400,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1009,
+          "baseline_ms": 302400,
+          "adaptive_ms": 122400,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1010,
+          "baseline_ms": 306000,
+          "adaptive_ms": 126000,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1011,
+          "baseline_ms": 303000,
+          "adaptive_ms": 123000,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1012,
+          "baseline_ms": 300000,
+          "adaptive_ms": 120000,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1013,
+          "baseline_ms": 303600,
+          "adaptive_ms": 123600,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1014,
+          "baseline_ms": 300600,
+          "adaptive_ms": 120600,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1015,
+          "baseline_ms": 304200,
+          "adaptive_ms": 124200,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1016,
+          "baseline_ms": 301200,
+          "adaptive_ms": 121200,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1017,
+          "baseline_ms": 304800,
+          "adaptive_ms": 124800,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1018,
+          "baseline_ms": 301800,
+          "adaptive_ms": 121800,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1019,
+          "baseline_ms": 305400,
+          "adaptive_ms": 125400,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        }
+      ]
+    },
+    {
+      "training_episodes": 20,
+      "selected": "method-b",
+      "mean_saved_ms": 180000,
+      "approximate_95_percent_interval_ms": [
+        180000,
+        180000
+      ],
+      "baseline": "scripted method-a; identical to deterministic planner with learning disabled in this fixture",
+      "pairs": [
+        {
+          "seed": 1000,
+          "baseline_ms": 303000,
+          "adaptive_ms": 123000,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1001,
+          "baseline_ms": 300000,
+          "adaptive_ms": 120000,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1002,
+          "baseline_ms": 303600,
+          "adaptive_ms": 123600,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1003,
+          "baseline_ms": 300600,
+          "adaptive_ms": 120600,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1004,
+          "baseline_ms": 304200,
+          "adaptive_ms": 124200,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1005,
+          "baseline_ms": 301200,
+          "adaptive_ms": 121200,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1006,
+          "baseline_ms": 304800,
+          "adaptive_ms": 124800,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1007,
+          "baseline_ms": 301800,
+          "adaptive_ms": 121800,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1008,
+          "baseline_ms": 305400,
+          "adaptive_ms": 125400,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1009,
+          "baseline_ms": 302400,
+          "adaptive_ms": 122400,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1010,
+          "baseline_ms": 306000,
+          "adaptive_ms": 126000,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1011,
+          "baseline_ms": 303000,
+          "adaptive_ms": 123000,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1012,
+          "baseline_ms": 300000,
+          "adaptive_ms": 120000,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1013,
+          "baseline_ms": 303600,
+          "adaptive_ms": 123600,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1014,
+          "baseline_ms": 300600,
+          "adaptive_ms": 120600,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1015,
+          "baseline_ms": 304200,
+          "adaptive_ms": 124200,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1016,
+          "baseline_ms": 301200,
+          "adaptive_ms": 121200,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1017,
+          "baseline_ms": 304800,
+          "adaptive_ms": 124800,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1018,
+          "baseline_ms": 301800,
+          "adaptive_ms": 121800,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1019,
+          "baseline_ms": 305400,
+          "adaptive_ms": 125400,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        }
+      ]
+    },
+    {
+      "training_episodes": 60,
+      "selected": "method-b",
+      "mean_saved_ms": 180000,
+      "approximate_95_percent_interval_ms": [
+        180000,
+        180000
+      ],
+      "baseline": "scripted method-a; identical to deterministic planner with learning disabled in this fixture",
+      "pairs": [
+        {
+          "seed": 1000,
+          "baseline_ms": 303000,
+          "adaptive_ms": 123000,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1001,
+          "baseline_ms": 300000,
+          "adaptive_ms": 120000,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1002,
+          "baseline_ms": 303600,
+          "adaptive_ms": 123600,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1003,
+          "baseline_ms": 300600,
+          "adaptive_ms": 120600,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1004,
+          "baseline_ms": 304200,
+          "adaptive_ms": 124200,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1005,
+          "baseline_ms": 301200,
+          "adaptive_ms": 121200,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1006,
+          "baseline_ms": 304800,
+          "adaptive_ms": 124800,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1007,
+          "baseline_ms": 301800,
+          "adaptive_ms": 121800,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1008,
+          "baseline_ms": 305400,
+          "adaptive_ms": 125400,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1009,
+          "baseline_ms": 302400,
+          "adaptive_ms": 122400,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1010,
+          "baseline_ms": 306000,
+          "adaptive_ms": 126000,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1011,
+          "baseline_ms": 303000,
+          "adaptive_ms": 123000,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1012,
+          "baseline_ms": 300000,
+          "adaptive_ms": 120000,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1013,
+          "baseline_ms": 303600,
+          "adaptive_ms": 123600,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1014,
+          "baseline_ms": 300600,
+          "adaptive_ms": 120600,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1015,
+          "baseline_ms": 304200,
+          "adaptive_ms": 124200,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1016,
+          "baseline_ms": 301200,
+          "adaptive_ms": 121200,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1017,
+          "baseline_ms": 304800,
+          "adaptive_ms": 124800,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1018,
+          "baseline_ms": 301800,
+          "adaptive_ms": 121800,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        },
+        {
+          "seed": 1019,
+          "baseline_ms": 305400,
+          "adaptive_ms": 125400,
+          "saved_ms": 180000,
+          "baseline_progress": 1000,
+          "adaptive_progress": 1000
+        }
+      ]
+    }
+  ],
+  "adaptation": {
+    "before": {
+      "method": "method-b",
+      "reason": "MEASURED_FULL_TRIP_RANK"
+    },
+    "after": {
+      "method": "method-a",
+      "reason": "MEASURED_FULL_TRIP_RANK"
+    },
+    "source": "Explicit additional fixture measurements; not online discovery"
+  },
+  "limitations": [
+    "Artificial times and fixed starting stats, not measured RuneScape gameplay.",
+    "Paired timing noise is identical and cancels; narrow intervals are an artifact of this fixture.",
+    "Does not validate encounter safety, combat, server parity, research, or self-sufficiency."
+  ]
+}

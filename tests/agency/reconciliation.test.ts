@@ -17,11 +17,12 @@ const state=(tick=100)=>({
   nearbyLocs:[{id:100,x:10,z:11,name:'Door',reachable:true,optionsWithIndex:[{opIndex:1,text:'Open'}]}],
 });
 
-test('incidental scenery is not promoted to a frontier while services/transitions remain eligible',()=>{
-  const route=(name:string,id='observed:1:1:1:0')=>({id,x:1,z:1,level:0,evidence:`own-object:1:10:${name}`});
-  for(const name of ['Tree','Dead tree','Oak','Henge','Spear wall','Bush','Plant'])assert.equal(meaningfulFrontierRoute(route(name)),false,name);
-  for(const name of ['Bank booth','Furnace','Door','Gate','Ladder','Cave entrance','Altar'])assert.equal(meaningfulFrontierRoute(route(name)),true,name);
+test('only observed traversal affordances are promoted to frontier routes',()=>{
+  const route=(evidence:string,id='observed:1:1:1:0')=>({id,x:1,z:1,level:0,evidence});
+  for(const evidence of ['own-object:1:10:Door','own-object:1:10:Bank booth','own-transition:1:10:use','own-transition:1:10:search'])assert.equal(meaningfulFrontierRoute(route(evidence)),false,evidence);
+  for(const verb of ['open','climb','climb-up','climb-down','enter','cross'])assert.equal(meaningfulFrontierRoute(route(`own-transition:1:10:${verb}`)),true,verb);
   assert.equal(meaningfulFrontierRoute({id:'wizardsTower',x:1,z:1,level:0,evidence:'bundled route lead'}),true);
+  assert.equal(meaningfulFrontierRoute({id:'advanced-seed',x:1,z:1,level:0,evidence:'documented lead; no encounter claimed before observation'}),false);
 });
 
 test('stable repeatable item-on-item activity can retire as interrupted only after a continuous quiet window',()=>{
